@@ -1,0 +1,8 @@
+.env
+ticker_settings.json
+data/
+output/
+dumps/
+logs/
+__pycache__/
+*.pyc

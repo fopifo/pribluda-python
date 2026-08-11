@@ -1,0 +1,8 @@
+{
+  "MTLR_pair": {
+    "symbol_a": "MTLRP",
+    "symbol_b": "MTLR",
+    "threshold_pct": 1.5,
+    "half_life_sec": 600
+  }
+}
