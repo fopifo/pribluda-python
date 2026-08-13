@@ -2,7 +2,8 @@
   "MTLR_pair": {
     "symbol_a": "MTLRP",
     "symbol_b": "MTLR",
-    "threshold_pct": 1.5,
+    "mode": "absolute_rub",
+    "threshold": 0.5,
     "half_life_sec": 600
   }
 }

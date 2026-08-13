@@ -5,6 +5,11 @@
 ВКЛАДКИ: окно разбито на вкладки (ttk.Notebook):
   🤖 Роботы   — прежний вид целиком (устойчивые/лонг/шорт/группы).
   ⚖️ Арбитраж — снимки PairMonitor.snapshot() из shared_state.arb_rows.
+                Каждая связка может быть в одном из двух режимов:
+                "ratio_pct" (отношение цен, отклонение в %) или
+                "absolute_rub" (разница цен, отклонение в рублях,
+                статус "🎯 ПРОСТРЕЛ" — это ХОРОШИЙ сигнал для таких
+                связок, не тревога).
   💰 Фандинг  — таблица ставок из shared_state.funding_rows.
   📰 Новости  — лента заголовков из shared_state.news_items.
 
@@ -94,21 +99,22 @@ STABLE_BORDER_COLOR = "#3a6ea5"
 COPY_FLASH_COLOR = "#fff2a8"
 NEW_FLASH_COLOR = "#cfe8ff"
 DYING_COLOR = "#999999"
+OPPORTUNITY_COLOR = "#1a7a1a"  # прострел — хороший сигнал, зелёный, не красный
 
 ARB_COLUMNS = ("pair", "ratio", "baseline", "deviation", "status")
 ARB_HEADERS = {
     "pair": "СВЯЗКА",
-    "ratio": "ТЕКУЩЕЕ",
+    "ratio": "ЗНАЧЕНИЕ",
     "baseline": "ОБЫЧНОЕ",
-    "deviation": "ОТКЛ. %",
+    "deviation": "ОТКЛОНЕНИЕ",
     "status": "СТАТУС",
 }
 ARB_COLUMN_WIDTHS = {
     "pair": 160,
     "ratio": 100,
     "baseline": 100,
-    "deviation": 90,
-    "status": 140,
+    "deviation": 100,
+    "status": 150,
 }
 
 FUNDING_COLUMNS = ("name", "rate")
@@ -245,7 +251,8 @@ class RobotDashboardWindow(tk.Tk):
         for col in ARB_COLUMNS:
             self.arb_tree.heading(col, text=ARB_HEADERS[col])
             self.arb_tree.column(col, width=ARB_COLUMN_WIDTHS[col], anchor="center")
-        self.arb_tree.tag_configure("triggered", foreground=SELL_COLOR)
+        self.arb_tree.tag_configure("triggered_warning", foreground=SELL_COLOR)
+        self.arb_tree.tag_configure("triggered_opportunity", foreground=OPPORTUNITY_COLOR)
         self.arb_tree.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _make_funding_tab(self, parent: tk.Frame) -> None:
@@ -394,22 +401,37 @@ class RobotDashboardWindow(tk.Tk):
     def _refresh_arb_tab(self) -> None:
         self.arb_tree.delete(*self.arb_tree.get_children())
         for row in self.shared_state.arb_rows:
-            ratio = row["current_ratio"]
+            value = row["current_value"]
             baseline = row["baseline"]
-            deviation = row["deviation_pct"]
+            deviation = row["deviation"]
+            mode = row["mode"]
+            is_opportunity = row["is_opportunity"]
 
-            ratio_str = f"{ratio:.4f}" if ratio is not None else "-"
-            baseline_str = f"{baseline:.4f}" if baseline is not None else "-"
-            deviation_str = f"{deviation:+.2f}%" if deviation is not None else "-"
-            status_str = "⚡ РАСХОЖДЕНИЕ" if row["triggered"] else "в норме"
+            if mode == "absolute_rub":
+                value_str = f"{value:.2f}₽" if value is not None else "-"
+                baseline_str = f"{baseline:.2f}₽" if baseline is not None else "-"
+                deviation_str = f"{deviation:+.2f}₽" if deviation is not None else "-"
+            else:
+                value_str = f"{value:.4f}" if value is not None else "-"
+                baseline_str = f"{baseline:.4f}" if baseline is not None else "-"
+                deviation_str = f"{deviation:+.2f}%" if deviation is not None else "-"
 
-            tags = ("triggered",) if row["triggered"] else ()
+            if row["triggered"]:
+                if is_opportunity:
+                    status_str = "🎯 ПРОСТРЕЛ"
+                    tags = ("triggered_opportunity",)
+                else:
+                    status_str = "⚡ РАСХОЖДЕНИЕ"
+                    tags = ("triggered_warning",)
+            else:
+                status_str = "в норме"
+                tags = ()
 
             self.arb_tree.insert(
                 "", "end",
                 values=(
                     f"{row['pair_name']} ({row['symbol_a']}/{row['symbol_b']})",
-                    ratio_str,
+                    value_str,
                     baseline_str,
                     deviation_str,
                     status_str,

@@ -14,7 +14,19 @@ SETTINGS_POLL_INTERVAL_SEC секунд перечитывает ticker_settings
 применяет разницу на лету — подробности см. в _apply_settings_diff.
 
 АРБИТРАЖ: тот же поток сделок кормит мониторы арбитражных связок
-(arbitrage/pair_monitor.py, связки — в arb_pairs.json).
+(arbitrage/pair_monitor.py, связки — в arb_pairs.json). У каждой связки
+свой режим:
+  - "ratio_pct" — отклонение отношения цен в процентах (нейтральный
+    сигнал "расхождение")
+  - "absolute_rub" — отклонение абсолютной разницы цен в рублях
+    (позитивный сигнал "прострел" — торговая возможность, не тревога)
+
+ВРЕМЕННО (пока не трогаем tg_bot/): в Telegram уходят только сигналы
+режима "ratio_pct" — существующий bot.py умеет только его (проценты).
+Для "absolute_rub" (MTLR/MTLRP) Telegram пока пропускается — иначе
+пришло бы число в рублях, подписанное как "%", что вводит в
+заблуждение. Как только bot.py будет обновлён под оба режима — снять
+это ограничение в _notify_arb.
 
 ФАНДИНГ / НОВОСТИ: отдельные независимые источники (tg_bot/funding.py,
 tg_bot/news_moex.py), заводятся своими отдельными экземплярами кэша.
@@ -22,21 +34,13 @@ tg_bot/news_moex.py), заводятся своими отдельными эк�
 GUI-ВКЛАДКИ: раз в INFO_TABS_INTERVAL_SEC секунд info_tabs_loop
 обновляет данные для вкладок арбитража/фандинга/новостей.
 
-TELEGRAM: РОБОТЫ больше НЕ отправляются в Telegram — сигнал приходит с
-задержкой (только когда серия закрылась), для скальпинга это
-бесполезно. Наблюдение за роботами — через GUI. АРБИТРАЖ по-прежнему
-уходит в Telegram — расхождение сохраняется в моменте.
+TELEGRAM: РОБОТЫ НЕ отправляются в Telegram (см. _notify_robot) —
+сигнал приходит с задержкой, только когда серия закрылась. Наблюдение
+за роботами — через GUI.
 
 ЛОГ: пишется в output/live_signals_<дата>.txt, новый файл каждый день.
 Хранятся только последние LOG_RETENTION_DAYS дней — старые файлы
-удаляются автоматически при запуске (rotate_old_logs), чтобы папка
-output/ не росла бесконечно. Живой лог даёт то, чего не восстановить
-из истории брокера: предупреждения watchdog о просрочке и точное время
-реального появления сигнала. Сами сигналы по роботам, если лог всё же
-понадобится за давно удалённый день, можно восстановить заново —
-прогнав run_detectors.py по сохранённой ленте сделок этого дня
-(save_trades.py сохраняет сырые сделки отдельно, ротация логов на них
-не влияет).
+удаляются автоматически при запуске (rotate_old_logs).
 
 СЕТЕВАЯ УСТОЙЧИВОСТЬ: get_access_token использует HTTP-сессию с
 автоматическими повторными попытками — на некоторых сетях изредка
@@ -188,15 +192,19 @@ def build_arb_monitors() -> tuple[list[PairMonitor], set[str]]:
     pairs = load_pairs()
     monitors = []
     for pair_name, cfg in pairs.items():
+        mode = cfg.get("mode", "ratio_pct")
+        threshold = cfg.get("threshold", cfg.get("threshold_pct", 1.5))
         monitors.append(PairMonitor(
             pair_name=pair_name,
             symbol_a=cfg["symbol_a"],
             symbol_b=cfg["symbol_b"],
-            threshold_pct=cfg.get("threshold_pct", 1.5),
+            mode=mode,
+            threshold=threshold,
             half_life_sec=cfg.get("half_life_sec", 600.0),
         ))
+        unit = "₽" if mode == "absolute_rub" else "%"
         print(f"Арбитраж: связка {pair_name} ({cfg['symbol_a']}/{cfg['symbol_b']}), "
-              f"порог {cfg.get('threshold_pct', 1.5)}%")
+              f"режим {mode}, порог {threshold}{unit}")
     return monitors, get_pair_symbols(pairs)
 
 
@@ -216,7 +224,7 @@ def rotate_old_logs() -> None:
         try:
             file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
-            continue  # имя файла не в ожидаемом формате — не трогаем
+            continue
         if file_date < cutoff:
             log_path.unlink()
             print(f"Удалён старый лог: {log_path.name}")
@@ -383,14 +391,22 @@ async def _notify_robot(signal, log_file) -> None:
 
 
 async def _notify_arb(signal, log_file) -> None:
-    log_line(log_file, f"⚡ РАСХОЖДЕНИЕ  {signal}")
+    log_line(log_file, f"⚡ {signal}")
+
+    if signal.mode != "ratio_pct":
+        # ВРЕМЕННО: bot.py (tg_bot/) пока умеет форматировать только
+        # проценты (ratio_pct) — отправка "absolute_rub" сигналов
+        # (прострелы MTLR/MTLRP) в Telegram отложена, пока bot.py не
+        # обновят под оба режима. См. докстринг модуля.
+        return
+
     await telegram_bot.send_arb_alert({
         "pair_name": signal.pair_name,
         "symbol_a": signal.symbol_a,
         "symbol_b": signal.symbol_b,
-        "ratio": signal.ratio,
+        "ratio": signal.value,
         "baseline": signal.baseline,
-        "deviation_pct": signal.deviation_pct,
+        "deviation_pct": signal.deviation,
     })
 
 
