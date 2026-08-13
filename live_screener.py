@@ -11,38 +11,40 @@ ticker_settings.json (см. ticker_settings.py) — редактируются �
 
 ЖИВОЕ ПРИМЕНЕНИЕ НАСТРОЕК: settings_watcher_loop раз в
 SETTINGS_POLL_INTERVAL_SEC секунд перечитывает ticker_settings.json и
-применяет разницу на лету (подписка/отписка, пересборка детекторов при
-смене ручных порогов) — подробности см. в _apply_settings_diff.
+применяет разницу на лету — подробности см. в _apply_settings_diff.
 
 АРБИТРАЖ: тот же поток сделок кормит мониторы арбитражных связок
-(arbitrage/pair_monitor.py, связки — в arb_pairs.json). Список тикеров
-для подписки в WebSocket — объединение тикеров детекторов роботов и
-тикеров, участвующих хоть в одной связке (build_subscription_symbols).
+(arbitrage/pair_monitor.py, связки — в arb_pairs.json).
 
 ФАНДИНГ / НОВОСТИ: отдельные независимые источники (tg_bot/funding.py,
-tg_bot/news_moex.py), заводятся своими отдельными экземплярами кэша, не
-общими с меню-ботом.
+tg_bot/news_moex.py), заводятся своими отдельными экземплярами кэша.
 
 GUI-ВКЛАДКИ: раз в INFO_TABS_INTERVAL_SEC секунд info_tabs_loop
-пересчитывает snapshot() каждой арбитражной связки и текущее содержимое
-кэшей фандинга/новостей, кладёт всё в shared_state.
+обновляет данные для вкладок арбитража/фандинга/новостей.
 
-TELEGRAM: сигналы отправляются через tg_bot/bot.py — если сеть/бот не
-работают, отправка молча пропускается/логируется, на остальную работу
-скринера это не влияет.
+TELEGRAM: РОБОТЫ больше НЕ отправляются в Telegram — сигнал приходит с
+задержкой (только когда серия закрылась), для скальпинга это
+бесполезно. Наблюдение за роботами — через GUI. АРБИТРАЖ по-прежнему
+уходит в Telegram — расхождение сохраняется в моменте.
+
+ЛОГ: пишется в output/live_signals_<дата>.txt, новый файл каждый день.
+Хранятся только последние LOG_RETENTION_DAYS дней — старые файлы
+удаляются автоматически при запуске (rotate_old_logs), чтобы папка
+output/ не росла бесконечно. Живой лог даёт то, чего не восстановить
+из истории брокера: предупреждения watchdog о просрочке и точное время
+реального появления сигнала. Сами сигналы по роботам, если лог всё же
+понадобится за давно удалённый день, можно восстановить заново —
+прогнав run_detectors.py по сохранённой ленте сделок этого дня
+(save_trades.py сохраняет сырые сделки отдельно, ротация логов на них
+не влияет).
 
 СЕТЕВАЯ УСТОЙЧИВОСТЬ: get_access_token использует HTTP-сессию с
-автоматическими повторными попытками (тот же паттерн, что и в
-save_trades.py) — на некоторых сетях изредка рвётся TLS-соединение
-(SSLError: UNEXPECTED_EOF_WHILE_READING), это разовый сетевой сбой, а
-не проблема самого запроса, поэтому вместо падения с первого раза
-пробуем ещё несколько раз с небольшой паузой.
+автоматическими повторными попытками — на некоторых сетях изредка
+рвётся TLS-соединение, это разовый сетевой сбой, не проблема запроса.
 
 Помимо этого работает "сторож" (watchdog) — раз в WATCHDOG_INTERVAL_SEC
 секунд проверяет все активные серии по всем тикерам и предупреждает,
-если робот просрочил ожидаемый следующий удар. Все события пишутся
-ТОЛЬКО в файл output/live_signals_<дата>.txt — в консоль не выводятся,
-наблюдение идёт через GUI.
+если робот просрочил ожидаемый следующий удар.
 
 WebSocket и детекторы работают в ОТДЕЛЬНОМ ФОНОВОМ ПОТОКЕ, Tkinter-окно
 — в главном потоке (жёсткое требование самого Tkinter).
@@ -60,17 +62,12 @@ import os
 import sys
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 import websockets
-# ВАЖНО: websockets.exceptions не всегда доступен через простое
-# "import websockets" (зависит от версии библиотеки — есть версии с
-# ленивыми подмодулями). Импортируем ConnectionClosed явно, иначе при
-# попытке ОБРАБОТАТЬ разрыв соединения сам обработчик падает с
-# AttributeError, и вместо тихого переподключения роняется весь поток.
 from websockets.exceptions import ConnectionClosed
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
@@ -113,6 +110,7 @@ WATCHDOG_INTERVAL_SEC = 1
 DASHBOARD_INTERVAL_SEC = 1
 SETTINGS_POLL_INTERVAL_SEC = 5
 INFO_TABS_INTERVAL_SEC = 5
+LOG_RETENTION_DAYS = 14  # старые live_signals_*.txt удаляются автоматически
 
 
 class LiveState:
@@ -134,10 +132,6 @@ class LiveState:
 
 
 def _make_resilient_session() -> requests.Session:
-    """HTTP-сессия с автоматическими повторными попытками — на этой
-    сети изредка рвётся TLS-соединение (SSLError:
-    UNEXPECTED_EOF_WHILE_READING), это разовый сетевой сбой, а не
-    проблема самого запроса. Тот же паттерн, что и в save_trades.py."""
     session = requests.Session()
     retry = Retry(
         total=3,
@@ -210,8 +204,27 @@ def build_subscription_symbols(live_state: LiveState) -> set[str]:
     return set(live_state.detectors) | live_state.arb_symbols
 
 
+def rotate_old_logs() -> None:
+    """Удаляет live_signals_*.txt старше LOG_RETENTION_DAYS дней —
+    вызывается один раз при старте, чтобы папка output/ не росла
+    бесконечно за недели/месяцы работы."""
+    if not OUTPUT_DIR.exists():
+        return
+    cutoff = datetime.now(MOSCOW_TZ).date() - timedelta(days=LOG_RETENTION_DAYS)
+    for log_path in OUTPUT_DIR.glob("live_signals_*.txt"):
+        date_str = log_path.stem.replace("live_signals_", "")
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue  # имя файла не в ожидаемом формате — не трогаем
+        if file_date < cutoff:
+            log_path.unlink()
+            print(f"Удалён старый лог: {log_path.name}")
+
+
 def open_log_file():
     OUTPUT_DIR.mkdir(exist_ok=True)
+    rotate_old_logs()
     today = datetime.now(MOSCOW_TZ).date()
     log_path = OUTPUT_DIR / f"live_signals_{today}.txt"
     return log_path, open(log_path, "a", encoding="utf-8")
@@ -362,17 +375,11 @@ async def info_tabs_loop(
 
 
 async def _notify_robot(signal, log_file) -> None:
+    """Push-уведомление в Telegram намеренно убрано для сигналов по
+    роботам — сигнал приходит только когда серия ЗАКРЫЛАСЬ, то есть с
+    задержкой, часто когда робот уже неактивен. Актуальное наблюдение —
+    через GUI (вкладка "🤖 Роботы")."""
     log_line(log_file, f"НОВЫЙ  {signal}")
-    await telegram_bot.send_robot_alert({
-        "ticker": signal.symbol,
-        "direction": signal.side,
-        "pattern_type": "equal_volume",
-        "pattern_name": signal.detector_name,
-        "volume_lots": signal.qty_variants[0] if signal.qty_variants else 0,
-        "hits_count": signal.repeats,
-        "confidence": 1.0,
-        "avg_interval": signal.interval_avg,
-    })
 
 
 async def _notify_arb(signal, log_file) -> None:

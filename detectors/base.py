@@ -1,10 +1,10 @@
 """
 Приблуда на python — базовые классы для детекторов алгоритмов (роботов).
 
-Каждый конкретный детектор (робот-интервал, кэшбек, разнолот, змейка и т.д.)
-наследуется от Detector и реализует on_trade(). Движок подаёт детектору
-сделки по одной, по порядку времени, а детектор сам решает, когда пора
-сообщить о найденной серии — возвращая список объектов Signal.
+Каждый конкретный детектор наследуется от Detector и реализует
+on_trade(). Движок подаёт детектору сделки по одной, по порядку
+времени, а детектор сам решает, когда пора сообщить о найденной серии —
+возвращая список объектов Signal.
 """
 
 from abc import ABC, abstractmethod
@@ -18,22 +18,30 @@ class Signal:
 
     detector_name: str
     symbol: str
-    side: str               # "buy" или "sell"
-    qty_variants: list[int]  # объём(ы) лота в серии — робот может чередовать
+    side: str
+    qty_variants: list
     repeats: int
-    interval_avg: float     # средний интервал между сделками серии, сек
-    start_ts: float          # unix-время (сек) первой сделки серии
-    end_ts: float             # unix-время (сек) последней сделки серии
+    interval_avg: float
+    start_ts: float
+    end_ts: float
+    # Стандартное отклонение интервалов между сделками серии, в
+    # миллисекундах. None, если интервалов меньше двух (серия из 2
+    # сделок даёт только 1 интервал — дрожать ему не с чем сравнивать).
+    # Низкое значение — интервал держится очень ровно (похоже на чистый
+    # программный автомат). Высокое — тайминг "гуляет" (может быть
+    # имитация человеком/полу-ручным скриптом, а не чистый робот).
+    jitter_ms: float | None = None
 
     def __str__(self) -> str:
         start = datetime.fromtimestamp(self.start_ts, tz=timezone.utc)
         end = datetime.fromtimestamp(self.end_ts, tz=timezone.utc)
         duration = self.end_ts - self.start_ts
         qty_str = "-".join(str(q) for q in self.qty_variants)
+        jitter_str = f"джиттер={self.jitter_ms:.1f}мс" if self.jitter_ms is not None else "джиттер=н/д"
         return (
             f"[{self.detector_name}] {self.symbol} {self.side} "
             f"qty={qty_str} повторов={self.repeats} "
-            f"интервал~{self.interval_avg:.1f}с "
+            f"интервал~{self.interval_avg:.1f}с {jitter_str} "
             f"с {start:%H:%M:%S} по {end:%H:%M:%S} "
             f"(длилось {duration:.1f} сек)"
         )
@@ -49,18 +57,8 @@ class Detector(ABC):
         self.settings = settings
 
     @abstractmethod
-    def on_trade(self, trade: dict) -> list[Signal]:
-        """Обрабатывает одну сделку по порядку времени.
-
-        Возвращает список Signal — обычно пустой или из одного элемента,
-        но может быть больше одного, если этой же сделкой попутно закрылись
-        по таймауту другие, устаревшие параллельные серии.
-        """
+    def on_trade(self, trade: dict):
         raise NotImplementedError
 
-    def flush(self) -> list[Signal]:
-        """Вызывается в конце потока сделок — на случай, если несколько
-        серий ещё не закрылись явно (не было "разрыва"), но лента данных
-        кончилась. Возвращает список сигналов (может быть пустым).
-        """
+    def flush(self):
         return []

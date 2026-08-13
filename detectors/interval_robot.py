@@ -6,10 +6,7 @@
 интервала, задаются пресетом:
 
   - "loose" (широкий): любая сделка, попавшая в абсолютный диапазон
-    [min_interval, max_interval] от предыдущей, продлевает серию. У такой
-    серии нет узкого "ожидаемого" периода — только широкий диапазон,
-    поэтому раннего предупреждения о просрочке для неё не бывает, только
-    финальное закрытие по max_interval.
+    [min_interval, max_interval] от предыдущей, продлевает серию.
 
   - "strict" (чёткий, через interval_tolerance): первая пара сделок
     задаёт "эталонный" интервал для этой конкретной серии, а каждая
@@ -18,24 +15,26 @@
 
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
 
+ДЖИТТЕР: каждый Candidate копит полный список интервалов между
+сделками серии (не только последний) — при закрытии серии (_finalize)
+считаем по нему стандартное отклонение в миллисекундах и кладём в
+Signal.jitter_ms. Это только измерение постфактум — ни на _find_match,
+ни на _interval_fits, ни на любую другую логику продления/обрыва серии
+не влияет. Цель — числовая мера "насколько ровно бьёт робот", как
+дополнительный признак уверенности (низкий джиттер = больше похоже на
+чистый программный автомат), см. обсуждение в проекте.
+
 Для живого режима: on_trade() реагирует на приход сделки. check_overdue()
 вызывается по таймеру (watchdog), не привязанному к потоку сделок — но
 использует РОВНО ТЕ ЖЕ границы допуска, что и сам матчинг в
-_interval_fits, чтобы не "опережать" реальную логику детектора: сторож
-не может считать серию просроченной раньше, чем это сделал бы сам
-детектор при приходе гипотетической следующей сделки.
-
-Предупреждение о просрочке (warned) выдаётся ОДИН РАЗ на серию, а не при
-каждом вызове watchdog — иначе при WATCHDOG_INTERVAL_SEC=1 одна и та же
-просроченная серия печаталась бы каждую секунду вплоть до закрытия.
-Флаг сбрасывается, как только по серии приходит новая подходящая сделка
-(значит, "просрочка" была ложной тревогой — робот просто чуть задержался).
+_interval_fits, чтобы не "опережать" реальную логику детектора.
 
 Производительность: кандидаты индексируются по объёму (qty) для быстрого
 точного совпадения, плюс MAX_ACTIVE_PER_SIDE — предохранитель от
 неограниченного роста при низком пороге.
 """
 
+import statistics
 from datetime import datetime, timezone
 
 from .base import Detector, Signal
@@ -44,7 +43,10 @@ from .base import Detector, Signal
 class Candidate:
     """Одна потенциальная серия сделок одного робота, ещё не закрытая."""
 
-    __slots__ = ("qty_variants", "count", "start_ts", "last_ts", "last_interval", "warned")
+    __slots__ = (
+        "qty_variants", "count", "start_ts", "last_ts",
+        "last_interval", "intervals", "warned",
+    )
 
     def __init__(self, qty: int, ts: float):
         self.qty_variants: set[int] = {qty}
@@ -52,6 +54,7 @@ class Candidate:
         self.start_ts = ts
         self.last_ts = ts
         self.last_interval: float | None = None  # появится после 2-й сделки
+        self.intervals: list[float] = []  # полная история интервалов серии, для джиттера
         self.warned = False  # предупреждение о просрочке уже выдавалось?
 
 
@@ -81,6 +84,11 @@ class IntervalRobotDetector(Detector):
 
     def _finalize(self, side: str, candidate: Candidate) -> Signal:
         avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
+
+        jitter_ms = None
+        if len(candidate.intervals) >= 2:
+            jitter_ms = statistics.pstdev(candidate.intervals) * 1000
+
         return Signal(
             detector_name=self.name,
             symbol=self.symbol,
@@ -90,6 +98,7 @@ class IntervalRobotDetector(Detector):
             interval_avg=avg_interval,
             start_ts=candidate.start_ts,
             end_ts=candidate.last_ts,
+            jitter_ms=jitter_ms,
         )
 
     def _register(self, side: str, candidate: Candidate) -> None:
@@ -187,7 +196,9 @@ class IntervalRobotDetector(Detector):
         match = self._find_match(side, qty, ts)
 
         if match is not None:
-            match.last_interval = ts - match.last_ts
+            interval = ts - match.last_ts
+            match.intervals.append(interval)
+            match.last_interval = interval
             if qty not in match.qty_variants:
                 match.qty_variants.add(qty)
                 self._index_new_variant(side, match, qty)
@@ -206,25 +217,7 @@ class IntervalRobotDetector(Detector):
 
     def check_overdue(self, now_ts: float) -> tuple[list[Signal], list[str]]:
         """Проверка по таймеру (watchdog в живом режиме), не привязанная
-        к приходу новой сделки. Делает две вещи:
-
-        1. Окончательно закрывает серии, у которых пауза уже больше
-           max_interval — то же правило, что и _prune_dead.
-        2. Предупреждает о просрочке ТОЛЬКО для *_strict серий (где задан
-           interval_tolerance) — используя РОВНО ТУ ЖЕ границу допуска,
-           что и _interval_fits при матчинге новой сделки. Так сторож
-           физически не может "опередить" детектор: предупреждение
-           появляется точно в тот момент, когда гипотетическая новая
-           сделка уже не прошла бы проверку интервала, а не раньше.
-           Для *_loose серий такого раннего предупреждения нет — у них
-           нет узкого ожидаемого периода, только широкий диапазон, и
-           единственный корректный момент "просрочки" — max_interval,
-           что уже покрыто пунктом 1.
-
-        Предупреждение выдаётся ОДИН РАЗ на серию (candidate.warned),
-        а не при каждом вызове — иначе при частом watchdog одна и та же
-        просрочка печаталась бы бесконечно, пока серия не закроется.
-        """
+        к приходу новой сделки."""
         signals: list[Signal] = []
         warnings: list[str] = []
 
@@ -258,21 +251,12 @@ class IntervalRobotDetector(Detector):
 
     def get_active_snapshot(self, now_ts: float) -> list[dict]:
         """Текущий срез активных серий — для живой таблицы (dashboard).
-        Только читает состояние, ничего не меняет и не влияет на логику
-        детекции (на _find_match, _prune_dead и т.д. это никак не
-        воздействует).
-
-        "start_ts" в каждой строке — момент старта ЭТОЙ КОНКРЕТНОЙ серии,
-        не меняется, пока серия жива (задаётся один раз при создании
-        Candidate). GUI использует его как стабильный идентификатор
-        серии (вместе с symbol/side/preset) — чтобы отличать "та же
-        серия продолжается" от "появилась новая", и подсвечивать новые
-        и пропавшие серии между обновлениями таблицы."""
+        Только читает состояние, ничего не меняет."""
         rows: list[dict] = []
         for side, candidates in self.active.items():
             for candidate in candidates:
                 if candidate.count < 2:
-                    continue  # единичная сделка — ещё не серия, в таблице не нужна
+                    continue
 
                 if candidate.last_interval is not None:
                     expected_next_ts = candidate.last_ts + candidate.last_interval
