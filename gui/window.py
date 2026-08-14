@@ -4,12 +4,12 @@
 
 ВКЛАДКИ: окно разбито на вкладки (ttk.Notebook):
   🤖 Роботы   — прежний вид целиком (устойчивые/лонг/шорт/группы).
-  ⚖️ Арбитраж — снимки PairMonitor.snapshot() из shared_state.arb_rows.
-                Каждая связка может быть в одном из двух режимов:
-                "ratio_pct" (отношение цен, отклонение в %) или
-                "absolute_rub" (разница цен, отклонение в рублях,
-                статус "🎯 ПРОСТРЕЛ" — это ХОРОШИЙ сигнал для таких
-                связок, не тревога).
+  ⚖️ Арбитраж — снимки PairMonitor.snapshot() из shared_state.arb_rows:
+                реальные цены обеих ног, отклонение, и колонка "СИГНАЛ"
+                (🎯 ПРОСТРЕЛ / ⚡ РАСХОЖДЕНИЕ / 🔻 СХОЖДЕНИЕ) — держится
+                на экране DISPLAY_HOLD_SEC секунд после события (см.
+                arbitrage/pair_monitor.py), чтобы короткоживущий сигнал
+                не терялся между двумя опросами.
   💰 Фандинг  — таблица ставок из shared_state.funding_rows.
   📰 Новости  — лента заголовков из shared_state.news_items.
 
@@ -101,20 +101,20 @@ NEW_FLASH_COLOR = "#cfe8ff"
 DYING_COLOR = "#999999"
 OPPORTUNITY_COLOR = "#1a7a1a"  # прострел — хороший сигнал, зелёный, не красный
 
-ARB_COLUMNS = ("pair", "ratio", "baseline", "deviation", "status")
+ARB_COLUMNS = ("pair", "price_a", "price_b", "deviation", "signal")
 ARB_HEADERS = {
     "pair": "СВЯЗКА",
-    "ratio": "ЗНАЧЕНИЕ",
-    "baseline": "ОБЫЧНОЕ",
+    "price_a": "ЦЕНА A",
+    "price_b": "ЦЕНА B",
     "deviation": "ОТКЛОНЕНИЕ",
-    "status": "СТАТУС",
+    "signal": "СИГНАЛ",
 }
 ARB_COLUMN_WIDTHS = {
     "pair": 160,
-    "ratio": 100,
-    "baseline": 100,
+    "price_a": 90,
+    "price_b": 90,
     "deviation": 100,
-    "status": 150,
+    "signal": 150,
 }
 
 FUNDING_COLUMNS = ("name", "rate")
@@ -253,6 +253,7 @@ class RobotDashboardWindow(tk.Tk):
             self.arb_tree.column(col, width=ARB_COLUMN_WIDTHS[col], anchor="center")
         self.arb_tree.tag_configure("triggered_warning", foreground=SELL_COLOR)
         self.arb_tree.tag_configure("triggered_opportunity", foreground=OPPORTUNITY_COLOR)
+        self.arb_tree.tag_configure("converged", foreground="#666666")
         self.arb_tree.pack(fill="both", expand=True, padx=4, pady=4)
 
     def _make_funding_tab(self, parent: tk.Frame) -> None:
@@ -401,40 +402,38 @@ class RobotDashboardWindow(tk.Tk):
     def _refresh_arb_tab(self) -> None:
         self.arb_tree.delete(*self.arb_tree.get_children())
         for row in self.shared_state.arb_rows:
-            value = row["current_value"]
-            baseline = row["baseline"]
+            price_a = row["price_a"]
+            price_b = row["price_b"]
             deviation = row["deviation"]
             mode = row["mode"]
             is_opportunity = row["is_opportunity"]
 
+            price_a_str = f"{price_a:.2f}" if price_a is not None else "-"
+            price_b_str = f"{price_b:.2f}" if price_b is not None else "-"
             if mode == "absolute_rub":
-                value_str = f"{value:.2f}₽" if value is not None else "-"
-                baseline_str = f"{baseline:.2f}₽" if baseline is not None else "-"
                 deviation_str = f"{deviation:+.2f}₽" if deviation is not None else "-"
             else:
-                value_str = f"{value:.4f}" if value is not None else "-"
-                baseline_str = f"{baseline:.4f}" if baseline is not None else "-"
                 deviation_str = f"{deviation:+.2f}%" if deviation is not None else "-"
 
-            if row["triggered"]:
-                if is_opportunity:
-                    status_str = "🎯 ПРОСТРЕЛ"
-                    tags = ("triggered_opportunity",)
-                else:
-                    status_str = "⚡ РАСХОЖДЕНИЕ"
-                    tags = ("triggered_warning",)
+            recent = row["recent_event_kind"]
+            if recent == "prostrel":
+                signal_str, tags = "🎯 ПРОСТРЕЛ", ("triggered_opportunity",)
+            elif recent == "divergence":
+                signal_str, tags = "⚡ РАСХОЖДЕНИЕ", ("triggered_warning",)
+            elif recent == "convergence":
+                label = "🔻 СХОЖДЕНИЕ — выходи" if is_opportunity else "🔻 сошлось"
+                signal_str, tags = label, ("converged",)
             else:
-                status_str = "в норме"
-                tags = ()
+                signal_str, tags = "—", ()
 
             self.arb_tree.insert(
                 "", "end",
                 values=(
                     f"{row['pair_name']} ({row['symbol_a']}/{row['symbol_b']})",
-                    value_str,
-                    baseline_str,
+                    price_a_str,
+                    price_b_str,
                     deviation_str,
-                    status_str,
+                    signal_str,
                 ),
                 tags=tags,
             )

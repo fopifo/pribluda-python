@@ -1,9 +1,8 @@
 """
 Приблуда на python — универсальный детектор периодичности ("роботов").
 
-Серия сделок с одинаковой стороной (side), объёмом из небольшого набора
-вариантов, повторяющаяся с определённым интервалом. Два режима матчинга
-интервала, задаются пресетом:
+Серия сделок с одинаковой стороной (side), повторяющаяся с определённым
+интервалом. Три режима матчинга объёма/интервала, задаются пресетом:
 
   - "loose" (широкий): любая сделка, попавшая в абсолютный диапазон
     [min_interval, max_interval] от предыдущей, продлевает серию.
@@ -11,33 +10,55 @@
   - "strict" (чёткий, через interval_tolerance): первая пара сделок
     задаёт "эталонный" интервал для этой конкретной серии, а каждая
     следующая сделка должна укладываться в него ± interval_tolerance
-    от ПРЕДЫДУЩЕГО фактического интервала в этой же серии.
+    от ПРЕДЫДУЩЕГО фактического интервала в этой же серии. Объём при
+    этом должен совпадать (max_qty_variants=1).
+
+  - "TWAP" (ignore_qty=True): как strict по интервалу (обычно с более
+    жёстким interval_tolerance, например 0.05 вместо 0.1), но объём
+    ВООБЩЕ не участвует в матчинге — любая сделка нужной стороны с
+    подходящим интервалом продлевает серию, независимо от размера.
+    Это ловит паттерн "крупная заявка, нарезанная по времени на равные
+    интервалы, с разным объёмом каждый раз" (найдено на реальных логах
+    по PLZL и BELU — десятки "параллельных" сигналов с одинаковым
+    таймингом и разным объёмом, которые strict-режим дробил на
+    отдельные несвязанные серии из-за требования точного объёма).
+
+    Поскольку объём здесь не фильтрует случайные совпадения, вся
+    ответственность за отсев случайности ложится на ТОЧНОСТЬ ИНТЕРВАЛА
+    (interval_tolerance) и число повторов (min_repeats) — оба должны
+    быть строже, чем в обычном strict, иначе легко словить шум. Идея:
+    ни человек, ни случайное совпадение разных участников не могут
+    держать интервал в пределах нескольких процентов МНОГО раз подряд
+    — а чистый программный цикл может.
 
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
 
 ДЖИТТЕР: каждый Candidate копит полный список интервалов между
-сделками серии (не только последний) — при закрытии серии (_finalize)
-считаем по нему стандартное отклонение в миллисекундах и кладём в
-Signal.jitter_ms. Это только измерение постфактум — ни на _find_match,
-ни на _interval_fits, ни на любую другую логику продления/обрыва серии
-не влияет. Цель — числовая мера "насколько ровно бьёт робот", как
-дополнительный признак уверенности (низкий джиттер = больше похоже на
-чистый программный автомат), см. обсуждение в проекте.
+сделками серии — при закрытии серии считаем по нему стандартное
+отклонение в миллисекундах (Signal.jitter_ms). Только измерение
+постфактум, не влияет на матчинг/продление серии.
 
 Для живого режима: on_trade() реагирует на приход сделки. check_overdue()
 вызывается по таймеру (watchdog), не привязанному к потоку сделок — но
 использует РОВНО ТЕ ЖЕ границы допуска, что и сам матчинг в
 _interval_fits, чтобы не "опережать" реальную логику детектора.
 
-Производительность: кандидаты индексируются по объёму (qty) для быстрого
-точного совпадения, плюс MAX_ACTIVE_PER_SIDE — предохранитель от
-неограниченного роста при низком пороге.
+Производительность: для strict/loose кандидаты индексируются по объёму
+(qty) для быстрого точного совпадения. Для TWAP (ignore_qty=True) объём
+не индексируется — поиск линейный по активным сериям этой стороны, но
+это не проблема: MAX_ACTIVE_PER_SIDE всё равно ограничивает худший
+случай, а число одновременно живых серий на практике невелико.
 """
 
 import statistics
 from datetime import datetime, timezone
 
 from .base import Detector, Signal
+
+# Если у серии больше этого числа разных объёмов — в отображении/логе
+# показываем не полный список (может быть 20+ значений при TWAP), а
+# сводку "N разных объёмов, диапазон X–Y".
+MAX_QTY_VARIANTS_TO_LIST = 6
 
 
 class Candidate:
@@ -73,6 +94,7 @@ class IntervalRobotDetector(Detector):
         self.max_qty_variants = settings.get("max_qty_variants", 2)
         self.max_qty_ratio = settings.get("max_qty_ratio")
         self.interval_tolerance = settings.get("interval_tolerance")
+        self.ignore_qty = settings.get("ignore_qty", False)
 
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
@@ -103,6 +125,8 @@ class IntervalRobotDetector(Detector):
 
     def _register(self, side: str, candidate: Candidate) -> None:
         self.active.setdefault(side, []).append(candidate)
+        if self.ignore_qty:
+            return  # не индексируем по объёму — он не участвует в матчинге
         side_index = self.index.setdefault(side, {})
         for qty in candidate.qty_variants:
             side_index.setdefault(qty, []).append(candidate)
@@ -111,6 +135,8 @@ class IntervalRobotDetector(Detector):
         active_list = self.active.get(side)
         if active_list and candidate in active_list:
             active_list.remove(candidate)
+        if self.ignore_qty:
+            return
         side_index = self.index.get(side, {})
         for qty in candidate.qty_variants:
             bucket = side_index.get(qty)
@@ -120,6 +146,8 @@ class IntervalRobotDetector(Detector):
                     del side_index[qty]
 
     def _index_new_variant(self, side: str, candidate: Candidate, qty: int) -> None:
+        if self.ignore_qty:
+            return
         self.index.setdefault(side, {}).setdefault(qty, []).append(candidate)
 
     def _prune_dead(self, side: str, now_ts: float) -> list[Signal]:
@@ -163,6 +191,15 @@ class IntervalRobotDetector(Detector):
         return low <= interval <= high
 
     def _find_match(self, side: str, qty: int, ts: float) -> Candidate | None:
+        if self.ignore_qty:
+            # TWAP: объём не участвует — ищем любую активную серию этой
+            # стороны, к которой подходит интервал.
+            for candidate in self.active.get(side, []):
+                interval = ts - candidate.last_ts
+                if self._interval_fits(candidate, interval):
+                    return candidate
+            return None
+
         exact_candidates = self.index.get(side, {}).get(qty, [])
         for candidate in exact_candidates:
             interval = ts - candidate.last_ts

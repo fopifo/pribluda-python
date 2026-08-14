@@ -8,8 +8,7 @@
 раз отдельного столбца под сторону тут нет. Шрифт мельче, строки
 теснее — чтобы окно занимало на экране минимум места.
 
-Столбцы слева направо: ИНТ, ТИК, ОБ, СЛЕД, ПОВТ — именно такой
-порядок просили (он не совпадает с порядком в главном окне).
+Столбцы слева направо: СЛЕД, ТИК, ЛОТ, ИНТ, ПОВТ.
 
 ПОДСВЕТКА НОВЫХ/УМЕРШИХ СЕРИЙ — та же логика, что и в главном окне
 (gui/window.py, см. докстринг там): идентификатор серии — (тикер,
@@ -43,19 +42,19 @@ from gui.state import SharedState
 from sound import play_new_series_sound
 from ui_settings import load_ui_settings, save_ui_settings
 
-COLUMNS = ("interval", "symbol", "qty", "next", "repeats")
+COLUMNS = ("next", "symbol", "qty", "interval", "repeats")
 HEADERS = {
-    "interval": "ИНТ",
-    "symbol": "ТИК",
-    "qty": "ОБ",
     "next": "СЛЕД",
+    "symbol": "ТИК",
+    "qty": "ЛОТ",
+    "interval": "ИНТ",
     "repeats": "ПОВТ",
 }
 COLUMN_WIDTHS = {
-    "interval": 48,
+    "next": 52,
     "symbol": 55,
     "qty": 65,
-    "next": 52,
+    "interval": 48,
     "repeats": 42,
 }
 SYMBOL_COLUMN_INDEX = COLUMNS.index("symbol")
@@ -198,7 +197,7 @@ class MiniWindow(tk.Toplevel):
             self.tree.insert(
                 "",
                 "end",
-                values=(interval_str, row["symbol"], qty_str, next_str, row["repeats"]),
+                values=(next_str, row["symbol"], qty_str, interval_str, row["repeats"]),
                 tags=tags,
             )
 

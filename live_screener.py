@@ -19,20 +19,23 @@ SETTINGS_POLL_INTERVAL_SEC секунд перечитывает ticker_settings
   - "ratio_pct" — отклонение отношения цен в процентах (нейтральный
     сигнал "расхождение")
   - "absolute_rub" — отклонение абсолютной разницы цен в рублях
-    (позитивный сигнал "прострел" — торговая возможность, не тревога)
+    (позитивный сигнал "прострел" — торговая возможность, плюс
+    отдельный сигнал "схождение" — когда пора выходить из связки)
+
+info_tabs_loop передаёт now_ts в snapshot() — монитор связки помнит
+последнее событие ещё 30 секунд (DISPLAY_HOLD_SEC в pair_monitor.py),
+чтобы GUI не пропустил короткоживущий прострел между двумя опросами
+(опрос раз в INFO_TABS_INTERVAL_SEC секунд).
 
 ВРЕМЕННО (пока не трогаем tg_bot/): в Telegram уходят только сигналы
-режима "ratio_pct" — существующий bot.py умеет только его (проценты).
-Для "absolute_rub" (MTLR/MTLRP) Telegram пока пропускается — иначе
-пришло бы число в рублях, подписанное как "%", что вводит в
-заблуждение. Как только bot.py будет обновлён под оба режима — снять
-это ограничение в _notify_arb.
+режима "ratio_pct" вида "divergence" — существующий bot.py умеет
+форматировать только их (проценты). "Прострелы"/"схождения"
+(absolute_rub, MTLR/MTLRP) в Telegram пока не уходят — только в лог и
+GUI. Как только bot.py будет обновлён под оба режима — снять это
+ограничение в _notify_arb.
 
 ФАНДИНГ / НОВОСТИ: отдельные независимые источники (tg_bot/funding.py,
 tg_bot/news_moex.py), заводятся своими отдельными экземплярами кэша.
-
-GUI-ВКЛАДКИ: раз в INFO_TABS_INTERVAL_SEC секунд info_tabs_loop
-обновляет данные для вкладок арбитража/фандинга/новостей.
 
 TELEGRAM: РОБОТЫ НЕ отправляются в Telegram (см. _notify_robot) —
 сигнал приходит с задержкой, только когда серия закрылась. Наблюдение
@@ -353,7 +356,8 @@ async def info_tabs_loop(
     news_cache: NewsCache,
 ) -> None:
     while True:
-        shared_state.arb_rows = [m.snapshot() for m in live_state.arb_monitors]
+        now_ts = datetime.now().timestamp()
+        shared_state.arb_rows = [m.snapshot(now_ts) for m in live_state.arb_monitors]
 
         funding_rows = []
         for row in funding_cache.rows:
@@ -393,11 +397,11 @@ async def _notify_robot(signal, log_file) -> None:
 async def _notify_arb(signal, log_file) -> None:
     log_line(log_file, f"⚡ {signal}")
 
-    if signal.mode != "ratio_pct":
+    if signal.mode != "ratio_pct" or signal.kind != "divergence":
         # ВРЕМЕННО: bot.py (tg_bot/) пока умеет форматировать только
-        # проценты (ratio_pct) — отправка "absolute_rub" сигналов
-        # (прострелы MTLR/MTLRP) в Telegram отложена, пока bot.py не
-        # обновят под оба режима. См. докстринг модуля.
+        # "divergence" в режиме ratio_pct (проценты) — absolute_rub
+        # (прострелы/схождения MTLR/MTLRP) в Telegram пока не уходят,
+        # см. докстринг модуля.
         return
 
     await telegram_bot.send_arb_alert({

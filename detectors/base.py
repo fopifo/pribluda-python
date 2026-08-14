@@ -11,6 +11,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+# Если у серии больше этого числа разных объёмов — в строковом
+# представлении показываем сводку, а не полный список (актуально для
+# TWAP-серий, где объём каждый раз разный, список может быть 20+ штук).
+MAX_QTY_VARIANTS_TO_LIST = 6
+
 
 @dataclass
 class Signal:
@@ -25,22 +30,25 @@ class Signal:
     start_ts: float
     end_ts: float
     # Стандартное отклонение интервалов между сделками серии, в
-    # миллисекундах. None, если интервалов меньше двух (серия из 2
-    # сделок даёт только 1 интервал — дрожать ему не с чем сравнивать).
-    # Низкое значение — интервал держится очень ровно (похоже на чистый
-    # программный автомат). Высокое — тайминг "гуляет" (может быть
-    # имитация человеком/полу-ручным скриптом, а не чистый робот).
+    # миллисекундах. None, если интервалов меньше двух.
     jitter_ms: float | None = None
+
+    def _qty_str(self) -> str:
+        if len(self.qty_variants) <= MAX_QTY_VARIANTS_TO_LIST:
+            return "-".join(str(q) for q in self.qty_variants)
+        return (
+            f"{len(self.qty_variants)} разных ({min(self.qty_variants)}"
+            f"–{max(self.qty_variants)})"
+        )
 
     def __str__(self) -> str:
         start = datetime.fromtimestamp(self.start_ts, tz=timezone.utc)
         end = datetime.fromtimestamp(self.end_ts, tz=timezone.utc)
         duration = self.end_ts - self.start_ts
-        qty_str = "-".join(str(q) for q in self.qty_variants)
         jitter_str = f"джиттер={self.jitter_ms:.1f}мс" if self.jitter_ms is not None else "джиттер=н/д"
         return (
             f"[{self.detector_name}] {self.symbol} {self.side} "
-            f"qty={qty_str} повторов={self.repeats} "
+            f"qty={self._qty_str()} повторов={self.repeats} "
             f"интервал~{self.interval_avg:.1f}с {jitter_str} "
             f"с {start:%H:%M:%S} по {end:%H:%M:%S} "
             f"(длилось {duration:.1f} сек)"

@@ -1,14 +1,14 @@
 """
 Приблуда на python — автоматический полный дамп проекта.
 Рекурсивно обходит все файлы проекта (кроме исключённых папок/файлов),
-собирает их содержимое и сохраняет в dumps/ вместе со снимком описания.
+собирает их содержимое и сохраняет в dumps/.
+Больше не включает PROJECT_SUMMARY.md — только актуальный код.
 """
 
 from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-SUMMARY_FILE = BASE_DIR / "PROJECT_SUMMARY.md"
 DUMP_DIR = BASE_DIR / "dumps"
 MAX_DUMPS = 10
 
@@ -48,14 +48,6 @@ EXCLUDE_FILES = {
 TEXT_EXTENSIONS = {".py", ".json", ".md", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
 # ---------------------------------------------------------------------------
 
-def read_summary() -> str:
-    if not SUMMARY_FILE.exists():
-        return (
-            "(PROJECT_SUMMARY.md не найден — создайте рядом файл с кратким "
-            "описанием проекта и текущего прогресса)"
-        )
-    return SUMMARY_FILE.read_text(encoding="utf-8")
-
 def is_excluded_dir(path: Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in path.parts)
 
@@ -89,17 +81,13 @@ def read_file_safe(path: Path) -> str:
     except Exception as e:
         return f"(Ошибка чтения файла: {e})"
 
-def build_dump_text(summary_text: str) -> str:
+def build_dump_text() -> str:
     now = datetime.now()
     parts = [
         "=" * 70,
         "ПРИБЛУДА НА PYTHON — ПОЛНЫЙ ДАМП ПРОЕКТА",
         f"Сформирован: {now:%Y-%m-%d %H:%M:%S}",
         "=" * 70,
-        "",
-        "--- ОПИСАНИЕ ПРОЕКТА И ПРОГРЕСС ---",
-        "",
-        summary_text,
         "",
         "--- ИСХОДНЫЙ КОД (ВСЕ ФАЙЛЫ ПРОЕКТА) ---",
     ]
@@ -129,36 +117,13 @@ def main() -> None:
     DUMP_DIR.mkdir(exist_ok=True)
 
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    summary_text = read_summary()
-
-    project_files = collect_project_files()
-
-    # Диагностика
-    print("Файлы, попадающие в дамп:")
-    total_size = 0
-    for f in project_files:
-        try:
-            size = f.stat().st_size
-            total_size += size
-            print(f"  {f.relative_to(BASE_DIR)}  ({size} байт)")
-        except Exception:
-            print(f"  {f.relative_to(BASE_DIR)}  (ошибка получения размера)")
-    print(f"Общий размер: {total_size} байт (~{total_size/1024:.1f} КБ)\n")
-
     dump_path = DUMP_DIR / f"dump_{timestamp}.txt"
-    dump_text = build_dump_text(summary_text)
-    dump_path.write_text(dump_text, encoding="utf-8")
-
-    summary_snapshot_path = DUMP_DIR / f"summary_{timestamp}.md"
-    summary_snapshot_path.write_text(summary_text, encoding="utf-8")
+    dump_path.write_text(build_dump_text(), encoding="utf-8")
 
     rotate("dump_*.txt")
-    rotate("summary_*.md")
 
     print(f"Дамп сохранён: {dump_path}")
-    print(f"Снимок описания сохранён: {summary_snapshot_path}")
     print(f"Хранится дампов: {len(list(DUMP_DIR.glob('dump_*.txt')))} (максимум {MAX_DUMPS})")
-
 
 if __name__ == "__main__":
     main()
