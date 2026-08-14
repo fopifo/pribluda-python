@@ -1,10 +1,19 @@
 """
-Приблуда на python — сохранение ленты сделок в файл для офлайн-разработки
-детекторов (чтобы не дёргать API Алора при каждом тесте).
+Приблуда на python — сохранение ленты сделок за несколько торговых дней
+в файлы для офлайн-разработки детекторов.
+
+По умолчанию качает последние DAYS_TO_FETCH торговых дней (5 = текущая
+неделя). Уже скачанные файлы пропускаются, чтобы не тратить время и
+трафик на повторную загрузку.
+
+Использование:
+    python save_trades.py          # качает последние 5 торговых дней
+    python save_trades.py 3        # качает последние 3 торговых дня
 """
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,7 +23,7 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config import TRACKED_SYMBOLS
+from config import get_tracked_symbols
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_PATH = BASE_DIR / ".env"
@@ -31,9 +40,23 @@ BOARD = "TQBR"
 EXCHANGE = "MOEX"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 
-# Тикеры, для которых сохраняем ленту за последний торговый день.
-# Берём из config.py, чтобы не дублировать список в двух местах.
-SYMBOLS_TO_SAVE = TRACKED_SYMBOLS
+# Сколько торговых дней качать (по умолчанию 5, можно передать аргументом)
+DAYS_TO_FETCH = 5
+
+
+def get_trading_days(count: int) -> list[datetime]:
+    """Возвращает список последних count торговых дней (по МСК), от
+    самого старого к самому свежему. Выходные пропускаются."""
+    days = []
+    day = datetime.now(MOSCOW_TZ)
+    while len(days) < count:
+        # Идём назад от сегодняшнего дня
+        day -= timedelta(days=1)
+        if day.weekday() >= 5:
+            continue
+        days.append(day)
+    # Сортируем по возрастанию даты
+    return sorted(days)
 
 
 def make_session() -> requests.Session:
@@ -54,13 +77,6 @@ def get_access_token(session: requests.Session, refresh_token: str) -> str:
     response = session.post(OAUTH_URL, params={"token": refresh_token})
     response.raise_for_status()
     return response.json()["AccessToken"]
-
-
-def previous_trading_day(reference: datetime) -> datetime:
-    day = reference - timedelta(days=1)
-    while day.weekday() >= 5:
-        day -= timedelta(days=1)
-    return day
 
 
 def day_range_unix(day: datetime) -> tuple[int, int]:
@@ -124,11 +140,7 @@ def get_all_trades_for_day(
 
 
 def save_trades_to_file(symbol: str, day: datetime, trades: list[dict]) -> Path:
-    """Сохраняем ленту сделок в data/<symbol>_<дата>.json.
-
-    Сортируем по timestamp на всякий случай — Алор обычно и так отдаёт
-    сделки по порядку, но лучше не полагаться на это молча.
-    """
+    """Сохраняем ленту сделок в data/<symbol>_<дата>.json."""
     DATA_DIR.mkdir(exist_ok=True)
     trades_sorted = sorted(trades, key=lambda t: t["timestamp"])
 
@@ -142,6 +154,15 @@ def save_trades_to_file(symbol: str, day: datetime, trades: list[dict]) -> Path:
 
 
 def main() -> None:
+    # Определяем количество дней
+    global DAYS_TO_FETCH
+    if len(sys.argv) > 1:
+        try:
+            DAYS_TO_FETCH = int(sys.argv[1])
+        except ValueError:
+            print("Аргумент должен быть целым числом (количество дней).")
+            return
+
     if not REFRESH_TOKEN or REFRESH_TOKEN == PLACEHOLDER:
         print("Не найден настоящий ALOR_REFRESH_TOKEN.")
         print(f"Ищу файл .env здесь: {ENV_PATH}")
@@ -156,30 +177,45 @@ def main() -> None:
         print(f"Не удалось получить access-токен: {e}")
         return
 
-    target_day = previous_trading_day(datetime.now(MOSCOW_TZ))
-    date_from, date_to = day_range_unix(target_day)
-    print(f"Последний торговый день (по МСК): {target_day.date()}\n")
+    # Получаем список торговых дней
+    trading_days = get_trading_days(DAYS_TO_FETCH)
+    print(f"Будут скачаны данные за {len(trading_days)} торговых дней: "
+          f"{', '.join(d.date().isoformat() for d in trading_days)}\n")
 
-    for symbol in SYMBOLS_TO_SAVE:
-        print(f"Запрашиваю ленту сделок по {symbol}...")
-        try:
-            trades = get_all_trades_for_day(
-                session, access_token, symbol, date_from, date_to
-            )
-        except requests.exceptions.HTTPError as e:
-            print(f"  Алор вернул ошибку: {e}")
-            continue
-        except requests.exceptions.RequestException as e:
-            print(f"  Не удалось связаться с Алор: {e}")
-            continue
+    symbols = get_tracked_symbols()
+    print(f"Активных тикеров: {len(symbols)}\n")
 
-        if not trades:
-            print(f"  Сделок не найдено для {symbol} за {target_day.date()} — пропускаю.\n")
-            continue
+    for day in trading_days:
+        print(f"=== День {day.date()} ===")
+        date_from, date_to = day_range_unix(day)
 
-        filepath = save_trades_to_file(symbol, target_day, trades)
-        size_mb = filepath.stat().st_size / (1024 * 1024)
-        print(f"  Сохранено {len(trades)} сделок в {filepath} ({size_mb:.1f} МБ)\n")
+        for symbol in symbols:
+            filepath = DATA_DIR / f"{symbol}_{day.date()}.json"
+            if filepath.exists():
+                print(f"  {symbol}: файл уже есть, пропускаю.")
+                continue
+
+            print(f"Запрашиваю ленту сделок по {symbol}...")
+            try:
+                trades = get_all_trades_for_day(
+                    session, access_token, symbol, date_from, date_to
+                )
+            except requests.exceptions.HTTPError as e:
+                print(f"  Алор вернул ошибку: {e}")
+                continue
+            except requests.exceptions.RequestException as e:
+                print(f"  Не удалось связаться с Алор: {e}")
+                continue
+
+            if not trades:
+                print(f"  Сделок не найдено для {symbol} за {day.date()} — пропускаю.\n")
+                continue
+
+            saved_path = save_trades_to_file(symbol, day, trades)
+            size_mb = saved_path.stat().st_size / (1024 * 1024)
+            print(f"  Сохранено {len(trades)} сделок в {saved_path} ({size_mb:.1f} МБ)\n")
+
+    print("Готово. Все данные скачаны.")
 
 
 if __name__ == "__main__":
