@@ -1,9 +1,15 @@
 """
-Приблуда на python — выгрузка значимых завершённых сигналов из логов.
+Приблуда на python — выгрузка значимых завершённых сигналов из логов
+или исторических отчётов.
 
-Читает live_signals_*.txt в output/ (или указанные файлы), игнорирует
-предупреждения о просрочке, извлекает строки НОВЫЙ/ЗАКРЫТ и формирует
-компактный отчёт.
+Читает файлы сигналов в output/ (или указанные явно), игнорирует
+предупреждения о просрочке и служебные заголовки, извлекает строки
+НОВЫЙ/ЗАКРЫТ и формирует компактный отчёт.
+
+Поддерживаются два формата строк:
+  1. Живой лог: [HH:MM:SS] НОВЫЙ/ЗАКРЫТ [робот-интервал[...]] ...
+  2. Исторический отчёт: [робот-интервал[...]] ... (без времени в начале,
+     зато могут быть ведущие пробелы)
 
 Фильтры (можно менять в начале):
   MIN_REPEATS   — минимальное число повторов (по умолчанию 4)
@@ -15,7 +21,10 @@
 Запуск:
     python tools/analyze_signals.py [файл1 файл2 ...]
 
-Без аргументов читает все live_signals_*.txt в output/.
+Без аргументов ищет в output/ файлы live_signals_*.txt и signals_*.txt
+(включая signals_all_days_*.txt), выбирает последний из них по дате
+создания и анализирует его.
+
 Результат печатается в консоль и сохраняется в output/signals_report_*.txt.
 """
 
@@ -34,11 +43,23 @@ MAX_JITTER_MS = 150.0    # максимум джиттера в мс
 MAX_CV_PCT = 2.0         # максимум коэффициента вариации, %
 PRESET_FILTER = None     # например: "twap_strict" или "fast_strict"
 
-# Обновлённый паттерн: теперь поддерживает необязательное поле "стаб=...",
-# которое появилось в Signal.__str__ после расчёта stability_ratio.
-SIGNAL_PATTERN = re.compile(
-    r'^\[(?P<log_time>\d{2}:\d{2}:\d{2})\]\s+(?P<label>НОВЫЙ|ЗАКРЫТ)\s+'
+# Паттерн для строк с меткой времени в начале (живой лог)
+SIGNAL_PATTERN_WITH_TIME = re.compile(
+    r'^\s*\[(?P<log_time>\d{2}:\d{2}:\d{2})\]\s+(?P<label>НОВЫЙ|ЗАКРЫТ)\s+'
     r'\[робот-интервал\[(?P<preset>[^\]]+)\]\]\s+'
+    r'(?P<symbol>[A-Z0-9]+)\s+(?P<side>buy|sell)\s+'
+    r'qty=(?P<qty>[^ ]+)\s+повторов=(?P<repeats>\d+)\s+'
+    r'интервал~(?P<interval>[\d.]+)с\s+'
+    r'(?:джиттер=(?P<jitter>[\d.]+)мс\s+)?'
+    r'(?:стаб=(?P<stability>[\d.]+%)\s+)?'
+    r'с (?P<start_h>\d{2}):(?P<start_m>\d{2}):(?P<start_s>\d{2}) '
+    r'по (?P<end_h>\d{2}):(?P<end_m>\d{2}):(?P<end_s>\d{2}) '
+    r'\(длилось [\d.]+ сек\)$'
+)
+
+# Паттерн для строк без метки времени (исторический отчёт)
+SIGNAL_PATTERN_NO_TIME = re.compile(
+    r'^\s*\[робот-интервал\[(?P<preset>[^\]]+)\]\]\s+'
     r'(?P<symbol>[A-Z0-9]+)\s+(?P<side>buy|sell)\s+'
     r'qty=(?P<qty>[^ ]+)\s+повторов=(?P<repeats>\d+)\s+'
     r'интервал~(?P<interval>[\d.]+)с\s+'
@@ -74,7 +95,8 @@ def parse_time(h: str, m: str, s: str) -> float:
 
 
 def parse_signal_line(line: str) -> SignalRow | None:
-    m = SIGNAL_PATTERN.match(line)
+    # Сначала пробуем с меткой времени, потом без
+    m = SIGNAL_PATTERN_WITH_TIME.match(line) or SIGNAL_PATTERN_NO_TIME.match(line)
     if not m:
         return None
 
@@ -92,6 +114,19 @@ def parse_signal_line(line: str) -> SignalRow | None:
     )
 
 
+def find_latest_signal_file() -> Path | None:
+    """Ищем последний файл сигналов в output/ по времени создания."""
+    patterns = ["live_signals_*.txt", "signals_*.txt"]
+    candidates = []
+    for pattern in patterns:
+        candidates.extend(OUTPUT_DIR.glob(pattern))
+    if not candidates:
+        return None
+    # Сортируем по времени последнего изменения (сначала новые)
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    return candidates[0]
+
+
 def main() -> None:
     if len(sys.argv) > 1:
         files = [Path(arg) for arg in sys.argv[1:]]
@@ -99,10 +134,12 @@ def main() -> None:
         if not OUTPUT_DIR.exists():
             print(f"Папка {OUTPUT_DIR} не найдена. Укажите файлы явно.")
             return
-        files = sorted(OUTPUT_DIR.glob("live_signals_*.txt"))
-        if not files:
-            print("Нет файлов live_signals_*.txt в output/")
+        latest = find_latest_signal_file()
+        if latest is None:
+            print("В output/ нет файлов live_signals_*.txt или signals_*.txt")
             return
+        files = [latest]
+        print(f"Анализирую последний файл: {latest.name}")
 
     signals = []
     for file_path in files:
