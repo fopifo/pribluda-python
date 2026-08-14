@@ -14,7 +14,7 @@
     этом должен совпадать (max_qty_variants=1).
 
   - "TWAP" (ignore_qty=True): как strict по интервалу (обычно с более
-    жёстким interval_tolerance, например 0.05 вместо 0.1), но объём
+    жёстким interval_tolerance, например 0.03 вместо 0.1), но объём
     ВООБЩЕ не участвует в матчинге — любая сделка нужной стороны с
     подходящим интервалом продлевает серию, независимо от размера.
     Это ловит паттерн "крупная заявка, нарезанная по времени на равные
@@ -55,11 +55,6 @@ from datetime import datetime, timezone
 
 from .base import Detector, Signal
 
-# Если у серии больше этого числа разных объёмов — в отображении/логе
-# показываем не полный список (может быть 20+ значений при TWAP), а
-# сводку "N разных объёмов, диапазон X–Y".
-MAX_QTY_VARIANTS_TO_LIST = 6
-
 
 class Candidate:
     """Одна потенциальная серия сделок одного робота, ещё не закрытая."""
@@ -84,6 +79,7 @@ class IntervalRobotDetector(Detector):
 
     MAX_SERIES_LENGTH = 20      # после ~20 повторов считаем серию завершённой
     MAX_ACTIVE_PER_SIDE = 3000  # предохранитель от неограниченного роста
+    CLOSE_AFTER_MISSES = 2      # сколько пропущенных max_interval ждать до удаления
 
     def __init__(self, symbol: str, settings: dict):
         super().__init__(symbol, settings)
@@ -151,9 +147,12 @@ class IntervalRobotDetector(Detector):
         self.index.setdefault(side, {}).setdefault(qty, []).append(candidate)
 
     def _prune_dead(self, side: str, now_ts: float) -> list[Signal]:
+        """Закрывает серии, по которым пропущено CLOSE_AFTER_MISSES
+        интервалов max_interval (ожидаем второй пропуск, а не первый)."""
         signals: list[Signal] = []
+        threshold = self.max_interval * self.CLOSE_AFTER_MISSES
         for candidate in list(self.active.get(side, [])):
-            if now_ts - candidate.last_ts > self.max_interval:
+            if now_ts - candidate.last_ts > threshold:
                 if candidate.count >= self.min_repeats:
                     signals.append(self._finalize(side, candidate))
                 self._unregister(side, candidate)
@@ -253,19 +252,25 @@ class IntervalRobotDetector(Detector):
         return signals
 
     def check_overdue(self, now_ts: float) -> tuple[list[Signal], list[str]]:
-        """Проверка по таймеру (watchdog в живом режиме), не привязанная
-        к приходу новой сделки."""
+        """Проверка по таймеру (watchdog в живом режиме). Предупреждает
+        о просрочке при первом пропуске ожидаемого интервала, но удаляет
+        серию только после CLOSE_AFTER_MISSES пропущенных max_interval."""
         signals: list[Signal] = []
         warnings: list[str] = []
+        close_threshold = self.max_interval * self.CLOSE_AFTER_MISSES
 
         for side, candidates in list(self.active.items()):
             for candidate in list(candidates):
                 gap = now_ts - candidate.last_ts
 
-                if gap > self.max_interval:
+                if gap > close_threshold:
                     if candidate.count >= self.min_repeats:
                         signals.append(self._finalize(side, candidate))
                     self._unregister(side, candidate)
+                    continue
+
+                # Предупреждаем, только если серия уже дозрела до min_repeats.
+                if candidate.count < self.min_repeats:
                     continue
 
                 if self.interval_tolerance is not None and candidate.last_interval is not None:

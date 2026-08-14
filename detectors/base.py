@@ -11,11 +11,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-# Если у серии больше этого числа разных объёмов — в строковом
-# представлении показываем сводку, а не полный список (актуально для
-# TWAP-серий, где объём каждый раз разный, список может быть 20+ штук).
-MAX_QTY_VARIANTS_TO_LIST = 6
-
 
 @dataclass
 class Signal:
@@ -34,12 +29,9 @@ class Signal:
     jitter_ms: float | None = None
 
     def _qty_str(self) -> str:
-        if len(self.qty_variants) <= MAX_QTY_VARIANTS_TO_LIST:
-            return "-".join(str(q) for q in self.qty_variants)
-        return (
-            f"{len(self.qty_variants)} разных ({min(self.qty_variants)}"
-            f"–{max(self.qty_variants)})"
-        )
+        if len(self.qty_variants) == 1:
+            return str(self.qty_variants[0])
+        return f"{min(self.qty_variants)}-{max(self.qty_variants)}"
 
     def __str__(self) -> str:
         start = datetime.fromtimestamp(self.start_ts, tz=timezone.utc)

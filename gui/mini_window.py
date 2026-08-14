@@ -184,7 +184,12 @@ class MiniWindow(tk.Toplevel):
             interval_str = f"{interval:.0f}с" if interval is not None else "-"
             seconds = row["seconds_to_next"]
             next_str = f"{seconds:.0f}с" if seconds is not None else "-"
-            qty_str = "-".join(str(q) for q in row["qty_variants"])
+
+            qty_variants = row["qty_variants"]
+            if len(qty_variants) == 1:
+                qty_str = str(qty_variants[0])
+            else:
+                qty_str = f"{min(qty_variants)}-{max(qty_variants)}"
 
             key = _row_key(row)
             if key in dying_keys:

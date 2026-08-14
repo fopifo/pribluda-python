@@ -90,6 +90,7 @@ PRESET_LABELS = {
     "slow_strict": "медл",
     "fast_loose": "быстр.шир",
     "slow_loose": "медл.шир",
+    "twap_strict": "TWAP",
 }
 
 BUY_COLOR = "#1a7a1a"
@@ -370,7 +371,12 @@ class RobotDashboardWindow(tk.Tk):
     def _fill_tree(tree: ttk.Treeview, rows: list[dict], new_keys: set, dying_keys: set) -> None:
         tree.delete(*tree.get_children())
         for row in rows:
-            qty_str = "-".join(str(q) for q in row["qty_variants"])
+            qty_variants = row["qty_variants"]
+            if len(qty_variants) == 1:
+                qty_str = str(qty_variants[0])
+            else:
+                qty_str = f"{min(qty_variants)}-{max(qty_variants)}"
+
             interval = row["interval"]
             interval_str = f"{interval:.1f}с" if interval is not None else "-"
             seconds = row["seconds_to_next"]
