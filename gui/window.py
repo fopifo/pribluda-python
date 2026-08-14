@@ -3,7 +3,8 @@
 дополнительно ставить не нужно).
 
 ВКЛАДКИ: окно разбито на вкладки (ttk.Notebook):
-  🤖 Роботы   — прежний вид целиком (устойчивые/лонг/шорт/группы).
+  🤖 Роботы   — прежний вид целиком (устойчивые/лонг/шорт/группы) +
+                панель фильтров отображения (мин.повторы, джиттер, CV).
   ⚖️ Арбитраж — снимки PairMonitor.snapshot() из shared_state.arb_rows:
                 реальные цены обеих ног, отклонение, и колонка "СИГНАЛ"
                 (🎯 ПРОСТРЕЛ / ⚡ РАСХОЖДЕНИЕ / 🔻 СХОЖДЕНИЕ) — держится
@@ -219,10 +220,36 @@ class RobotDashboardWindow(tk.Tk):
         self.after(REFRESH_MS, self._refresh)
 
     def _make_robots_tab(self, parent: tk.Frame) -> None:
+        # Панель фильтров отображения
+        filter_frame = tk.Frame(parent)
+        filter_frame.pack(fill="x", padx=0, pady=(4, 4))
+
+        tk.Label(filter_frame, text="Мин.повт:").pack(side="left")
+        self.min_repeats_var = tk.IntVar(value=self.shared_state.min_repeats_show)
+        tk.Spinbox(filter_frame, from_=2, to=10, textvariable=self.min_repeats_var, width=4,
+                   command=self._update_filter_settings).pack(side="left", padx=(0, 8))
+
+        tk.Label(filter_frame, text="TWAP повт:").pack(side="left")
+        self.min_repeats_twap_var = tk.IntVar(value=self.shared_state.min_repeats_show_twap)
+        tk.Spinbox(filter_frame, from_=3, to=10, textvariable=self.min_repeats_twap_var, width=4,
+                   command=self._update_filter_settings).pack(side="left", padx=(0, 8))
+
+        tk.Label(filter_frame, text="Джиттер ≤ мс:").pack(side="left")
+        self.max_jitter_var = tk.DoubleVar(value=self.shared_state.max_jitter_ms)
+        tk.Spinbox(filter_frame, from_=10, to=2000, increment=10, textvariable=self.max_jitter_var,
+                   width=6, command=self._update_filter_settings).pack(side="left", padx=(0, 8))
+
+        tk.Label(filter_frame, text="CV ≤ %:").pack(side="left")
+        self.max_cv_var = tk.DoubleVar(value=self.shared_state.max_cv_pct)
+        tk.Spinbox(filter_frame, from_=0.1, to=10.0, increment=0.1, textvariable=self.max_cv_var,
+                   width=5, command=self._update_filter_settings).pack(side="left", padx=(0, 8))
+
+        # Устойчивые роботы
         stable_border = tk.Frame(parent, highlightbackground=STABLE_BORDER_COLOR, highlightthickness=2, bd=0)
         stable_border.pack(fill="x", padx=0, pady=(4, 4))
         self.stable_tree = self._make_tree(stable_border, height=6)
 
+        # Основные таблицы лонг/шорт/группы
         container = tk.Frame(parent)
         container.pack(fill="both", expand=True, padx=0, pady=(4, 4))
         container.grid_columnconfigure(0, weight=2)
@@ -246,6 +273,12 @@ class RobotDashboardWindow(tk.Tk):
         group_border = tk.Frame(right, highlightbackground=GROUP_BORDER_COLOR, highlightthickness=2, bd=0)
         group_border.pack(fill="both", expand=True)
         self.group_tree = self._make_tree(group_border, height=24)
+
+    def _update_filter_settings(self) -> None:
+        self.shared_state.min_repeats_show = self.min_repeats_var.get()
+        self.shared_state.min_repeats_show_twap = self.min_repeats_twap_var.get()
+        self.shared_state.max_jitter_ms = float(self.max_jitter_var.get())
+        self.shared_state.max_cv_pct = float(self.max_cv_var.get())
 
     def _make_arb_tab(self, parent: tk.Frame) -> None:
         self.arb_tree = ttk.Treeview(parent, columns=ARB_COLUMNS, show="headings", height=10)

@@ -27,6 +27,9 @@ class Signal:
     # Стандартное отклонение интервалов между сделками серии, в
     # миллисекундах. None, если интервалов меньше двух.
     jitter_ms: float | None = None
+    # Доля интервалов, попадающих в time_window_sec от медианы (0..1).
+    # None, если интервалов меньше двух или время окна не задано.
+    stability_ratio: float | None = None
 
     def _qty_str(self) -> str:
         if len(self.qty_variants) == 1:
@@ -38,10 +41,11 @@ class Signal:
         end = datetime.fromtimestamp(self.end_ts, tz=timezone.utc)
         duration = self.end_ts - self.start_ts
         jitter_str = f"джиттер={self.jitter_ms:.1f}мс" if self.jitter_ms is not None else "джиттер=н/д"
+        stability_str = f"стаб={self.stability_ratio:.0%}" if self.stability_ratio is not None else ""
         return (
             f"[{self.detector_name}] {self.symbol} {self.side} "
             f"qty={self._qty_str()} повторов={self.repeats} "
-            f"интервал~{self.interval_avg:.1f}с {jitter_str} "
+            f"интервал~{self.interval_avg:.1f}с {jitter_str} {stability_str} "
             f"с {start:%H:%M:%S} по {end:%H:%M:%S} "
             f"(длилось {duration:.1f} сек)"
         )

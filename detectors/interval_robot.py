@@ -11,7 +11,8 @@
     задаёт "эталонный" интервал для этой конкретной серии, а каждая
     следующая сделка должна укладываться в него ± interval_tolerance
     от ПРЕДЫДУЩЕГО фактического интервала в этой же серии. Объём при
-    этом должен совпадать (max_qty_variants=1).
+    этом должен совпадать (max_qty_variants=1), либо допускается
+    небольшая вариация (qty_tolerance_lots, если задана).
 
   - "TWAP" (ignore_qty=True): как strict по интервалу (обычно с более
     жёстким interval_tolerance, например 0.03 вместо 0.1), но объём
@@ -30,6 +31,15 @@
     ни человек, ни случайное совпадение разных участников не могут
     держать интервал в пределах нескольких процентов МНОГО раз подряд
     — а чистый программный цикл может.
+
+ДОПОЛНИТЕЛЬНО (перенято из старого скринера):
+  - qty_tolerance_lots — допуск объёма в лотах; если > 0, сделки с
+    разницей объёма в пределах этого допуска считаются одной серией.
+  - time_window_sec — окно от медианы для проверки интервала при
+    пропуске предыдущего сравнения, а также для расчёта stability_ratio.
+  - stability_ratio — доля интервалов, попавших в time_window_sec от
+    медианы. Позволяет оценить "ровность" серии даже при наличии
+    единичных выбросов.
 
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
 
@@ -91,6 +101,9 @@ class IntervalRobotDetector(Detector):
         self.max_qty_ratio = settings.get("max_qty_ratio")
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
+        # Новые параметры из старого скринера
+        self.qty_tolerance_lots = settings.get("qty_tolerance_lots", 0)
+        self.time_window_sec = settings.get("time_window_sec", 0.0)
 
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
@@ -107,6 +120,16 @@ class IntervalRobotDetector(Detector):
         if len(candidate.intervals) >= 2:
             jitter_ms = statistics.pstdev(candidate.intervals) * 1000
 
+        # Расчёт stability_ratio (доля интервалов в time_window_sec от медианы)
+        stability_ratio = None
+        if len(candidate.intervals) >= 2 and self.time_window_sec > 0:
+            median_interval = statistics.median(candidate.intervals)
+            good = sum(
+                1 for iv in candidate.intervals
+                if abs(iv - median_interval) <= self.time_window_sec
+            )
+            stability_ratio = good / len(candidate.intervals)
+
         return Signal(
             detector_name=self.name,
             symbol=self.symbol,
@@ -117,6 +140,7 @@ class IntervalRobotDetector(Detector):
             start_ts=candidate.start_ts,
             end_ts=candidate.last_ts,
             jitter_ms=jitter_ms,
+            stability_ratio=stability_ratio,
         )
 
     def _register(self, side: str, candidate: Candidate) -> None:
@@ -189,6 +213,17 @@ class IntervalRobotDetector(Detector):
         high = candidate.last_interval * (1 + self.interval_tolerance)
         return low <= interval <= high
 
+    def _interval_fits_median(self, candidate: Candidate, interval: float) -> bool:
+        """Проверяет интервал относительно медианы всех интервалов серии
+        с окном time_window_sec (абсолютное отклонение). Используется как
+        запасной вариант, когда _interval_fits не прошёл."""
+        if self.time_window_sec <= 0 or len(candidate.intervals) < 2:
+            return False
+        if interval < self.min_interval or interval > self.max_interval:
+            return False
+        median_interval = statistics.median(candidate.intervals)
+        return abs(interval - median_interval) <= self.time_window_sec
+
     def _find_match(self, side: str, qty: int, ts: float) -> Candidate | None:
         if self.ignore_qty:
             # TWAP: объём не участвует — ищем любую активную серию этой
@@ -197,14 +232,33 @@ class IntervalRobotDetector(Detector):
                 interval = ts - candidate.last_ts
                 if self._interval_fits(candidate, interval):
                     return candidate
+                if self._interval_fits_median(candidate, interval):
+                    return candidate
             return None
 
+        # Режимы с учётом объёма
+        if self.qty_tolerance_lots > 0:
+            # Допуск объёма в лотах: считаем близкие объёмы одной серией.
+            for candidate in self.active.get(side, []):
+                if any(abs(qty - existing_qty) <= self.qty_tolerance_lots
+                       for existing_qty in candidate.qty_variants):
+                    interval = ts - candidate.last_ts
+                    if self._interval_fits(candidate, interval):
+                        return candidate
+                    if self._interval_fits_median(candidate, interval):
+                        return candidate
+            return None
+
+        # Точное совпадение объёма: быстрый путь через индекс
         exact_candidates = self.index.get(side, {}).get(qty, [])
         for candidate in exact_candidates:
             interval = ts - candidate.last_ts
             if self._interval_fits(candidate, interval):
                 return candidate
+            if self._interval_fits_median(candidate, interval):
+                return candidate
 
+        # Loose-режим (несколько вариантов объёмов или max_qty_ratio)
         for candidate in self.active.get(side, []):
             if qty in candidate.qty_variants:
                 continue
@@ -212,7 +266,9 @@ class IntervalRobotDetector(Detector):
                 continue
             interval = ts - candidate.last_ts
             if not self._interval_fits(candidate, interval):
-                continue
+                # Попробуем медианное окно перед отказом
+                if not self._interval_fits_median(candidate, interval):
+                    continue
             if not self._qty_fits_loose(candidate, qty):
                 continue
             return candidate
@@ -306,6 +362,12 @@ class IntervalRobotDetector(Detector):
                 else:
                     seconds_to_next = None
 
+                # Считаем текущий джиттер для фильтрации по CV в GUI
+                if len(candidate.intervals) >= 2:
+                    jitter_ms = statistics.pstdev(candidate.intervals) * 1000
+                else:
+                    jitter_ms = None
+
                 rows.append({
                     "symbol": self.symbol,
                     "preset": self.preset_name,
@@ -315,6 +377,7 @@ class IntervalRobotDetector(Detector):
                     "repeats": candidate.count,
                     "seconds_to_next": seconds_to_next,
                     "start_ts": candidate.start_ts,
+                    "jitter_ms": jitter_ms,
                 })
         return rows
 

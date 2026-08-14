@@ -345,7 +345,14 @@ async def watchdog_loop(live_state: LiveState, log_file) -> None:
 async def dashboard_loop(live_state: LiveState, shared_state: SharedState) -> None:
     while True:
         now_ts = datetime.now().timestamp()
-        shared_state.rows = collect_rows(live_state.detectors, now_ts)
+        shared_state.rows = collect_rows(
+            live_state.detectors,
+            now_ts,
+            min_repeats_to_show=shared_state.min_repeats_show,
+            min_repeats_to_show_twap=shared_state.min_repeats_show_twap,
+            max_jitter_ms=shared_state.max_jitter_ms,
+            max_cv_pct=shared_state.max_cv_pct,
+        )
         await asyncio.sleep(DASHBOARD_INTERVAL_SEC)
 
 

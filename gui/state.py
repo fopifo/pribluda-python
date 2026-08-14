@@ -8,6 +8,9 @@
 текущее значение. Замена атрибута на новый объект — атомарная операция
 в Python (из-за GIL), отдельная блокировка для такого простого случая
 не нужна.
+
+Дополнительно хранит настройки отображения роботов, которые меняются
+из GUI без правки кода.
 """
 
 
@@ -15,8 +18,15 @@ class SharedState:
     def __init__(self):
         self.rows: list[dict] = []
         self.status: str = "запуск..."
+
         self.arb_rows: list[dict] = []       # снимки PairMonitor.snapshot()
         self.funding_rows: list[dict] = []   # {"name":..., "rate_str":...}
         self.funding_updated_at: str = ""
         self.news_items: list[dict] = []     # {"title":..., "time":..., "url":...}
         self.news_updated_at: str = ""
+
+        # Настройки фильтра отображения роботов (изменяются в GUI)
+        self.min_repeats_show: int = 3       # общий порог повторов
+        self.min_repeats_show_twap: int = 4  # порог для TWAP
+        self.max_jitter_ms: float = 150.0    # максимум джиттера, мс
+        self.max_cv_pct: float = 2.0         # максимум CV, %

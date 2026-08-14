@@ -34,6 +34,8 @@ MAX_JITTER_MS = 150.0    # максимум джиттера в мс
 MAX_CV_PCT = 2.0         # максимум коэффициента вариации, %
 PRESET_FILTER = None     # например: "twap_strict" или "fast_strict"
 
+# Обновлённый паттерн: теперь поддерживает необязательное поле "стаб=...",
+# которое появилось в Signal.__str__ после расчёта stability_ratio.
 SIGNAL_PATTERN = re.compile(
     r'^\[(?P<log_time>\d{2}:\d{2}:\d{2})\]\s+(?P<label>НОВЫЙ|ЗАКРЫТ)\s+'
     r'\[робот-интервал\[(?P<preset>[^\]]+)\]\]\s+'
@@ -41,6 +43,7 @@ SIGNAL_PATTERN = re.compile(
     r'qty=(?P<qty>[^ ]+)\s+повторов=(?P<repeats>\d+)\s+'
     r'интервал~(?P<interval>[\d.]+)с\s+'
     r'(?:джиттер=(?P<jitter>[\d.]+)мс\s+)?'
+    r'(?:стаб=(?P<stability>[\d.]+%)\s+)?'
     r'с (?P<start_h>\d{2}):(?P<start_m>\d{2}):(?P<start_s>\d{2}) '
     r'по (?P<end_h>\d{2}):(?P<end_m>\d{2}):(?P<end_s>\d{2}) '
     r'\(длилось [\d.]+ сек\)$'
