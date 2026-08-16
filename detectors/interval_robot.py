@@ -22,12 +22,12 @@
   интервалы, с разным объёмом каждый раз" (подтверждено на реальных
   логах: PLZL, BELU). Вся защита от случайных совпадений тут — на
   точности интервала (interval_tolerance строже, min_repeats выше).
-  ВАЖНО (fix best-fit): в режиме ignore_qty сделка отдаётся кандидату,
-  чей ритм подходит ЛУЧШЕ всех (минимальное относительное отклонение
-  интервала), а не первому попавшемуся — иначе один TWAP-поток
-  расщепляется на параллельные дубли (видно на недельном журнале:
-  3-4 серии с одинаковым интервалом и таймстампами, но разными
-  наборами объёма).
+  ОТКАТ BEST-FIT (по результатам A/B-прогона 2026-08-16): best-fit
+  (сделка уходит кандидату с минимальным отклонением интервала) дал
+  обратный эффект — дубли выросли в 3.8 раза, сигналы в 3.7 раза:
+  "справедливое" распределение сделок фрагментирует один поток на
+  несколько коротких серий. Возвращён first-fit (первый подходящий
+  кандидат), он нечаянно работает как "собиратель" длинных серий.
 ФИКС СКОРОСТИ: список active[side] всегда отсортирован по last_ts по
 возрастанию (новая серия дописывается в конец, продлённая —
 переставляется в конец). Тогда: (а) просроченные серии всегда в голове
@@ -210,30 +210,19 @@ class IntervalRobotDetector(Detector):
 
     def _find_match(self, side: str, qty: int, ts: float) -> Candidate | None:
         if self.ignore_qty:
-            # FIX (best-fit): сделка уходит кандидату, чей ритм подходит
-            # ЛУЧШЕ всех (минимальное относительное отклонение интервала),
-            # а не первому попавшемуся — иначе один TWAP-поток
-            # расщепляется на параллельные дубли.
-            # FIX (speed): идём с конца списка (самые свежие last_ts) и
-            # обрываемся, как только интервал старше max_interval —
-            # старше по списку только дальше, они не подойдут.
-            best_candidate = None
-            best_score = None
+            # ОТКАТ best-fit: first-fit (первый подходящий), но с
+            # фиксом скорости — идём с конца списка (самые свежие
+            # last_ts) и обрываемся, как только интервал старше
+            # max_interval: старше по списку только дальше, они
+            # не подойдут. First-fit по результатам A/B собирает
+            # длинные серии лучше, чем best-fit.
             for candidate in reversed(self.active.get(side, [])):
                 interval = ts - candidate.last_ts
                 if interval > self.max_interval:
                     break
-                if not self._interval_fits(candidate, interval):
-                    continue
-                if candidate.last_interval is None:
-                    score = (1, 0.0)   # ритм ещё не сложился — ниже приоритет
-                else:
-                    dev = abs(interval - candidate.last_interval) / candidate.last_interval
-                    score = (0, dev)
-                if best_score is None or score < best_score:
-                    best_score = score
-                    best_candidate = candidate
-            return best_candidate
+                if self._interval_fits(candidate, interval):
+                    return candidate
+            return None
 
         exact_candidates = self.index.get(side, {}).get(qty, [])
         for candidate in exact_candidates:
