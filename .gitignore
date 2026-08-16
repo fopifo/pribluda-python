@@ -1,5 +1,10 @@
 .env
 ticker_settings.json
+ticker_settings.json.bak
+watchlist.json
+ui_settings.json
+calc_settings.json
+*.bak
 data/
 output/
 dumps/

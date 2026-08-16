@@ -1,8 +1,7 @@
 """
 Приблуда на python — автоматический полный дамп проекта.
-Рекурсивно обходит все файлы проекта (кроме исключённых папок/файлов),
+Рекурсивно обходит все файлы (кроме исключённых папок/файлов),
 собирает их содержимое и сохраняет в dumps/.
-Больше не включает PROJECT_SUMMARY.md — только актуальный код.
 """
 
 from datetime import datetime
@@ -22,30 +21,26 @@ EXCLUDE_DIRS = {
     "venv",
     ".venv",
     "env",
-    "dumps",
-    "data",
-    "output",
+    "data",            # исторические ленты — могут быть очень большими
+    "output",          # логи и отчёты — тоже большие
+    "dumps",           # чтобы не дампить дампы рекурсивно
+    "logs",
     ".mypy_cache",
     ".pytest_cache",
     "node_modules",
 }
 
 EXCLUDE_FILES = {
-    ".env",
+    ".env",            # токены не должны утекать в дамп
     "*.pyc",
     ".DS_Store",
     "Thumbs.db",
-    # Документация / самодамп
-    "PROJECT_SUMMARY.md",
-    "README.md",
-    "make_dump.py",
-    # Разовые отладочные/исследовательские скрипты
-    "inspect_window.py",
-    "list_tqbr_shares.py",
-    "explore_alltrades_history.py",
+    "make_dump.py",    # сам скрипт дампа не нужен в дампе
 }
 
-TEXT_EXTENSIONS = {".py", ".json", ".md", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
+TEXT_EXTENSIONS = {
+    ".py", ".json", ".md", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml"
+}
 # ---------------------------------------------------------------------------
 
 def is_excluded_dir(path: Path) -> bool:
