@@ -10,7 +10,7 @@
 не нужна.
 
 Дополнительно хранит настройки отображения роботов, которые меняются
-из GUI без правки кода.
+из GUI без правки кода, и watchlist.
 """
 
 
@@ -30,3 +30,6 @@ class SharedState:
         self.min_repeats_show_twap: int = 4  # порог для TWAP
         self.max_jitter_ms: float = 150.0    # максимум джиттера, мс
         self.max_cv_pct: float = 2.0         # максимум CV, %
+
+        # Watchlist (множество тикеров)
+        self.watchlist: set[str] = set()     # тикеры, подсвечиваемые в GUI

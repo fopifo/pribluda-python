@@ -62,6 +62,7 @@ from gui.settings_window import SettingsWindow
 from gui.state import SharedState
 from sound import play_new_series_sound
 from ui_settings import load_ui_settings, save_ui_settings
+from watchlist import load_watchlist
 
 COLUMNS = ("symbol", "qty", "next", "repeats", "interval", "preset")
 HEADERS = {
@@ -102,6 +103,7 @@ COPY_FLASH_COLOR = "#fff2a8"
 NEW_FLASH_COLOR = "#cfe8ff"
 DYING_COLOR = "#999999"
 OPPORTUNITY_COLOR = "#1a7a1a"  # прострел — хороший сигнал, зелёный, не красный
+WATCHLIST_COLOR = "#e6a817"    # цвет для тикеров из watchlist
 
 ARB_COLUMNS = ("pair", "price_a", "price_b", "deviation", "signal")
 ARB_HEADERS = {
@@ -169,6 +171,9 @@ class RobotDashboardWindow(tk.Tk):
 
         self._prev_keys: set = set()
         self._prev_rows: dict = {}
+
+        # Загружаем watchlist в shared_state (для подсветки)
+        shared_state.watchlist = load_watchlist()
 
         top_frame = tk.Frame(self)
         top_frame.pack(fill="x", padx=8, pady=(8, 4))
@@ -396,12 +401,13 @@ class RobotDashboardWindow(tk.Tk):
         tree.tag_configure("sell", foreground=SELL_COLOR)
         tree.tag_configure("new_flash", background=NEW_FLASH_COLOR)
         tree.tag_configure("dying", foreground=DYING_COLOR)
+        tree.tag_configure("watchlist", foreground=WATCHLIST_COLOR)  # ⭐ тикер
         tree.bind("<Double-1>", lambda event, t=tree: _handle_symbol_copy(t, event))
         tree.pack(fill="both", expand=True, padx=2, pady=2)
         return tree
 
     @staticmethod
-    def _fill_tree(tree: ttk.Treeview, rows: list[dict], new_keys: set, dying_keys: set) -> None:
+    def _fill_tree(tree: ttk.Treeview, rows: list[dict], new_keys: set, dying_keys: set, watchlist: set[str]) -> None:
         tree.delete(*tree.get_children())
         for row in rows:
             qty_variants = row["qty_variants"]
@@ -423,6 +429,10 @@ class RobotDashboardWindow(tk.Tk):
                 tags = (row["side"], "new_flash")
             else:
                 tags = (row["side"],)
+
+            # Добавляем тег watchlist, если тикер в watchlist
+            if row["symbol"] in watchlist:
+                tags = tags + ("watchlist",)
 
             tree.insert(
                 "",
@@ -538,10 +548,10 @@ class RobotDashboardWindow(tk.Tk):
         )
         alive_stable_count = len([r for r in rows if r["repeats"] >= STABLE_REPEATS_THRESHOLD])
 
-        self._fill_tree(self.stable_tree, stable_rows, new_keys, dying_keys)
-        self._fill_tree(self.buy_tree, buy_rows, new_keys, dying_keys)
-        self._fill_tree(self.sell_tree, sell_rows, new_keys, dying_keys)
-        self._fill_tree(self.group_tree, grouped_rows, new_keys, dying_keys)
+        self._fill_tree(self.stable_tree, stable_rows, new_keys, dying_keys, self.shared_state.watchlist)
+        self._fill_tree(self.buy_tree, buy_rows, new_keys, dying_keys, self.shared_state.watchlist)
+        self._fill_tree(self.sell_tree, sell_rows, new_keys, dying_keys, self.shared_state.watchlist)
+        self._fill_tree(self.group_tree, grouped_rows, new_keys, dying_keys, self.shared_state.watchlist)
 
         self._refresh_arb_tab()
         self._refresh_funding_tab()

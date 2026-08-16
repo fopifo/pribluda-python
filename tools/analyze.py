@@ -6,7 +6,7 @@
 
 Автоматически находит последний signals_all_days_*.txt в output/,
 применяет фильтры по умолчанию и выводит двухуровневый агрегированный
-отчёт (сводка по тикерам/сторонам + детальные интервальные паттерны).
+отчёт + секцию «Возможные кратные интервалы».
 
 Если нужен детальный отчёт по каждой строке, используйте:
     python tools/analyze.py --detail
@@ -34,7 +34,7 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 
-# Паттерны для строк сигналов (с опциональным временем и ведущими пробелами)
+# Паттерны для строк сигналов
 SIGNAL_PATTERN_WITH_TIME = re.compile(
     r'^\s*\[(?P<log_time>\d{2}:\d{2}:\d{2})\]\s+(?P<label>НОВЫЙ|ЗАКРЫТ)\s+'
     r'\[робот-интервал\[(?P<preset>[^\]]+)\]\]\s+'
@@ -132,6 +132,20 @@ def weighted_avg_cv(signals: list[SignalRow]) -> float:
     return weighted_sum / total_weight if total_weight else 0.0
 
 
+def is_multiple_ratio(ratio: float, tolerance: float = 0.05) -> bool:
+    """Проверяет, близко ли отношение к целому числу (2, 3, 4) или 1/2, 1/3."""
+    # Проверяем прямую кратность (2.0, 3.0, 4.0)
+    for n in (2, 3, 4):
+        if abs(ratio - n) / n <= tolerance:
+            return True
+    # Проверяем обратную кратность (0.5, 0.333, 0.25)
+    for n in (2, 3, 4):
+        inv = 1.0 / n
+        if abs(ratio - inv) / inv <= tolerance:
+            return True
+    return False
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Универсальный анализатор сигналов")
     parser.add_argument("--input", type=str, help="Входной файл (по умолчанию последний signals_all_days_*.txt)")
@@ -146,7 +160,6 @@ def main() -> None:
     parser.add_argument("--interval-step", type=float, default=0.5, help="Шаг округления интервала для группировки, сек (по умолчанию 0.5)")
     args = parser.parse_args()
 
-    # По умолчанию агрегированный режим
     if not args.aggregate and not args.detail:
         args.aggregate = True
 
@@ -175,7 +188,6 @@ def main() -> None:
 
     print(f"Распознано сигналов: {len(signals)}")
 
-    # Фильтрация
     filtered = []
     for sig in signals:
         if sig.repeats < args.min_repeats:
@@ -219,8 +231,8 @@ def main() -> None:
         report_text = "\n".join(report_lines)
         output_name = f"signals_filtered_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.txt"
     else:
-        # Агрегированный отчёт (двухуровневый)
-        # Уровень 2: сводка по тикер/сторона/пресет
+        # Агрегированный отчёт (двухуровневый + кратные интервалы)
+        # Уровень 2
         summary_groups = defaultdict(list)
         for sig in filtered:
             key = (sig.preset, sig.symbol, sig.side)
@@ -246,7 +258,7 @@ def main() -> None:
 
         summary_rows.sort(key=lambda r: (r["avg_cv"], -r["total_repeats"]))
 
-        # Уровень 1: группы по интервалам
+        # Уровень 1 (все группы)
         interval_groups = defaultdict(list)
         step = args.interval_step
         for sig in filtered:
@@ -254,7 +266,7 @@ def main() -> None:
             key = (sig.preset, sig.symbol, sig.side, rounded_interval)
             interval_groups[key].append(sig)
 
-        interval_rows = []
+        all_interval_rows = []  # все группы до обрезки
         for (preset, symbol, side, interval), sigs in interval_groups.items():
             count = len(sigs)
             avg_cv = weighted_avg_cv(sigs)
@@ -264,7 +276,7 @@ def main() -> None:
             max_repeats = max(s.repeats for s in sigs)
             qty_min = min(parse_qty_range(s.qty_str)[0] for s in sigs)
             qty_max = max(parse_qty_range(s.qty_str)[1] for s in sigs)
-            interval_rows.append({
+            all_interval_rows.append({
                 "preset": preset,
                 "symbol": symbol,
                 "side": side,
@@ -279,13 +291,59 @@ def main() -> None:
                 "qty_str": f"{qty_min}-{qty_max}" if qty_min != qty_max else str(qty_min),
             })
 
-        interval_rows.sort(key=lambda r: (r["min_cv"] if r["min_cv"] is not None else 999, -r["total_repeats"]))
-        interval_rows = interval_rows[:args.top]
+        all_interval_rows.sort(key=lambda r: (r["min_cv"] if r["min_cv"] is not None else 999, -r["total_repeats"]))
+        top_interval_rows = all_interval_rows[:args.top]
 
-        # Формируем отчёт
+        # Поиск кратных интервалов по всем группам (до обрезки)
+        multiple_lines = []
+        # Группируем по тикеру/стороне/пресету и ищем кратные интервалы
+        groups_by_key = defaultdict(list)
+        for row in all_interval_rows:
+            key = (row["preset"], row["symbol"], row["side"])
+            groups_by_key[key].append(row)
+
+        for key, rows in groups_by_key.items():
+            preset, symbol, side = key
+            intervals = sorted([r["interval"] for r in rows])
+            # Для каждой пары
+            for i in range(len(intervals)):
+                for j in range(i + 1, len(intervals)):
+                    iv1 = intervals[i]
+                    iv2 = intervals[j]
+                    if iv1 <= 0 or iv2 <= 0:
+                        continue
+                    ratio = max(iv1, iv2) / min(iv1, iv2)
+                    if is_multiple_ratio(ratio):
+                        # Находим соответствующие строки
+                        row1 = next((r for r in rows if r["interval"] == iv1), None)
+                        row2 = next((r for r in rows if r["interval"] == iv2), None)
+                        if row1 and row2:
+                            multiple_lines.append({
+                                "preset": preset,
+                                "symbol": symbol,
+                                "side": side,
+                                "iv_small": min(iv1, iv2),
+                                "iv_large": max(iv1, iv2),
+                                "ratio": ratio,
+                            })
+
+        # Уникализируем (на случай дублей)
+        unique_multiples = []
+        seen = set()
+        for m in multiple_lines:
+            key = (m["preset"], m["symbol"], m["side"], m["iv_small"], m["iv_large"])
+            if key not in seen:
+                seen.add(key)
+                unique_multiples.append(m)
+
+        # Ограничим вывод
+        unique_multiples.sort(key=lambda x: (x["symbol"], x["iv_small"]))
+        top_multiples = unique_multiples[:50]  # максимум 50 строк
+
+        # Формируем итоговый отчёт
         report_lines = []
         report_lines.append("=" * 110)
-        report_lines.append("АГРЕГИРОВАННЫЙ ОТЧЁТ (двухуровневый)")
+        report_lines.append("АГРЕГИРОВАННЫЙ ОТЧЁТ (двухуровневый + кратные интервалы)")
         report_lines.append("=" * 110)
         report_lines.append("")
 
@@ -295,7 +353,7 @@ def main() -> None:
         header = (f"{'Пресет':<12} {'Тикер':<6} {'Стор':<5} {'Сигн.':>6} "
                   f"{'Сумм.повт':>10} {'Ср.CV%':>8} {'Ср.джит':>8} {'Объём':>14}")
         report_lines.append(header)
-        for r in summary_rows[:30]:  # ограничиваем вывод сводки
+        for r in summary_rows[:30]:
             report_lines.append(
                 f"{r['preset']:<12} {r['symbol']:<6} {r['side']:<5} {r['signals']:>6} "
                 f"{r['total_repeats']:>10} {r['avg_cv']:>8.2f} {r['avg_jitter']:>8.0f} {r['qty_str']:>14}"
@@ -305,20 +363,37 @@ def main() -> None:
         report_lines.append("")
         report_lines.append("")
 
-        # Уровень 1
-        report_lines.append(f"УРОВЕНЬ 1: ТОП-{len(interval_rows)} ПАТТЕРНОВ ПО ИНТЕРВАЛАМ")
+        # Уровень 1 (топ)
+        report_lines.append(f"УРОВЕНЬ 1: ТОП-{len(top_interval_rows)} ПАТТЕРНОВ ПО ИНТЕРВАЛАМ")
         report_lines.append("-" * 110)
         header = (f"{'Пресет':<12} {'Тикер':<6} {'Стор':<5} {'Интерв':>7} "
                   f"{'Сигн.':>6} {'Сумм.повт':>10} {'Ср.CV%':>7} {'Мин.CV%':>8} {'Ср.джит':>8} {'Объём':>14}")
         report_lines.append(header)
-        for r in interval_rows:
+        for r in top_interval_rows:
             min_cv_str = f"{r['min_cv']:.2f}" if r['min_cv'] is not None else "-"
             report_lines.append(
                 f"{r['preset']:<12} {r['symbol']:<6} {r['side']:<5} {r['interval']:>7.1f} "
                 f"{r['signals']:>6} {r['total_repeats']:>10} {r['avg_cv']:>7.2f} {min_cv_str:>8} {r['avg_jitter']:>8.0f} {r['qty_str']:>14}"
             )
         report_lines.append("-" * 110)
-        report_lines.append(f"Всего групп: {len(interval_rows)}")
+        report_lines.append(f"Всего групп: {len(top_interval_rows)}")
+        report_lines.append("")
+        report_lines.append("")
+
+        # Секция «Возможные кратные интервалы»
+        report_lines.append("ВОЗМОЖНЫЕ КРАТНЫЕ ИНТЕРВАЛЫ")
+        report_lines.append("-" * 110)
+        if top_multiples:
+            header = f"{'Пресет':<12} {'Тикер':<6} {'Стор':<5} {'Инт.мал':>8} {'Инт.боль':>8} {'Отнош.':>8}"
+            report_lines.append(header)
+            for m in top_multiples:
+                report_lines.append(
+                    f"{m['preset']:<12} {m['symbol']:<6} {m['side']:<5} "
+                    f"{m['iv_small']:>8.1f} {m['iv_large']:>8.1f} {m['ratio']:>8.2f}"
+                )
+        else:
+            report_lines.append("Кратных интервалов не обнаружено.")
+        report_lines.append("-" * 110)
         report_text = "\n".join(report_lines)
         output_name = f"aggregate_report_{datetime.now().strftime('%Y-%m-%d_%H%M%S')}.txt"
 

@@ -6,11 +6,15 @@
 единственный источник списка тикеров и ручных порогов для GUI и для
 живого скринера / батч-запуска по истории.
 
+Дополнительно управляет watchlist (приоритетными тикерами), который
+хранится в watchlist.json и подсвечивается в главном окне.
+
 Изменения сохраняются в файл СРАЗУ при каждом действии (добавление,
-удаление, переключение "активен", сохранение в диалоге редактирования).
-Но на уже запущенный live_screener.py они не влияют "на лету" — подписки
-на WebSocket и настройки детекторов читаются один раз при старте
-программы. Чтобы правки подействовали — нужно перезапустить программу.
+удаление, переключение "активен", переключение watchlist, сохранение в
+диалоге редактирования). Но на уже запущенный live_screener.py они не
+влияют "на лету" — подписки на WebSocket и настройки детекторов читаются
+один раз при старте программы. Чтобы правки подействовали — нужно
+перезапустить программу.
 
 Таблица не редактируется прямо в ячейках (в Tkinter это капризная
 штука без сторонних библиотек) — вместо этого двойной клик по строке
@@ -33,14 +37,16 @@ import tkinter as tk
 from tkinter import messagebox, ttk
 
 from ticker_settings import add_ticker, load_settings, remove_ticker, save_settings
+from watchlist import is_in_watchlist, load_watchlist, save_watchlist
 
-COLUMNS = ("symbol", "active", "min_qty", "min_interval", "min_repeats")
+COLUMNS = ("symbol", "active", "min_qty", "min_interval", "min_repeats", "watchlist")
 HEADERS = {
     "symbol": "ТИКЕР",
     "active": "СТАТУС",
     "min_qty": "МИН.ЛОТОВ",
     "min_interval": "МИН.СЕК",
     "min_repeats": "МИН.ПОВТ.",
+    "watchlist": "WATCHLIST",
 }
 COLUMN_WIDTHS = {
     "symbol": 65,
@@ -48,6 +54,7 @@ COLUMN_WIDTHS = {
     "min_qty": 80,
     "min_interval": 75,
     "min_repeats": 75,
+    "watchlist": 70,
 }
 
 
@@ -57,6 +64,10 @@ def _fmt_active(active: bool) -> str:
 
 def _fmt_optional(value, suffix: str = "") -> str:
     return "авто" if value is None else f"{value}{suffix}"
+
+
+def _fmt_watchlist(in_watchlist: bool) -> str:
+    return "⭐" if in_watchlist else ""
 
 
 class TickerEditDialog(tk.Toplevel):
@@ -73,6 +84,7 @@ class TickerEditDialog(tk.Toplevel):
         self.grab_set()  # модальный — не даём тыкать в таблицу, пока диалог открыт
 
         self.active_var = tk.BooleanVar(value=override.get("active", True))
+        self.watchlist_var = tk.BooleanVar(value=is_in_watchlist(symbol))
         self.min_qty_var = tk.StringVar(
             value="" if override.get("min_qty") is None else str(override["min_qty"])
         )
@@ -88,24 +100,27 @@ class TickerEditDialog(tk.Toplevel):
         tk.Checkbutton(self, text="Активен (мониторить)", variable=self.active_var).grid(
             row=0, column=0, columnspan=2, sticky="w", **pad
         )
+        tk.Checkbutton(self, text="В watchlist (⭐)", variable=self.watchlist_var).grid(
+            row=1, column=0, columnspan=2, sticky="w", **pad
+        )
 
         tk.Label(self, text="Мин. лотов (пусто = авто по процентилю):").grid(
-            row=1, column=0, sticky="w", **pad
-        )
-        tk.Entry(self, textvariable=self.min_qty_var, width=12).grid(row=1, column=1, **pad)
-
-        tk.Label(self, text="Мин. сек интервала (пусто = из пресета):").grid(
             row=2, column=0, sticky="w", **pad
         )
-        tk.Entry(self, textvariable=self.min_interval_var, width=12).grid(row=2, column=1, **pad)
+        tk.Entry(self, textvariable=self.min_qty_var, width=12).grid(row=2, column=1, **pad)
 
-        tk.Label(self, text="Мин. повторов (пусто = из пресета):").grid(
+        tk.Label(self, text="Мин. сек интервала (пусто = из пресета):").grid(
             row=3, column=0, sticky="w", **pad
         )
-        tk.Entry(self, textvariable=self.min_repeats_var, width=12).grid(row=3, column=1, **pad)
+        tk.Entry(self, textvariable=self.min_interval_var, width=12).grid(row=3, column=1, **pad)
+
+        tk.Label(self, text="Мин. повторов (пусто = из пресета):").grid(
+            row=4, column=0, sticky="w", **pad
+        )
+        tk.Entry(self, textvariable=self.min_repeats_var, width=12).grid(row=4, column=1, **pad)
 
         button_frame = tk.Frame(self)
-        button_frame.grid(row=4, column=0, columnspan=2, pady=(10, 12))
+        button_frame.grid(row=5, column=0, columnspan=2, pady=(10, 12))
         tk.Button(button_frame, text="Сохранить", command=self._save).pack(side="left", padx=6)
         tk.Button(button_frame, text="Отмена", command=self.destroy).pack(side="left", padx=6)
 
@@ -145,6 +160,16 @@ class TickerEditDialog(tk.Toplevel):
             "min_repeats": min_repeats,
         }
         save_settings(self.parent.settings)
+
+        # Обновляем watchlist
+        watchlist = load_watchlist()
+        if self.watchlist_var.get():
+            watchlist.add(self.symbol)
+        else:
+            watchlist.discard(self.symbol)
+        save_watchlist(watchlist)
+        self.parent.shared_state.watchlist = load_watchlist()
+
         self.parent.refresh_table()
         self.destroy()
 
@@ -152,16 +177,20 @@ class TickerEditDialog(tk.Toplevel):
 class SettingsWindow(tk.Toplevel):
     def __init__(self, parent: tk.Tk):
         super().__init__(parent)
+        self.parent = parent
+        self.shared_state = parent.shared_state  # предполагаем, что у главного окна есть shared_state
         self.title("Настройки тикеров")
-        self.geometry("400x580")
+        self.geometry("460x650")
         self.minsize(380, 320)
 
         self.settings = load_settings()
+        self.watchlist = load_watchlist()
 
         info = tk.Label(
             self,
             text=(
                 "Двойной клик по строке — изменить пороги.\n"
+                "Кнопка '⭐ Watchlist' — переключить приоритет.\n"
                 "Применяются после перезапуска программы."
             ),
             justify="left",
@@ -188,6 +217,7 @@ class SettingsWindow(tk.Toplevel):
             self.tree.heading(col, text=HEADERS[col])
             self.tree.column(col, width=COLUMN_WIDTHS[col], anchor="center")
         self.tree.tag_configure("inactive", foreground="#a0a0a0")
+        self.tree.tag_configure("watchlist", foreground="#e6a817")  # золотистый для ⭐
         self.tree.pack(fill="both", expand=True, padx=8, pady=4)
         self.tree.bind("<Double-1>", self._on_double_click)
 
@@ -201,9 +231,12 @@ class SettingsWindow(tk.Toplevel):
         tk.Button(add_frame, text="Добавить", command=self._add_ticker).pack(side="left")
 
         action_frame = tk.Frame(self)
-        action_frame.pack(fill="x", padx=8, pady=(0, 8))
+        action_frame.pack(fill="x", padx=8, pady=(0, 4))
         tk.Button(
             action_frame, text="Вкл/Выкл выбранный", command=self._toggle_active
+        ).pack(fill="x", pady=(0, 4))
+        tk.Button(
+            action_frame, text="⭐ Watchlist: вкл/выкл", command=self._toggle_watchlist
         ).pack(fill="x", pady=(0, 4))
         tk.Button(
             action_frame, text="Удалить выбранный", command=self._remove_ticker
@@ -226,6 +259,8 @@ class SettingsWindow(tk.Toplevel):
         for symbol in self._visible_symbols():
             override = self.settings[symbol]
             tag = "inactive" if not override.get("active", True) else ""
+            if symbol in self.watchlist:
+                tag = "watchlist"
             self.tree.insert(
                 "",
                 "end",
@@ -236,6 +271,7 @@ class SettingsWindow(tk.Toplevel):
                     _fmt_optional(override.get("min_qty")),
                     _fmt_optional(override.get("min_interval"), "с"),
                     _fmt_optional(override.get("min_repeats")),
+                    _fmt_watchlist(symbol in self.watchlist),
                 ),
                 tags=(tag,) if tag else (),
             )
@@ -283,6 +319,10 @@ class SettingsWindow(tk.Toplevel):
             return
         remove_ticker(self.settings, symbol)
         save_settings(self.settings)
+        # Если удаляем тикер из watchlist тоже
+        self.watchlist.discard(symbol)
+        save_watchlist(self.watchlist)
+        self.shared_state.watchlist = load_watchlist()
         self.refresh_table()
 
     def _toggle_active(self) -> None:
@@ -292,4 +332,16 @@ class SettingsWindow(tk.Toplevel):
         override = self.settings[symbol]
         override["active"] = not override.get("active", True)
         save_settings(self.settings)
+        self.refresh_table()
+
+    def _toggle_watchlist(self) -> None:
+        symbol = self._selected_symbol()
+        if symbol is None:
+            return
+        if symbol in self.watchlist:
+            self.watchlist.discard(symbol)
+        else:
+            self.watchlist.add(symbol)
+        save_watchlist(self.watchlist)
+        self.shared_state.watchlist = load_watchlist()
         self.refresh_table()
