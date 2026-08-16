@@ -8,14 +8,10 @@
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 DUMP_DIR = BASE_DIR / "dumps"
 MAX_DUMPS = 10
 
-# ---------------------------------------------------------------------------
-# Настройка исключений – папки/файлы, которые НЕ попадут в дамп.
-# Редактируй при необходимости.
-# ---------------------------------------------------------------------------
 EXCLUDE_DIRS = {
     ".git",
     "__pycache__",
@@ -25,6 +21,7 @@ EXCLUDE_DIRS = {
     "dumps",
     "data",
     "output",
+    "parts",
     ".mypy_cache",
     ".pytest_cache",
     "node_modules",
@@ -35,21 +32,20 @@ EXCLUDE_FILES = {
     "*.pyc",
     ".DS_Store",
     "Thumbs.db",
-    # Документация / самодамп
     "PROJECT_SUMMARY.md",
     "README.md",
     "make_dump.py",
-    # Разовые отладочные/исследовательские скрипты
     "inspect_window.py",
     "list_tqbr_shares.py",
     "explore_alltrades_history.py",
 }
 
 TEXT_EXTENSIONS = {".py", ".json", ".md", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
-# ---------------------------------------------------------------------------
+
 
 def is_excluded_dir(path: Path) -> bool:
     return any(part in EXCLUDE_DIRS for part in path.parts)
+
 
 def is_excluded_file(file: Path) -> bool:
     name = file.name
@@ -60,6 +56,7 @@ def is_excluded_file(file: Path) -> bool:
     if name.startswith("."):
         return True
     return False
+
 
 def collect_project_files() -> list[Path]:
     result = []
@@ -75,11 +72,13 @@ def collect_project_files() -> list[Path]:
         result.append(path)
     return sorted(result, key=lambda p: str(p.relative_to(BASE_DIR)))
 
+
 def read_file_safe(path: Path) -> str:
     try:
         return path.read_text(encoding="utf-8")
     except Exception as e:
         return f"(Ошибка чтения файла: {e})"
+
 
 def build_dump_text() -> str:
     now = datetime.now()
@@ -107,11 +106,13 @@ def build_dump_text() -> str:
 
     return "\n".join(parts)
 
+
 def rotate(pattern: str) -> None:
     files = sorted(DUMP_DIR.glob(pattern))
     excess = len(files) - MAX_DUMPS
     for old_file in files[: max(excess, 0)]:
         old_file.unlink()
+
 
 def main() -> None:
     DUMP_DIR.mkdir(exist_ok=True)
@@ -124,6 +125,7 @@ def main() -> None:
 
     print(f"Дамп сохранён: {dump_path}")
     print(f"Хранится дампов: {len(list(DUMP_DIR.glob('dump_*.txt')))} (максимум {MAX_DUMPS})")
+
 
 if __name__ == "__main__":
     main()

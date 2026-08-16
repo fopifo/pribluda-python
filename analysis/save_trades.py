@@ -1,10 +1,12 @@
 """
 Приблуда на python — сохранение ленты сделок в файл для офлайн-разработки
-детекторов (чтобы не дёргать API Алора при каждом тесте).
+детекторов (чтобы не дёргать API Алора при каждом тесте) и для
+"перемотки" через analysis/run_detectors.py.
 """
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -14,9 +16,17 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from config import TRACKED_SYMBOLS
+# analysis/ находится на уровень глубже корня проекта — добавляем
+# корень в sys.path, чтобы работали импорты вроде "from config import".
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
 
-BASE_DIR = Path(__file__).resolve().parent
+# ИСПРАВЛЕНО: раньше здесь импортировался TRACKED_SYMBOLS из config.py —
+# этой константы там больше нет с тех пор, как список тикеров переехал
+# в ticker_settings.json. Теперь берём тот же список, что использует
+# живой скринер — активные тикеры из ticker_settings.json.
+from config import get_tracked_symbols
+
 ENV_PATH = BASE_DIR / ".env"
 DATA_DIR = BASE_DIR / "data"
 
@@ -30,10 +40,6 @@ PLACEHOLDER = "вставь_сюда_свой_refresh_token"
 BOARD = "TQBR"
 EXCHANGE = "MOEX"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
-
-# Тикеры, для которых сохраняем ленту за последний торговый день.
-# Берём из config.py, чтобы не дублировать список в двух местах.
-SYMBOLS_TO_SAVE = TRACKED_SYMBOLS
 
 
 def make_session() -> requests.Session:
@@ -147,6 +153,11 @@ def main() -> None:
         print(f"Ищу файл .env здесь: {ENV_PATH}")
         return
 
+    symbols_to_save = get_tracked_symbols()
+    if not symbols_to_save:
+        print("В ticker_settings.json нет ни одного активного тикера — сохранять нечего.")
+        return
+
     session = make_session()
 
     try:
@@ -158,9 +169,10 @@ def main() -> None:
 
     target_day = previous_trading_day(datetime.now(MOSCOW_TZ))
     date_from, date_to = day_range_unix(target_day)
-    print(f"Последний торговый день (по МСК): {target_day.date()}\n")
+    print(f"Последний торговый день (по МСК): {target_day.date()}")
+    print(f"Тикеров к сохранению: {len(symbols_to_save)}\n")
 
-    for symbol in SYMBOLS_TO_SAVE:
+    for symbol in symbols_to_save:
         print(f"Запрашиваю ленту сделок по {symbol}...")
         try:
             trades = get_all_trades_for_day(

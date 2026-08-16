@@ -2,8 +2,8 @@
 Приблуда на python — разрезает большие текстовые файлы (логи) на части,
 пригодные для пересылки в чат.
 
-Использование:
-  python split_logs.py [файл1 файл2 ...]
+Использование (из корня проекта):
+  python analysis/split_logs.py [файл1 файл2 ...]
 
 Если файлы не указаны, скрипт находит все live_signals_*.txt в папке
 output/ и режет их все. Для каждого файла создаётся своя подпапка в
@@ -16,7 +16,7 @@ from pathlib import Path
 
 MAX_CHARS = 3800  # безопасный размер для одного сообщения
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 PARTS_DIR = BASE_DIR / "parts"
 
@@ -32,7 +32,6 @@ def split_one_file(file_path: Path) -> None:
         print(f"Файл {file_path} пустой, пропускаю.")
         return
 
-    # Создаём подпапку для этого файла
     file_parts_dir = PARTS_DIR / file_path.stem
     file_parts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -42,7 +41,6 @@ def split_one_file(file_path: Path) -> None:
 
     while start < total:
         end = min(start + MAX_CHARS, total)
-        # Не рвём строку пополам (если кусок не последний)
         if end < total:
             newline_pos = text.rfind("\n", start, end)
             if newline_pos > start:
@@ -59,11 +57,9 @@ def split_one_file(file_path: Path) -> None:
 
 
 def main() -> None:
-    # Если переданы аргументы — берём их как пути к файлам
     if len(sys.argv) > 1:
         files = [Path(arg) for arg in sys.argv[1:]]
     else:
-        # Иначе ищем все live_signals_*.txt в output/
         if not OUTPUT_DIR.exists():
             print(f"Папка {OUTPUT_DIR} не найдена. Укажите файлы явно.")
             return

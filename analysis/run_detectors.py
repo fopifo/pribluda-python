@@ -3,9 +3,9 @@
 по нескольким тикерам сразу.
 
 Ожидает файлы вида data/{SYMBOL}_{ДАТА}.json — по одному на тикер,
-скачанные заранее через save_trades.py. Дата в имени файла не хардкодится
-здесь: для каждого тикера берётся файл с самой свежей датой из тех, что
-реально лежат в data/.
+скачанные заранее через analysis/save_trades.py. Дата в имени файла не
+хардкодится здесь: для каждого тикера берётся файл с самой свежей датой
+из тех, что реально лежат в data/.
 
 Список тикеров и их активность (мониторим/нет) берутся из
 ticker_settings.json (см. ticker_settings.py) — отключённые тикеры
@@ -17,14 +17,25 @@ ticker_settings.json (см. ticker_settings.py) — отключённые ти�
 дня по ЭТОМУ тикеру (см. config.py — min_qty_percentile) — подстраивается
 под текущую ликвидность, а не берётся фиксированным числом.
 
+Использует текущий config.py — значит, автоматически прогоняет и
+fast_strict, и twap_strict (если оба включены для тикера), с джиттером
+в каждом сигнале (это уже часть Signal.__str__, отдельно ничего не
+добавлено) — по сути, "перемотка" живого скринера на прошлый день.
+
 Весь вывод одновременно печатается в консоль И сохраняется в файл
 output/signals_<дата>_<время>.txt.
 """
 
 import json
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+# analysis/ находится на уровень глубже корня проекта — добавляем
+# корень в sys.path, чтобы работали импорты вроде "from config import".
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR))
 
 from config import get_detector_configs, get_min_qty_percentile
 from detectors.interval_robot import IntervalRobotDetector
@@ -32,8 +43,8 @@ from engine import TradeBuffer
 from stats import qty_percentile
 from ticker_settings import get_active_symbols, load_settings
 
-DATA_DIR = Path("data")
-OUTPUT_DIR = Path("output")
+DATA_DIR = BASE_DIR / "data"
+OUTPUT_DIR = BASE_DIR / "output"
 
 LogFunc = Callable[[str], None]
 

@@ -8,19 +8,8 @@
 ОТЧЁТ (обычно несколько КБ, не мегабайты) с выводами по каждому тикеру,
 а не исходные данные для пересчёта.
 
-Запуск раз в неделю (вручную или по расписанию, см. низ файла):
-    python weekly_review.py [--days 7]
-
-Что делает:
-  1. Собирает все output/live_signals_*.txt за последние N дней.
-  2. Парсит все сигналы (та же логика, что и analyze_parallel.py).
-  3. Для КАЖДОГО тикера считает:
-     - сколько дней из N в нём вообще были сигналы fast_strict
-     - средний и разброс джиттера по fast_strict-сигналам
-     - сколько дней в нём находился TWAP-паттерн (параллельные сигналы
-       с одинаковым таймингом, разным объёмом) и средний размер кластера
-  4. Сортирует тикеры по "интересности" (устойчивость паттерна изо дня
-     в день) и пишет компактный текстовый отчёт.
+Запуск (из корня проекта):
+    python analysis/weekly_review.py [--days 7]
 
 Результат — output/weekly_review_<дата>.txt — именно этот файл (а не
 сырые логи) стоит передавать помощнику для интерпретации/следующих
@@ -35,7 +24,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 
 START_TOLERANCE = 2.0
@@ -190,7 +179,6 @@ def main() -> None:
                     st.fast_strict_jitters.append(sig.jitter_ms)
 
         groups = find_parallel_groups(signals)
-        # TWAP считаем по кластерам >=3 сигналов (2 слишком легко совпадают)
         for group in groups:
             if len(group) < 3:
                 continue

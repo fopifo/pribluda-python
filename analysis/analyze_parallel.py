@@ -5,8 +5,8 @@
 разными объёмами. Такие паттерны могут указывать на TWAP-робота с
 разбиением объёма.
 
-Запуск:
-    python analyze_parallel.py [файл1 файл2 ...]
+Запуск (из корня проекта):
+    python analysis/analyze_parallel.py [файл1 файл2 ...]
 
 Без аргументов анализирует все live_signals_*.txt в output/.
 Результат печатается в консоль и сохраняется в output/parallel_report_*.txt.
@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent
 OUTPUT_DIR = BASE_DIR / "output"
 
 # Допуски для группировки (можно менять)
@@ -27,9 +27,8 @@ START_TOLERANCE = 2.0      # сек, допустимая разница во в
 END_TOLERANCE = 2.0        # сек, допустимая разница во времени окончания
 INTERVAL_TOLERANCE_FACTOR = 0.10  # 10% допустимой разницы интервалов
 
-# ВАЖНО: тикер может содержать цифры (например, X5) — символьный класс
-# [A-Z0-9]+ вместо [A-Z]+, иначе такие строки молча выпадают из анализа
-# (было найдено на реальном логе: 93 строки по X5 не распознавались).
+# Тикер может содержать цифры (например, X5) — символьный класс
+# [A-Z0-9]+ вместо [A-Z]+.
 SIGNAL_PATTERN = re.compile(
     r'^\[(?P<log_time>\d{2}:\d{2}:\d{2})\]\s+(?P<label>НОВЫЙ|ЗАКРЫТ)\s+'
     r'\[робот-интервал\[(?P<preset>[^\]]+)\]\]\s+(?P<symbol>[A-Z0-9]+)\s+(?P<side>buy|sell)\s+'
@@ -62,12 +61,6 @@ def parse_signal_line(line: str) -> Signal | None:
         return None
     qty_str = m.group("qty")
     if "-" in qty_str:
-        # Пока в проекте включён только fast_strict (объём всегда один,
-        # без чередования), дефис в qty на практике не встречается.
-        # Если когда-нибудь снова включим *_loose с чередованием
-        # объёма — суммирование здесь ("45-46" -> 91) станет вводить в
-        # заблуждение (это чередование, а не объём 91) — тогда нужно
-        # будет пересмотреть эту логику.
         qty = sum(int(x) for x in qty_str.split("-"))
     else:
         qty = int(qty_str)
