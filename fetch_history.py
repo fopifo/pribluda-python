@@ -1,17 +1,21 @@
 """
 Приблуда на python — скачивание ленты сделок за указанный диапазон дат.
 
-Пример:
+По умолчанию после успешного подключения очищает папку data/ от старых
+JSON-файлов. Чтобы сохранить старые файлы, добавьте флаг --keep.
+
+Примеры:
     python fetch_history.py 2026-08-10 2026-08-14
+    python fetch_history.py 2026-08-10 2026-08-14 --keep
 
 Если даты не указаны, качает последние 5 торговых дней.
 Файлы сохраняются в data/{SYMBOL}_{ДАТА}.json.
-Уже скачанные файлы пропускаются.
 """
 
 import json
 import os
 import sys
+import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -20,6 +24,7 @@ import requests
 from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+import urllib3
 
 from config import get_tracked_symbols
 
@@ -54,9 +59,36 @@ def make_session() -> requests.Session:
 
 
 def get_access_token(session: requests.Session, refresh_token: str) -> str:
-    response = session.post(OAUTH_URL, params={"token": refresh_token})
-    response.raise_for_status()
-    return response.json()["AccessToken"]
+    """Получает access-токен с несколькими попытками и fallback на
+    отключение проверки SSL при ошибках сертификата."""
+    attempts = 3
+    for attempt in range(attempts):
+        try:
+            response = session.post(OAUTH_URL, params={"token": refresh_token})
+            response.raise_for_status()
+            return response.json()["AccessToken"]
+        except (requests.exceptions.SSLError, urllib3.exceptions.SSLError) as e:
+            print(f"SSL-ошибка (попытка {attempt+1}/{attempts}): {e}")
+            if attempt < attempts - 1:
+                time.sleep(3 * (attempt + 1))
+            else:
+                # Пробуем без проверки SSL (временное решение)
+                print("Пробую отключить проверку SSL...")
+                session.verify = False
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                try:
+                    response = session.post(OAUTH_URL, params={"token": refresh_token})
+                    response.raise_for_status()
+                    return response.json()["AccessToken"]
+                except Exception as e2:
+                    raise e2
+        except requests.exceptions.RequestException as e:
+            print(f"Ошибка запроса (попытка {attempt+1}/{attempts}): {e}")
+            if attempt < attempts - 1:
+                time.sleep(3 * (attempt + 1))
+            else:
+                raise
+    raise RuntimeError("Не удалось получить access-токен")
 
 
 def trading_days_between(start: datetime, end: datetime) -> list[datetime]:
@@ -143,19 +175,30 @@ def save_trades_to_file(symbol: str, day: datetime, trades: list[dict]) -> Path:
     return filepath
 
 
+def clean_data_folder() -> None:
+    """Удаляет все JSON-файлы из папки data/."""
+    if not DATA_DIR.exists():
+        return
+    for file_path in DATA_DIR.glob("*.json"):
+        file_path.unlink()
+        print(f"Удалён старый файл: {file_path.name}")
+
+
 def main() -> None:
-    if len(sys.argv) >= 3:
+    # Проверяем флаг --keep (сохранить старые файлы)
+    keep_mode = "--keep" in sys.argv
+    args = [arg for arg in sys.argv[1:] if arg != "--keep"]
+
+    if len(args) >= 2:
         try:
-            start = datetime.strptime(sys.argv[1], "%Y-%m-%d").replace(tzinfo=MOSCOW_TZ)
-            end = datetime.strptime(sys.argv[2], "%Y-%m-%d").replace(tzinfo=MOSCOW_TZ)
+            start = datetime.strptime(args[0], "%Y-%m-%d").replace(tzinfo=MOSCOW_TZ)
+            end = datetime.strptime(args[1], "%Y-%m-%d").replace(tzinfo=MOSCOW_TZ)
         except ValueError:
             print("Формат дат: YYYY-MM-DD")
             return
     else:
         # По умолчанию последние 5 торговых дней
         end = datetime.now(MOSCOW_TZ)
-        start = end - timedelta(days=10)  # запас, потом обрежем
-        # Получим последние 5 торговых дней
         days = []
         cur = end
         while len(days) < 5:
@@ -180,9 +223,15 @@ def main() -> None:
     try:
         access_token = get_access_token(session, REFRESH_TOKEN)
         print("Подключение успешно!")
-    except requests.exceptions.RequestException as e:
+    except Exception as e:
         print(f"Не удалось получить access-токен: {e}")
         return
+
+    # Очищаем папку data/ только после успешного подключения
+    if not keep_mode:
+        print("Очищаю папку data/ ...")
+        clean_data_folder()
+        print()
 
     symbols = get_tracked_symbols()
     print(f"Активных тикеров: {len(symbols)}")
