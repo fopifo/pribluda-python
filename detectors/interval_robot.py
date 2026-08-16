@@ -2,63 +2,65 @@
 Приблуда на python — универсальный детектор периодичности ("роботов").
 
 Серия сделок с одинаковой стороной (side), повторяющаяся с определённым
-интервалом. Три режима матчинга объёма/интервала, задаются пресетом:
+интервалом. Режимы матчинга объёма/интервала задаются пресетом:
 
-  - "loose" (широкий): любая сделка, попавшая в абсолютный диапазон
-    [min_interval, max_interval] от предыдущей, продлевает серию.
+  - объём: либо ТОЧНОЕ совпадение (max_qty_variants=1), либо
+    ЧЕРЕДОВАНИЕ конкретных значений (max_qty_variants=2 — например,
+    робот бьёт то 45, то 46 лотов; каждое из значений должно совпасть
+    ТОЧНО, диапазона/допуска между ними нет — max_qty_ratio защищает от
+    случайного попадания слишком далёкого второго значения в ту же
+    серию). Диапазон-допуск (±N лотов вокруг любого значения) в проекте
+    сознательно НЕ используется — пробовали смягчить так в ветке
+    experiments (qty_tolerance_lots), решили не переносить: диапазон
+    ловит "что угодно рядом", а не конкретное чередование, для
+    скальпинга это снижает уверенность в сигнале.
 
-  - "strict" (чёткий, через interval_tolerance): первая пара сделок
-    задаёт "эталонный" интервал для этой конкретной серии, а каждая
-    следующая сделка должна укладываться в него ± interval_tolerance
-    от ПРЕДЫДУЩЕГО фактического интервала в этой же серии. Объём при
-    этом должен совпадать (max_qty_variants=1).
+  - интервал: "strict" — первая пара сделок задаёт "эталонный"
+    интервал для конкретной серии, каждая следующая сделка должна
+    укладываться в него ± interval_tolerance от ПРЕДЫДУЩЕГО
+    фактического интервала. Без запасных/смягчённых путей принятия —
+    либо сделка укладывается в допуск, либо начинает новую серию.
+    (Пробовали добавить медианный запасной критерий в ветке
+    experiments — решили не переносить: то же самое семейство
+    смягчений, что раньше уже приводило к ложным сигналам.)
 
-  - "TWAP" (ignore_qty=True): как strict по интервалу (обычно с более
-    жёстким interval_tolerance, например 0.05 вместо 0.1), но объём
-    ВООБЩЕ не участвует в матчинге — любая сделка нужной стороны с
-    подходящим интервалом продлевает серию, независимо от размера.
-    Это ловит паттерн "крупная заявка, нарезанная по времени на равные
-    интервалы, с разным объёмом каждый раз" (найдено на реальных логах
-    по PLZL и BELU — десятки "параллельных" сигналов с одинаковым
-    таймингом и разным объёмом, которые strict-режим дробил на
-    отдельные несвязанные серии из-за требования точного объёма).
-
-    Поскольку объём здесь не фильтрует случайные совпадения, вся
-    ответственность за отсев случайности ложится на ТОЧНОСТЬ ИНТЕРВАЛА
-    (interval_tolerance) и число повторов (min_repeats) — оба должны
-    быть строже, чем в обычном strict, иначе легко словить шум. Идея:
-    ни человек, ни случайное совпадение разных участников не могут
-    держать интервал в пределах нескольких процентов МНОГО раз подряд
-    — а чистый программный цикл может.
+  - "TWAP" (ignore_qty=True): объём вообще не участвует в матчинге —
+    ловит паттерн "крупная заявка, нарезанная по времени на равные
+    интервалы, с разным объёмом каждый раз" (подтверждено на реальных
+    логах: PLZL, BELU). Вся защита от случайных совпадений тут — на
+    точности интервала (interval_tolerance строже, min_repeats выше).
 
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
 
-ДЖИТТЕР: каждый Candidate копит полный список интервалов между
-сделками серии — при закрытии серии считаем по нему стандартное
-отклонение в миллисекундах (Signal.jitter_ms). Только измерение
-постфактум, не влияет на матчинг/продление серии.
+ДЖИТТЕР и STABILITY_RATIO: каждый Candidate копит полный список
+интервалов между сделками серии. При закрытии серии считаем:
+  - jitter_ms — стандартное отклонение интервалов, мс
+  - stability_ratio — доля интервалов, попавших в пределы
+    time_window_sec от медианы (если пресет задаёт time_window_sec)
+Оба — ТОЛЬКО измерение постфактум, справочные метрики для трейдера/
+для последующего анализа. НИ ОДНА из них не влияет на то, продлевается
+серия или нет — это сознательное разделение "как решаем" (строгий
+допуск интервала) от "как оцениваем качество уже найденного" (эти
+метрики).
+
+CLOSE_AFTER_MISSES = 2: серия закрывается не после ПЕРВОГО пропущенного
+max_interval, а после ВТОРОГО — даёт роботу шанс пережить единичный
+случайный пропуск, не теряя уже накопленную серию.
 
 Для живого режима: on_trade() реагирует на приход сделки. check_overdue()
 вызывается по таймеру (watchdog), не привязанному к потоку сделок — но
-использует РОВНО ТЕ ЖЕ границы допуска, что и сам матчинг в
-_interval_fits, чтобы не "опережать" реальную логику детектора.
+предупреждение о просрочке использует ТЕ ЖЕ границы допуска, что и
+_interval_fits в матчинге, чтобы не "опережать" реальную логику.
 
 Производительность: для strict/loose кандидаты индексируются по объёму
 (qty) для быстрого точного совпадения. Для TWAP (ignore_qty=True) объём
-не индексируется — поиск линейный по активным сериям этой стороны, но
-это не проблема: MAX_ACTIVE_PER_SIDE всё равно ограничивает худший
-случай, а число одновременно живых серий на практике невелико.
+не индексируется — поиск линейный, ограничен MAX_ACTIVE_PER_SIDE.
 """
 
 import statistics
 from datetime import datetime, timezone
 
 from .base import Detector, Signal
-
-# Если у серии больше этого числа разных объёмов — в отображении/логе
-# показываем не полный список (может быть 20+ значений при TWAP), а
-# сводку "N разных объёмов, диапазон X–Y".
-MAX_QTY_VARIANTS_TO_LIST = 6
 
 
 class Candidate:
@@ -75,7 +77,7 @@ class Candidate:
         self.start_ts = ts
         self.last_ts = ts
         self.last_interval: float | None = None  # появится после 2-й сделки
-        self.intervals: list[float] = []  # полная история интервалов серии, для джиттера
+        self.intervals: list[float] = []  # полная история интервалов серии
         self.warned = False  # предупреждение о просрочке уже выдавалось?
 
 
@@ -84,6 +86,7 @@ class IntervalRobotDetector(Detector):
 
     MAX_SERIES_LENGTH = 20      # после ~20 повторов считаем серию завершённой
     MAX_ACTIVE_PER_SIDE = 3000  # предохранитель от неограниченного роста
+    CLOSE_AFTER_MISSES = 2      # сколько пропущенных max_interval ждать до удаления
 
     def __init__(self, symbol: str, settings: dict):
         super().__init__(symbol, settings)
@@ -95,6 +98,9 @@ class IntervalRobotDetector(Detector):
         self.max_qty_ratio = settings.get("max_qty_ratio")
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
+        # Только для stability_ratio (справочная метрика) — НЕ влияет
+        # на матчинг/продление серии.
+        self.time_window_sec = settings.get("time_window_sec", 0.0)
 
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
@@ -111,6 +117,15 @@ class IntervalRobotDetector(Detector):
         if len(candidate.intervals) >= 2:
             jitter_ms = statistics.pstdev(candidate.intervals) * 1000
 
+        stability_ratio = None
+        if len(candidate.intervals) >= 2 and self.time_window_sec > 0:
+            median_interval = statistics.median(candidate.intervals)
+            good = sum(
+                1 for iv in candidate.intervals
+                if abs(iv - median_interval) <= self.time_window_sec
+            )
+            stability_ratio = good / len(candidate.intervals)
+
         return Signal(
             detector_name=self.name,
             symbol=self.symbol,
@@ -121,12 +136,13 @@ class IntervalRobotDetector(Detector):
             start_ts=candidate.start_ts,
             end_ts=candidate.last_ts,
             jitter_ms=jitter_ms,
+            stability_ratio=stability_ratio,
         )
 
     def _register(self, side: str, candidate: Candidate) -> None:
         self.active.setdefault(side, []).append(candidate)
         if self.ignore_qty:
-            return  # не индексируем по объёму — он не участвует в матчинге
+            return
         side_index = self.index.setdefault(side, {})
         for qty in candidate.qty_variants:
             side_index.setdefault(qty, []).append(candidate)
@@ -151,9 +167,12 @@ class IntervalRobotDetector(Detector):
         self.index.setdefault(side, {}).setdefault(qty, []).append(candidate)
 
     def _prune_dead(self, side: str, now_ts: float) -> list[Signal]:
+        """Закрывает серии, по которым пропущено CLOSE_AFTER_MISSES
+        интервалов max_interval (ждём второй пропуск, а не первый)."""
         signals: list[Signal] = []
+        close_threshold = self.max_interval * self.CLOSE_AFTER_MISSES
         for candidate in list(self.active.get(side, [])):
-            if now_ts - candidate.last_ts > self.max_interval:
+            if now_ts - candidate.last_ts > close_threshold:
                 if candidate.count >= self.min_repeats:
                     signals.append(self._finalize(side, candidate))
                 self._unregister(side, candidate)
@@ -192,8 +211,6 @@ class IntervalRobotDetector(Detector):
 
     def _find_match(self, side: str, qty: int, ts: float) -> Candidate | None:
         if self.ignore_qty:
-            # TWAP: объём не участвует — ищем любую активную серию этой
-            # стороны, к которой подходит интервал.
             for candidate in self.active.get(side, []):
                 interval = ts - candidate.last_ts
                 if self._interval_fits(candidate, interval):
@@ -241,7 +258,7 @@ class IntervalRobotDetector(Detector):
                 self._index_new_variant(side, match, qty)
             match.count += 1
             match.last_ts = ts
-            match.warned = False  # пришёл вовремя — сбрасываем прежнюю просрочку
+            match.warned = False
             if match.count >= self.MAX_SERIES_LENGTH:
                 signals.append(self._finalize(side, match))
                 self._unregister(side, match)
@@ -253,19 +270,24 @@ class IntervalRobotDetector(Detector):
         return signals
 
     def check_overdue(self, now_ts: float) -> tuple[list[Signal], list[str]]:
-        """Проверка по таймеру (watchdog в живом режиме), не привязанная
-        к приходу новой сделки."""
+        """Проверка по таймеру (watchdog в живом режиме). Предупреждает
+        о просрочке при первом пропуске ожидаемого интервала, но удаляет
+        серию только после CLOSE_AFTER_MISSES пропущенных max_interval."""
         signals: list[Signal] = []
         warnings: list[str] = []
+        close_threshold = self.max_interval * self.CLOSE_AFTER_MISSES
 
         for side, candidates in list(self.active.items()):
             for candidate in list(candidates):
                 gap = now_ts - candidate.last_ts
 
-                if gap > self.max_interval:
+                if gap > close_threshold:
                     if candidate.count >= self.min_repeats:
                         signals.append(self._finalize(side, candidate))
                     self._unregister(side, candidate)
+                    continue
+
+                if candidate.count < self.min_repeats:
                     continue
 
                 if self.interval_tolerance is not None and candidate.last_interval is not None:
@@ -287,8 +309,7 @@ class IntervalRobotDetector(Detector):
         return signals, warnings
 
     def get_active_snapshot(self, now_ts: float) -> list[dict]:
-        """Текущий срез активных серий — для живой таблицы (dashboard).
-        Только читает состояние, ничего не меняет."""
+        """Текущий срез активных серий — для живой таблицы (dashboard)."""
         rows: list[dict] = []
         for side, candidates in self.active.items():
             for candidate in candidates:
@@ -301,6 +322,11 @@ class IntervalRobotDetector(Detector):
                 else:
                     seconds_to_next = None
 
+                if len(candidate.intervals) >= 2:
+                    jitter_ms = statistics.pstdev(candidate.intervals) * 1000
+                else:
+                    jitter_ms = None
+
                 rows.append({
                     "symbol": self.symbol,
                     "preset": self.preset_name,
@@ -310,6 +336,7 @@ class IntervalRobotDetector(Detector):
                     "repeats": candidate.count,
                     "seconds_to_next": seconds_to_next,
                     "start_ts": candidate.start_ts,
+                    "jitter_ms": jitter_ms,
                 })
         return rows
 

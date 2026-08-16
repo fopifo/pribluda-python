@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 # Если у серии больше этого числа разных объёмов — в строковом
-# представлении показываем сводку, а не полный список (актуально для
-# TWAP-серий, где объём каждый раз разный, список может быть 20+ штук).
+# представлении показываем сводку, а не полный список.
 MAX_QTY_VARIANTS_TO_LIST = 6
 
 
@@ -32,6 +31,12 @@ class Signal:
     # Стандартное отклонение интервалов между сделками серии, в
     # миллисекундах. None, если интервалов меньше двух.
     jitter_ms: float | None = None
+    # Доля интервалов серии, попавших в пределы time_window_sec от
+    # медианы — справочная метрика "ровности" серии, НЕ влияет на
+    # решение детектора продлевать/обрывать серию (см. docstring
+    # detectors/interval_robot.py). None, если пресет не задаёт
+    # time_window_sec или интервалов меньше двух.
+    stability_ratio: float | None = None
 
     def _qty_str(self) -> str:
         if len(self.qty_variants) <= MAX_QTY_VARIANTS_TO_LIST:
@@ -46,10 +51,13 @@ class Signal:
         end = datetime.fromtimestamp(self.end_ts, tz=timezone.utc)
         duration = self.end_ts - self.start_ts
         jitter_str = f"джиттер={self.jitter_ms:.1f}мс" if self.jitter_ms is not None else "джиттер=н/д"
+        stability_str = (
+            f" стабильность={self.stability_ratio:.0%}" if self.stability_ratio is not None else ""
+        )
         return (
             f"[{self.detector_name}] {self.symbol} {self.side} "
             f"qty={self._qty_str()} повторов={self.repeats} "
-            f"интервал~{self.interval_avg:.1f}с {jitter_str} "
+            f"интервал~{self.interval_avg:.1f}с {jitter_str}{stability_str} "
             f"с {start:%H:%M:%S} по {end:%H:%M:%S} "
             f"(длилось {duration:.1f} сек)"
         )
