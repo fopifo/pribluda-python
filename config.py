@@ -1,50 +1,47 @@
 """
 Приблуда на python — конфиг с настройками детекции по каждому тикеру.
-
 Два семейства пресетов:
-
-  - "fast_strict" — "классический" алгоритм. Робота считаем роботом,
-    только если ВСЕ условия выполнены разом:
-      - объём лота одинаковый КАЖДЫЙ раз (max_qty_variants=1 — без
-        чередования вроде "45-46");
-      - интервал между ударами одинаковый (в пределах
-        interval_tolerance);
-      - интервал НЕ короче 3 секунд;
-      - минимум 3 срабатывания подряд.
-
-  - "twap_strict" — для паттерна "крупная заявка, нарезанная по
-    ВРЕМЕНИ на равные интервалы, с разным объёмом каждый раз" (найдено
-    на реальных логах: PLZL, BELU — десятки сигналов с одинаковым
-    таймингом, но разным объёмом, которые fast_strict дробил на
-    отдельные несвязанные серии из-за требования точного объёма —
-    подробности см. в detectors/interval_robot.py). Объём вообще не
-    участвует в матчинге (ignore_qty=True) — единственная защита от
-    случайных совпадений это ТОЧНОСТЬ ИНТЕРВАЛА, поэтому
-    interval_tolerance строже (0.05 вместо 0.1) и min_repeats выше (4
-    вместо 3) — ни человек, ни случайное совпадение разных участников
-    не может держать интервал в пределах нескольких процентов много
-    раз подряд, а чистый программный цикл может.
-
-Медленные "прокиды" (slow_loose/slow_strict) и мягкие пресеты с
-чередованием объёма при ограниченном числе вариантов (fast_loose)
-остаются удалены — решение принято ранее, возвращать не планируется.
-twap_strict — не то же самое, что fast_loose: там было "1-2 конкретных
-чередующихся значения", здесь — "объём не важен вообще".
-
-Список тикеров и ручные пороги пользователя (мин. лотов, мин. сек
-интервала, мин. повторов, активен/отключён) по-прежнему живут в
-ticker_settings.json (см. ticker_settings.py) — редактируются через GUI
-("⚙ Настройки тикеров"). Если у тикера задан ручной
-min_interval/min_repeats — он переопределяет соответствующее поле
-пресета именно для этого тикера (см. get_detector_configs ниже).
-get_tracked_symbols() — точка входа для получения списка активных
-тикеров.
-
-TICKER_SETTINGS ниже — ЭТО ДРУГОЕ: тонкая настройка на уровне кода
-(какие пресеты включены, свой min_qty_percentile), которую меняет
-разработчик, а не трейдер через GUI. Не путать с ticker_settings.json.
+- "fast_strict" — робота считаем роботом, только если:
+  - объём — ЛИБО одно и то же значение каждый раз, ЛИБО
+    чередование ДВУХ конкретных значений (max_qty_variants=2,
+    каждое совпадает ТОЧНО — не диапазон/допуск, а именно
+    конкретные повторяющиеся числа, например 45 и 46);
+    max_qty_ratio=1.5 защищает от попадания в ту же серию второго
+    значения, которое слишком далеко от первого (это было бы уже
+    не "чередование одного робота", а случайное совпадение);
+  - интервал между ударами одинаковый (± interval_tolerance от
+    предыдущего фактического интервала в этой же серии) — без
+    запасных/смягчённых путей принятия;
+  - интервал НЕ короче 3 секунд;
+  - минимум 3 срабатывания подряд;
+  - серия закрывается только после 2 пропущенных max_interval
+    подряд (CLOSE_AFTER_MISSES в detectors/interval_robot.py), не
+    после первого — чтобы не терять серию из-за случайного разового
+    пропуска.
+  ПОПРОБОВАЛИ И ОТКАЗАЛИСЬ (ветка experiments): допуск объёма в виде
+  диапазона (±N лотов вокруг любого значения) и запасной "медианный"
+  критерий принятия интервала, если строгий не прошёл. Оба решили не
+  переносить — для скальпинга (владелец заходит в сделку "по рынку"
+  вслед за роботом секунда в секунду) любое смягчение критерия
+  повышает риск ложного сигнала, а не помогает.
+- "twap_strict" — для паттерна "крупная заявка, нарезанная по
+  ВРЕМЕНИ на равные интервалы, с разным объёмом каждый раз" (найдено
+  на реальных логах: PLZL, BELU). Объём вообще не участвует в
+  матчинге (ignore_qty=True) — единственная защита от случайных
+  совпадений это точность интервала, поэтому interval_tolerance
+  строже (0.03) и min_repeats выше (4).
+Медленные "прокиды" (slow_loose/slow_strict) остаются удалены.
+Список тикеров и ручные пороги пользователя живут в
+ticker_settings.json (см. ticker_settings.py) — редактируются через GUI.
+РУЧНЫЕ ПЕРЕОПРЕДЕЛЕНИЯ (min_interval/min_repeats из ticker_settings.json)
+МОГУТ ТОЛЬКО УЖЕСТОЧАТЬ пресет, не ослаблять: берётся max(ручное,
+пресетное). Причина (по данным недельного журнала 2026-08-10..13):
+ручные min_repeats=3 понизили twap_strict с родных 4 до 3 — и twap
+выдал 56 тыс. сигналов с 3 повторами (потоп ложных срабатываний).
+Ужесточение (например, 5 для SBER) работает как раньше.
+TICKER_SETTINGS ниже — тонкая настройка на уровне кода (какие пресеты
+включены, свой min_qty_percentile), не путать с ticker_settings.json.
 """
-
 from ticker_settings import get_active_symbols, load_settings
 
 DETECTOR_PRESETS = {
@@ -52,31 +49,27 @@ DETECTOR_PRESETS = {
         "min_interval": 3.0,
         "max_interval": 30.0,
         "min_repeats": 3,
-        "max_qty_variants": 1,
+        "max_qty_variants": 2,
+        "max_qty_ratio": 1.5,
         "interval_tolerance": 0.1,
+        "time_window_sec": 0.5,  # только для справочной stability_ratio
     },
     "twap_strict": {
         "min_interval": 3.0,
         "max_interval": 60.0,
         "min_repeats": 4,
         "ignore_qty": True,
-        "interval_tolerance": 0.05,
+        "interval_tolerance": 0.03,
+        "time_window_sec": 0.5,
     },
 }
 
-# Настройки по конкретным тикерам — уровень разработчика (не GUI).
-#   min_qty_percentile — низкий ПОЛ (не потолок!) дневного распределения
-#                        объёма в лотах
-#   presets             — какие пресеты из DETECTOR_PRESETS включены
 TICKER_SETTINGS = {
-    # Индивидуальные переопределения добавим сюда, если после наблюдения
-    # окажется, что какой-то бумаге нужен свой min_qty_percentile или
-    # свой набор пресетов (например, twap_strict только для тех
-    # тикеров, где помощник подтвердит регулярность паттерна день ото
-    # дня — см. задание про analyze_parallel.py).
+    # Индивидуальные переопределения — если после наблюдения окажется,
+    # что какой-то бумаге нужен свой min_qty_percentile или набор
+    # пресетов.
 }
 
-# Настройки по умолчанию — для тикеров без отдельной записи выше.
 DEFAULT_SETTINGS = {
     "min_qty_percentile": 5,
     "presets": ["fast_strict", "twap_strict"],
@@ -84,44 +77,30 @@ DEFAULT_SETTINGS = {
 
 
 def get_tracked_symbols() -> list[str]:
-    """Список активных тикеров — читается из ticker_settings.json
-    (тикеры с active=False сюда не попадают)."""
     return get_active_symbols(load_settings())
 
 
 def get_min_qty_percentile(symbol: str) -> float:
-    """Возвращает, какой процентиль дневного объёма использовать как
-    нижний порог (пол) для этого тикера. Используется, только если у
-    тикера НЕТ ручного min_qty в ticker_settings.json."""
     ticker_cfg = TICKER_SETTINGS.get(symbol, DEFAULT_SETTINGS)
     return ticker_cfg.get("min_qty_percentile", DEFAULT_SETTINGS["min_qty_percentile"])
 
 
 def get_detector_configs(symbol: str, min_qty: int, override: dict | None = None) -> list[dict]:
-    """Возвращает список готовых настроек — по одному словарю на каждый
-    включённый для тикера пресет. min_qty вычисляется заранее (снаружи,
-    в run_detectors.py / live_screener.py) — здесь просто подставляется
-    в пресет.
-
-    override — ручные настройки этого тикера из ticker_settings.json
-    (поля min_interval / min_repeats). Если заданы (не None) —
-    переопределяют соответствующее поле пресета для ЭТОГО тикера;
-    max_interval пресета override не трогает."""
     ticker_cfg = TICKER_SETTINGS.get(symbol, DEFAULT_SETTINGS)
     presets = ticker_cfg.get("presets", DEFAULT_SETTINGS["presets"])
-
     override = override or {}
     manual_min_interval = override.get("min_interval")
     manual_min_repeats = override.get("min_repeats")
-
     configs = []
     for preset_name in presets:
         settings = dict(DETECTOR_PRESETS[preset_name])
         settings["min_qty"] = min_qty
         settings["preset_name"] = preset_name
+        # Переопределение может только УЖЕСТОЧАТЬ пресет (max),
+        # не ослаблять — см. докстринг модуля про потоп 3-повторных.
         if manual_min_interval is not None:
-            settings["min_interval"] = manual_min_interval
+            settings["min_interval"] = max(manual_min_interval, settings["min_interval"])
         if manual_min_repeats is not None:
-            settings["min_repeats"] = manual_min_repeats
+            settings["min_repeats"] = max(manual_min_repeats, settings["min_repeats"])
         configs.append(settings)
     return configs

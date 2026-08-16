@@ -1,69 +1,71 @@
 """
 Приблуда на python — универсальный детектор периодичности ("роботов").
-
 Серия сделок с одинаковой стороной (side), повторяющаяся с определённым
-интервалом. Три режима матчинга объёма/интервала, задаются пресетом:
-
-  - "loose" (широкий): любая сделка, попавшая в абсолютный диапазон
-    [min_interval, max_interval] от предыдущей, продлевает серию.
-
-  - "strict" (чёткий, через interval_tolerance): первая пара сделок
-    задаёт "эталонный" интервал для этой конкретной серии, а каждая
-    следующая сделка должна укладываться в него ± interval_tolerance
-    от ПРЕДЫДУЩЕГО фактического интервала в этой же серии. Объём при
-    этом должен совпадать (max_qty_variants=1).
-
-  - "TWAP" (ignore_qty=True): как strict по интервалу (обычно с более
-    жёстким interval_tolerance, например 0.05 вместо 0.1), но объём
-    ВООБЩЕ не участвует в матчинге — любая сделка нужной стороны с
-    подходящим интервалом продлевает серию, независимо от размера.
-    Это ловит паттерн "крупная заявка, нарезанная по времени на равные
-    интервалы, с разным объёмом каждый раз" (найдено на реальных логах
-    по PLZL и BELU — десятки "параллельных" сигналов с одинаковым
-    таймингом и разным объёмом, которые strict-режим дробил на
-    отдельные несвязанные серии из-за требования точного объёма).
-
-    Поскольку объём здесь не фильтрует случайные совпадения, вся
-    ответственность за отсев случайности ложится на ТОЧНОСТЬ ИНТЕРВАЛА
-    (interval_tolerance) и число повторов (min_repeats) — оба должны
-    быть строже, чем в обычном strict, иначе легко словить шум. Идея:
-    ни человек, ни случайное совпадение разных участников не могут
-    держать интервал в пределах нескольких процентов МНОГО раз подряд
-    — а чистый программный цикл может.
-
+интервалом. Режимы матчинга объёма/интервала задаются пресетом:
+- объём: либо ТОЧНОЕ совпадение (max_qty_variants=1), либо
+  ЧЕРЕДОВАНИЕ конкретных значений (max_qty_variants=2 — например,
+  робот бьёт то 45, то 46 лотов; каждое из значений должно совпасть
+  ТОЧНО, диапазона/допуска между ними нет — max_qty_ratio защищает от
+  случайного попадания слишком далёкого второго значения в ту же
+  серию). Диапазон-допуск (±N лотов вокруг любого значения) в проекте
+  сознательно НЕ используется — пробовали смягчить так в ветке
+  experiments (qty_tolerance_lots), решили не переносить: диапазон
+  ловит "что угодно рядом", а не конкретное чередование, для
+  скальпинга это снижает уверенность в сигнале.
+- интервал: "strict" — первая пара сделок задаёт "эталонный"
+  интервал для конкретной серии, каждая следующая сделка должна
+  укладываться в него ± interval_tolerance от ПРЕДЫДУЩЕГО
+  фактического интервала. Без запасных/смягчённых путей принятия —
+  либо сделка укладывается в допуск, либо начинает новую серию.
+- "TWAP" (ignore_qty=True): объём вообще не участвует в матчинге —
+  ловит паттерн "крупная заявка, нарезанная по времени на равные
+  интервалы, с разным объёмом каждый раз" (подтверждено на реальных
+  логах: PLZL, BELU). Вся защита от случайных совпадений тут — на
+  точности интервала (interval_tolerance строже, min_repeats выше).
+  ВАЖНО (fix best-fit): в режиме ignore_qty сделка отдаётся кандидату,
+  чей ритм подходит ЛУЧШЕ всех (минимальное относительное отклонение
+  интервала), а не первому попавшемуся — иначе один TWAP-поток
+  расщепляется на параллельные дубли (видно на недельном журнале:
+  3-4 серии с одинаковым интервалом и таймстампами, но разными
+  наборами объёма).
+ФИКС СКОРОСТИ: список active[side] всегда отсортирован по last_ts по
+возрастанию (новая серия дописывается в конец, продлённая —
+переставляется в конец). Тогда: (а) просроченные серии всегда в голове
+списка и _prune_dead снимает их оттуда без полного сканирования;
+(б) поиск в матчинге идёт с конца списка и обрывается, как только
+интервал старше max_interval — сканируются только "живые" кандидаты,
+а не тысячи накопленных. На лентах в десятки тысяч сделок это
+ускоряет прогон в разы при том же результате.
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
-
-ДЖИТТЕР: каждый Candidate копит полный список интервалов между
-сделками серии — при закрытии серии считаем по нему стандартное
-отклонение в миллисекундах (Signal.jitter_ms). Только измерение
-постфактум, не влияет на матчинг/продление серии.
-
+ДЖИТТЕР и STABILITY_RATIO: каждый Candidate копит полный список
+интервалов между сделками серии. При закрытии серии считаем:
+- jitter_ms — стандартное отклонение интервалов, мс
+- stability_ratio — доля интервалов, попавших в пределы
+  time_window_sec от медианы (если пресет задаёт time_window_sec)
+Оба — ТОЛЬКО измерение постфактум, справочные метрики для трейдера/
+для последующего анализа. НИ ОДНА из них не влияет на то, продлевается
+серия или нет — это сознательное разделение "как решаем" (строгий
+допуск интервала) от "как оцениваем качество уже найденного" (эти
+метрики).
+CLOSE_AFTER_MISSES = 2: серия закрывается не после ПЕРВОГО пропущенного
+max_interval, а после ВТОРОГО — даёт роботу шанс пережить единичный
+случайный пропуск, не теряя уже накопленную серию.
 Для живого режима: on_trade() реагирует на приход сделки. check_overdue()
 вызывается по таймеру (watchdog), не привязанному к потоку сделок — но
-использует РОВНО ТЕ ЖЕ границы допуска, что и сам матчинг в
-_interval_fits, чтобы не "опережать" реальную логику детектора.
-
+предупреждение о просрочке использует ТЕ ЖЕ границы допуска, что и
+_interval_fits в матчинге, чтобы не "опережать" реальную логику.
 Производительность: для strict/loose кандидаты индексируются по объёму
 (qty) для быстрого точного совпадения. Для TWAP (ignore_qty=True) объём
-не индексируется — поиск линейный по активным сериям этой стороны, но
-это не проблема: MAX_ACTIVE_PER_SIDE всё равно ограничивает худший
-случай, а число одновременно живых серий на практике невелико.
+не индексируется — поиск по живому окну времени (см. фикс скорости).
 """
-
 import statistics
 from datetime import datetime, timezone
 
 from .base import Detector, Signal
 
-# Если у серии больше этого числа разных объёмов — в отображении/логе
-# показываем не полный список (может быть 20+ значений при TWAP), а
-# сводку "N разных объёмов, диапазон X–Y".
-MAX_QTY_VARIANTS_TO_LIST = 6
-
 
 class Candidate:
     """Одна потенциальная серия сделок одного робота, ещё не закрытая."""
-
     __slots__ = (
         "qty_variants", "count", "start_ts", "last_ts",
         "last_interval", "intervals", "warned",
@@ -75,15 +77,15 @@ class Candidate:
         self.start_ts = ts
         self.last_ts = ts
         self.last_interval: float | None = None  # появится после 2-й сделки
-        self.intervals: list[float] = []  # полная история интервалов серии, для джиттера
+        self.intervals: list[float] = []  # полная история интервалов серии
         self.warned = False  # предупреждение о просрочке уже выдавалось?
 
 
 class IntervalRobotDetector(Detector):
     name = "робот-интервал"
-
     MAX_SERIES_LENGTH = 20      # после ~20 повторов считаем серию завершённой
     MAX_ACTIVE_PER_SIDE = 3000  # предохранитель от неограниченного роста
+    CLOSE_AFTER_MISSES = 2      # сколько пропущенных max_interval ждать до удаления
 
     def __init__(self, symbol: str, settings: dict):
         super().__init__(symbol, settings)
@@ -95,22 +97,31 @@ class IntervalRobotDetector(Detector):
         self.max_qty_ratio = settings.get("max_qty_ratio")
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
-
+        # Только для stability_ratio (справочная метрика) — НЕ влияет
+        # на матчинг/продление серии.
+        self.time_window_sec = settings.get("time_window_sec", 0.0)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
             self.name = f"робот-интервал[{preset_name}]"
-
+        # active[side] — список Candidate, ВСЕГДА отсортирован по
+        # last_ts по возрастанию (см. докстринг модуля, ФИКС СКОРОСТИ).
         self.active: dict[str, list[Candidate]] = {}
         self.index: dict[str, dict[int, list[Candidate]]] = {}
 
     def _finalize(self, side: str, candidate: Candidate) -> Signal:
         avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
-
         jitter_ms = None
         if len(candidate.intervals) >= 2:
             jitter_ms = statistics.pstdev(candidate.intervals) * 1000
-
+        stability_ratio = None
+        if len(candidate.intervals) >= 2 and self.time_window_sec > 0:
+            median_interval = statistics.median(candidate.intervals)
+            good = sum(
+                1 for iv in candidate.intervals
+                if abs(iv - median_interval) <= self.time_window_sec
+            )
+            stability_ratio = good / len(candidate.intervals)
         return Signal(
             detector_name=self.name,
             symbol=self.symbol,
@@ -121,12 +132,15 @@ class IntervalRobotDetector(Detector):
             start_ts=candidate.start_ts,
             end_ts=candidate.last_ts,
             jitter_ms=jitter_ms,
+            stability_ratio=stability_ratio,
         )
 
     def _register(self, side: str, candidate: Candidate) -> None:
+        # last_ts новой серии = текущее время сделки (максимум в списке),
+        # поэтому дописывание в конец сохраняет сортировку по last_ts.
         self.active.setdefault(side, []).append(candidate)
         if self.ignore_qty:
-            return  # не индексируем по объёму — он не участвует в матчинге
+            return
         side_index = self.index.setdefault(side, {})
         for qty in candidate.qty_variants:
             side_index.setdefault(qty, []).append(candidate)
@@ -142,8 +156,8 @@ class IntervalRobotDetector(Detector):
             bucket = side_index.get(qty)
             if bucket and candidate in bucket:
                 bucket.remove(candidate)
-                if not bucket:
-                    del side_index[qty]
+            if not bucket:
+                del side_index[qty]
 
     def _index_new_variant(self, side: str, candidate: Candidate, qty: int) -> None:
         if self.ignore_qty:
@@ -151,12 +165,18 @@ class IntervalRobotDetector(Detector):
         self.index.setdefault(side, {}).setdefault(qty, []).append(candidate)
 
     def _prune_dead(self, side: str, now_ts: float) -> list[Signal]:
+        """Закрывает серии, по которым пропущено CLOSE_AFTER_MISSES
+        интервалов max_interval (ждём второй пропуск, а не первый).
+        Список отсортирован по last_ts, просроченные — всегда в голове,
+        снимаем их оттуда без полного сканирования."""
         signals: list[Signal] = []
-        for candidate in list(self.active.get(side, [])):
-            if now_ts - candidate.last_ts > self.max_interval:
-                if candidate.count >= self.min_repeats:
-                    signals.append(self._finalize(side, candidate))
-                self._unregister(side, candidate)
+        close_threshold = self.max_interval * self.CLOSE_AFTER_MISSES
+        active_list = self.active.get(side, [])
+        while active_list and now_ts - active_list[0].last_ts > close_threshold:
+            candidate = active_list.pop(0)
+            if candidate.count >= self.min_repeats:
+                signals.append(self._finalize(side, candidate))
+            self._unregister(side, candidate)
         return signals
 
     def _enforce_cap(self, side: str) -> list[Signal]:
@@ -164,9 +184,7 @@ class IntervalRobotDetector(Detector):
         overflow = len(active_list) - self.MAX_ACTIVE_PER_SIDE
         if overflow <= 0:
             return []
-
         to_evict = sorted(active_list, key=lambda c: (c.count, c.start_ts))[:overflow]
-
         signals: list[Signal] = []
         for candidate in to_evict:
             if candidate.count >= self.min_repeats:
@@ -192,46 +210,59 @@ class IntervalRobotDetector(Detector):
 
     def _find_match(self, side: str, qty: int, ts: float) -> Candidate | None:
         if self.ignore_qty:
-            # TWAP: объём не участвует — ищем любую активную серию этой
-            # стороны, к которой подходит интервал.
-            for candidate in self.active.get(side, []):
+            # FIX (best-fit): сделка уходит кандидату, чей ритм подходит
+            # ЛУЧШЕ всех (минимальное относительное отклонение интервала),
+            # а не первому попавшемуся — иначе один TWAP-поток
+            # расщепляется на параллельные дубли.
+            # FIX (speed): идём с конца списка (самые свежие last_ts) и
+            # обрываемся, как только интервал старше max_interval —
+            # старше по списку только дальше, они не подойдут.
+            best_candidate = None
+            best_score = None
+            for candidate in reversed(self.active.get(side, [])):
                 interval = ts - candidate.last_ts
-                if self._interval_fits(candidate, interval):
-                    return candidate
-            return None
+                if interval > self.max_interval:
+                    break
+                if not self._interval_fits(candidate, interval):
+                    continue
+                if candidate.last_interval is None:
+                    score = (1, 0.0)   # ритм ещё не сложился — ниже приоритет
+                else:
+                    dev = abs(interval - candidate.last_interval) / candidate.last_interval
+                    score = (0, dev)
+                if best_score is None or score < best_score:
+                    best_score = score
+                    best_candidate = candidate
+            return best_candidate
 
         exact_candidates = self.index.get(side, {}).get(qty, [])
         for candidate in exact_candidates:
             interval = ts - candidate.last_ts
             if self._interval_fits(candidate, interval):
                 return candidate
-
-        for candidate in self.active.get(side, []):
+        for candidate in reversed(self.active.get(side, [])):
+            interval = ts - candidate.last_ts
+            if interval > self.max_interval:
+                break
             if qty in candidate.qty_variants:
                 continue
             if len(candidate.qty_variants) >= self.max_qty_variants:
                 continue
-            interval = ts - candidate.last_ts
             if not self._interval_fits(candidate, interval):
                 continue
             if not self._qty_fits_loose(candidate, qty):
                 continue
             return candidate
-
         return None
 
     def on_trade(self, trade: dict) -> list[Signal]:
         qty = trade["qty"]
         if qty < self.min_qty:
             return []
-
         side = trade["side"]
         ts = trade["timestamp"] / 1000.0
-
         signals = self._prune_dead(side, ts)
-
         match = self._find_match(side, qty, ts)
-
         if match is not None:
             interval = ts - match.last_ts
             match.intervals.append(interval)
@@ -241,33 +272,39 @@ class IntervalRobotDetector(Detector):
                 self._index_new_variant(side, match, qty)
             match.count += 1
             match.last_ts = ts
-            match.warned = False  # пришёл вовремя — сбрасываем прежнюю просрочку
+            match.warned = False
+            # Продлённая серия получает last_ts = текущее время —
+            # переставляем в конец, сохраняя сортировку списка.
+            active_list = self.active.get(side, [])
+            if active_list and active_list[-1] is not match:
+                active_list.remove(match)
+                active_list.append(match)
             if match.count >= self.MAX_SERIES_LENGTH:
                 signals.append(self._finalize(side, match))
                 self._unregister(side, match)
         else:
             new_candidate = Candidate(qty, ts)
             self._register(side, new_candidate)
-
-        signals.extend(self._enforce_cap(side))
+            signals.extend(self._enforce_cap(side))
         return signals
 
     def check_overdue(self, now_ts: float) -> tuple[list[Signal], list[str]]:
-        """Проверка по таймеру (watchdog в живом режиме), не привязанная
-        к приходу новой сделки."""
-        signals: list[Signal] = []
-        warnings: list[str] = []
-
+        """Проверка по таймеру (watchdog в живом режиме). Предупреждает
+        о просрочке при первом пропуске ожидаемого интервала, но удаляет
+        серию только после CLOSE_AFTER_MISSES пропущенных max_interval."""
+        signals = []
+        warnings = []
+        close_threshold = self.max_interval * self.CLOSE_AFTER_MISSES
         for side, candidates in list(self.active.items()):
             for candidate in list(candidates):
                 gap = now_ts - candidate.last_ts
-
-                if gap > self.max_interval:
+                if gap > close_threshold:
                     if candidate.count >= self.min_repeats:
                         signals.append(self._finalize(side, candidate))
                     self._unregister(side, candidate)
                     continue
-
+                if candidate.count < self.min_repeats:
+                    continue
                 if self.interval_tolerance is not None and candidate.last_interval is not None:
                     max_fit_interval = candidate.last_interval * (1 + self.interval_tolerance)
                     if gap > max_fit_interval and not candidate.warned:
@@ -283,24 +320,24 @@ class IntervalRobotDetector(Detector):
                             f"повторов={candidate.count} просрочка {overdue_by:.1f}с "
                             f"(ожидался удар в {expected_str} UTC)"
                         )
-
         return signals, warnings
 
     def get_active_snapshot(self, now_ts: float) -> list[dict]:
-        """Текущий срез активных серий — для живой таблицы (dashboard).
-        Только читает состояние, ничего не меняет."""
+        """Текущий срез активных серий — для живой таблицы (dashboard)."""
         rows: list[dict] = []
         for side, candidates in self.active.items():
             for candidate in candidates:
                 if candidate.count < 2:
                     continue
-
                 if candidate.last_interval is not None:
                     expected_next_ts = candidate.last_ts + candidate.last_interval
                     seconds_to_next = expected_next_ts - now_ts
                 else:
                     seconds_to_next = None
-
+                if len(candidate.intervals) >= 2:
+                    jitter_ms = statistics.pstdev(candidate.intervals) * 1000
+                else:
+                    jitter_ms = None
                 rows.append({
                     "symbol": self.symbol,
                     "preset": self.preset_name,
@@ -310,12 +347,13 @@ class IntervalRobotDetector(Detector):
                     "repeats": candidate.count,
                     "seconds_to_next": seconds_to_next,
                     "start_ts": candidate.start_ts,
+                    "jitter_ms": jitter_ms,
                 })
         return rows
 
     def flush(self) -> list[Signal]:
         signals = []
-        for side, candidates in self.active.items():
+        for side, candidates in list(self.active.items()):
             for candidate in candidates:
                 if candidate.count >= self.min_repeats:
                     signals.append(self._finalize(side, candidate))
