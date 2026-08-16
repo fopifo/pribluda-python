@@ -36,6 +36,16 @@
 интервал старше max_interval — сканируются только "живые" кандидаты,
 а не тысячи накопленных. На лентах в десятки тысяч сделок это
 ускоряет прогон в разы при том же результате.
+ЦЕНОВЫЕ МЕТРИКИ (добавлено 2026-08-17, строго справочно, НЕ влияют
+на матчинг/продление/закрытие серии и НЕ меняют формат лога):
+каждая серия копит по своим сделкам first_price, last_price,
+price_shift (last-first), sum_qty (суммарный съеденный объём) и
+same_price_ratio (доля ударов в самую частую цену). Это сырьё для
+подписей в живой таблице: "двигает цену" (price_shift растёт в сторону
+робота) vs "долбит стену" (большой sum_qty при same_price_ratio~1 и
+price_shift~0 — робот против плотности/айсберга). Если в сделке нет
+price (старые данные/тесты) — метрики остаются None и всё работает
+как раньше.
 Фильтр входа (min_qty) — объём в лотах, низкий пол (не потолок).
 ДЖИТТЕР и STABILITY_RATIO: каждый Candidate копит полный список
 интервалов между сделками серии. При закрытии серии считаем:
@@ -69,9 +79,11 @@ class Candidate:
     __slots__ = (
         "qty_variants", "count", "start_ts", "last_ts",
         "last_interval", "intervals", "warned",
+        "first_price", "last_price", "price_counts", "priced_hits",
+        "sum_qty",
     )
 
-    def __init__(self, qty: int, ts: float):
+    def __init__(self, qty: int, ts: float, price: float | None = None):
         self.qty_variants: set[int] = {qty}
         self.count = 1
         self.start_ts = ts
@@ -79,6 +91,14 @@ class Candidate:
         self.last_interval: float | None = None  # появится после 2-й сделки
         self.intervals: list[float] = []  # полная история интервалов серии
         self.warned = False  # предупреждение о просрочке уже выдавалось?
+        # Ценовые метрики (справочные, см. докстринг модуля).
+        self.first_price = price
+        self.last_price = price
+        self.price_counts: dict[float, int] = {}
+        if price is not None:
+            self.price_counts[price] = 1
+        self.priced_hits = 1 if price is not None else 0
+        self.sum_qty = qty
 
 
 class IntervalRobotDetector(Detector):
@@ -244,12 +264,23 @@ class IntervalRobotDetector(Detector):
             return candidate
         return None
 
+    def _apply_price(self, candidate: Candidate, qty: int, price: float | None) -> None:
+        """Накапливает справочные ценовые метрики серии. НЕ влияет на
+        матчинг — только измеряет (см. докстринг модуля)."""
+        candidate.sum_qty += qty
+        if price is None:
+            return
+        candidate.last_price = price
+        candidate.priced_hits += 1
+        candidate.price_counts[price] = candidate.price_counts.get(price, 0) + 1
+
     def on_trade(self, trade: dict) -> list[Signal]:
         qty = trade["qty"]
         if qty < self.min_qty:
             return []
         side = trade["side"]
         ts = trade["timestamp"] / 1000.0
+        price = trade.get("price")
         signals = self._prune_dead(side, ts)
         match = self._find_match(side, qty, ts)
         if match is not None:
@@ -262,6 +293,7 @@ class IntervalRobotDetector(Detector):
             match.count += 1
             match.last_ts = ts
             match.warned = False
+            self._apply_price(match, qty, price)
             # Продлённая серия получает last_ts = текущее время —
             # переставляем в конец, сохраняя сортировку списка.
             active_list = self.active.get(side, [])
@@ -272,7 +304,7 @@ class IntervalRobotDetector(Detector):
                 signals.append(self._finalize(side, match))
                 self._unregister(side, match)
         else:
-            new_candidate = Candidate(qty, ts)
+            new_candidate = Candidate(qty, ts, price)
             self._register(side, new_candidate)
             signals.extend(self._enforce_cap(side))
         return signals
@@ -312,7 +344,10 @@ class IntervalRobotDetector(Detector):
         return signals, warnings
 
     def get_active_snapshot(self, now_ts: float) -> list[dict]:
-        """Текущий срез активных серий — для живой таблицы (dashboard)."""
+        """Текущий срез активных серий — для живой таблицы (dashboard).
+        Ценовые поля (price_first/price_last/price_shift/same_price_ratio/
+        sum_qty) — справочные, GUI может показывать их как подписи
+        "двигает цену"/"долбит стену"; на логику не влияют."""
         rows: list[dict] = []
         for side, candidates in self.active.items():
             for candidate in candidates:
@@ -327,6 +362,12 @@ class IntervalRobotDetector(Detector):
                     jitter_ms = statistics.pstdev(candidate.intervals) * 1000
                 else:
                     jitter_ms = None
+                same_price_ratio = None
+                if candidate.priced_hits > 0 and candidate.price_counts:
+                    same_price_ratio = max(candidate.price_counts.values()) / candidate.priced_hits
+                price_shift = None
+                if candidate.first_price is not None and candidate.last_price is not None:
+                    price_shift = candidate.last_price - candidate.first_price
                 rows.append({
                     "symbol": self.symbol,
                     "preset": self.preset_name,
@@ -337,6 +378,11 @@ class IntervalRobotDetector(Detector):
                     "seconds_to_next": seconds_to_next,
                     "start_ts": candidate.start_ts,
                     "jitter_ms": jitter_ms,
+                    "price_first": candidate.first_price,
+                    "price_last": candidate.last_price,
+                    "price_shift": price_shift,
+                    "same_price_ratio": same_price_ratio,
+                    "sum_qty": candidate.sum_qty,
                 })
         return rows
 

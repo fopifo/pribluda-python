@@ -2,8 +2,8 @@
 """
 Модульные тесты для детектора IntervalRobotDetector.
 """
-
 import pytest
+
 from detectors.interval_robot import IntervalRobotDetector
 from detectors.base import Signal
 
@@ -42,7 +42,6 @@ def make_trade(qty: int, side: str, ts_sec: float) -> dict:
 
 
 class TestIntervalRobotDetector:
-
     def test_basic_sequence_strict(self, strict_config):
         """Проверяем, что детектор находит серию из трёх сделок с одинаковым интервалом."""
         detector = IntervalRobotDetector("SBER", strict_config)
@@ -55,7 +54,6 @@ class TestIntervalRobotDetector:
         for t in trades:
             signals.extend(detector.on_trade(t))
         signals.extend(detector.flush())
-
         # Должен быть один сигнал, repeats = 3
         assert len(signals) == 1
         s = signals[0]
@@ -175,18 +173,27 @@ class TestIntervalRobotDetector:
         # Теперь прошло 3.5 секунды после последней сделки (ожидаемый интервал 3.0 + 15% = 3.45)
         now = 6.5  # 0 + 3.0 + 3.5
         signals, warnings = detector.check_overdue(now)
-        # Должно быть предупреждение (но не закрытие, т.к. ещё не превышен max_interval=30)
+        # Должно быть предупреждение (но не закрытие, т.к. ещё не превышен порог закрытия)
         assert len(warnings) == 1
         assert "просрочка" in warnings[0]
         assert len(signals) == 0
 
-        # Если пройдёт больше max_interval, то check_overdue закроет серию
+        # Серия закрывается только после CLOSE_AFTER_MISSES=2 пропущенных
+        # max_interval (порог закрытия = 2 * 30 = 60с после последнего удара).
+        # Через 32с после последнего удара — ещё НЕ закрытие и без новых предупреждений
+        # (предупреждение выдаётся один раз).
         now2 = 35.0
         signals2, warnings2 = detector.check_overdue(now2)
-        assert len(signals2) == 1
-        s = signals2[0]
+        assert len(signals2) == 0
+        assert len(warnings2) == 0
+
+        # После второго пропущенного max_interval (gap > 60) серия закрывается.
+        now3 = 3.0 + 61.0
+        signals3, warnings3 = detector.check_overdue(now3)
+        assert len(signals3) == 1
+        s = signals3[0]
         assert s.repeats == 2
-        assert len(warnings2) == 0  # после закрытия предупреждение не выдаётся
+        assert len(warnings3) == 0  # после закрытия предупреждение не выдаётся
 
     def test_max_series_length(self, strict_config):
         """Проверяем, что серия закрывается при достижении MAX_SERIES_LENGTH (20)."""

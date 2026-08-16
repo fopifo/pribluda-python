@@ -6,3 +6,5 @@ dumps/
 logs/
 __pycache__/
 *.pyc
+data/
+output/

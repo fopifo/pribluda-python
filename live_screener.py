@@ -3,66 +3,52 @@
 получает сделки в реальном времени и прогоняет через те же детекторы,
 что и исторический run_detectors.py — но сигналы появляются сразу, без
 ожидания конца дня.
-
 Список тикеров, их активность (мониторим/нет) и ручные пороги (мин.
 лотов, мин. сек интервала, мин. повторов) берутся из
 ticker_settings.json (см. ticker_settings.py) — редактируются через GUI
 ("⚙ Настройки тикеров").
-
 ЖИВОЕ ПРИМЕНЕНИЕ НАСТРОЕК: settings_watcher_loop раз в
 SETTINGS_POLL_INTERVAL_SEC секунд перечитывает ticker_settings.json и
 применяет разницу на лету — подробности см. в _apply_settings_diff.
-
 АРБИТРАЖ: тот же поток сделок кормит мониторы арбитражных связок
 (arbitrage/pair_monitor.py, связки — в arb_pairs.json). У каждой связки
 свой режим:
-  - "ratio_pct" — отклонение отношения цен в процентах (нейтральный
-    сигнал "расхождение")
-  - "absolute_rub" — отклонение абсолютной разницы цен в рублях
-    (позитивный сигнал "прострел" — торговая возможность, плюс
-    отдельный сигнал "схождение" — когда пора выходить из связки)
-
+- "ratio_pct" — отклонение отношения цен в процентах (нейтральный
+  сигнал "расхождение")
+- "absolute_rub" — отклонение абсолютной разницы цен в рублях
+  (позитивный сигнал "прострел" — торговая возможность, плюс
+  отдельный сигнал "схождение" — когда пора выходить из связки)
 info_tabs_loop передаёт now_ts в snapshot() — монитор связки помнит
 последнее событие ещё 30 секунд (DISPLAY_HOLD_SEC в pair_monitor.py),
 чтобы GUI не пропустил короткоживущий прострел между двумя опросами
 (опрос раз в INFO_TABS_INTERVAL_SEC секунд).
-
 ВРЕМЕННО (пока не трогаем tg_bot/): в Telegram уходят только сигналы
 режима "ratio_pct" вида "divergence" — существующий bot.py умеет
 форматировать только их (проценты). "Прострелы"/"схождения"
 (absolute_rub, MTLR/MTLRP) в Telegram пока не уходят — только в лог и
 GUI. Как только bot.py будет обновлён под оба режима — снять это
 ограничение в _notify_arb.
-
 ФАНДИНГ / НОВОСТИ: отдельные независимые источники (tg_bot/funding.py,
 tg_bot/news_moex.py), заводятся своими отдельными экземплярами кэша.
-
 TELEGRAM: РОБОТЫ НЕ отправляются в Telegram (см. _notify_robot) —
 сигнал приходит с задержкой, только когда серия закрылась. Наблюдение
 за роботами — через GUI.
-
 ЛОГ: пишется в output/live_signals_<дата>.txt, новый файл каждый день.
 Хранятся только последние LOG_RETENTION_DAYS дней — старые файлы
 удаляются автоматически при запуске (rotate_old_logs).
-
 СЕТЕВАЯ УСТОЙЧИВОСТЬ: get_access_token использует HTTP-сессию с
 автоматическими повторными попытками — на некоторых сетях изредка
 рвётся TLS-соединение, это разовый сетевой сбой, не проблема запроса.
-
 Помимо этого работает "сторож" (watchdog) — раз в WATCHDOG_INTERVAL_SEC
 секунд проверяет все активные серии по всем тикерам и предупреждает,
 если робот просрочил ожидаемый следующий удар.
-
 WebSocket и детекторы работают в ОТДЕЛЬНОМ ФОНОВОМ ПОТОКЕ, Tkinter-окно
 — в главном потоке (жёсткое требование самого Tkinter).
-
 Access Token живёт 30 минут — соединение переустанавливается заново
 каждые RECONNECT_INTERVAL_SEC секунд; состояние детекторов и
 арбитражных мониторов при этом СОХРАНЯЕТСЯ.
-
 Нужны библиотеки: pip install websockets aiohttp requests --break-system-packages
 """
-
 import asyncio
 import json
 import os
@@ -82,7 +68,6 @@ from urllib3.util.retry import Retry
 
 BASE_DIR = Path(__file__).resolve().parent
 TG_BOT_DIR = BASE_DIR / "tg_bot"
-
 sys.path.insert(0, str(TG_BOT_DIR))
 
 from arb_config import load_pairs, get_pair_symbols
@@ -103,11 +88,10 @@ DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
 
 load_dotenv(ENV_PATH)
-
 REFRESH_TOKEN = os.getenv("ALOR_REFRESH_TOKEN")
+
 OAUTH_URL = "https://oauth.alor.ru/refresh"
 WS_URL = "wss://api.alor.ru/ws"
-
 BOARD = "TQBR"
 EXCHANGE = "MOEX"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -169,7 +153,6 @@ def compute_min_qty(symbol: str, override: dict) -> int:
     if manual is not None:
         print(f"  {symbol}: min_qty = {manual} (задано вручную в ticker_settings.json)")
         return manual
-
     data_file = find_latest_file(symbol)
     if data_file is None:
         print(f"  {symbol}: нет сохранённой истории — min_qty=1 (без фильтра)")
@@ -286,7 +269,6 @@ async def _apply_settings_diff(
 ) -> None:
     old_active = set(get_active_symbols(old_settings))
     new_active = set(get_active_symbols(new_settings))
-
     for symbol in sorted(new_active - old_active):
         override = new_settings.get(symbol, {})
         min_qty = compute_min_qty(symbol, override)
@@ -294,14 +276,12 @@ async def _apply_settings_diff(
         live_state.detectors[symbol] = [IntervalRobotDetector(symbol, cfg) for cfg in configs]
         await _subscribe_symbol(live_state, symbol)
         log_line(log_file, f"ВКЛЮЧЁН  {symbol} (min_qty={min_qty})")
-
     for symbol in sorted(old_active - new_active):
         if symbol in live_state.detectors:
             del live_state.detectors[symbol]
-            if symbol not in live_state.arb_symbols:
-                await _unsubscribe_symbol(live_state, symbol)
-            log_line(log_file, f"ОТКЛЮЧЁН  {symbol}")
-
+        if symbol not in live_state.arb_symbols:
+            await _unsubscribe_symbol(live_state, symbol)
+        log_line(log_file, f"ОТКЛЮЧЁН  {symbol}")
     for symbol in sorted(old_active & new_active):
         if new_settings.get(symbol) == old_settings.get(symbol):
             continue
@@ -314,16 +294,13 @@ async def _apply_settings_diff(
 
 async def settings_watcher_loop(live_state: LiveState, log_file) -> None:
     previous = dict(live_state.settings)
-
     while True:
         await asyncio.sleep(SETTINGS_POLL_INTERVAL_SEC)
         current = load_settings()
         if current == previous:
             continue
-
         if live_state.ws is None:
             continue
-
         await _apply_settings_diff(live_state, previous, current, log_file)
         previous = current
         live_state.settings = current
@@ -358,7 +335,6 @@ async def info_tabs_loop(
     while True:
         now_ts = datetime.now().timestamp()
         shared_state.arb_rows = [m.snapshot(now_ts) for m in live_state.arb_monitors]
-
         funding_rows = []
         for row in funding_cache.rows:
             name = FUNDING_NAMES.get(row["secid"], row["secid"])
@@ -369,7 +345,6 @@ async def info_tabs_loop(
         shared_state.funding_updated_at = (
             funding_cache.updated_at.strftime("%H:%M:%S") if funding_cache.updated_at else ""
         )
-
         news_items = []
         for row in news_cache.items[:8]:
             news_id = row.get("id")
@@ -382,7 +357,6 @@ async def info_tabs_loop(
         shared_state.news_updated_at = (
             news_cache.updated_at.strftime("%H:%M:%S") if news_cache.updated_at else ""
         )
-
         await asyncio.sleep(INFO_TABS_INTERVAL_SEC)
 
 
@@ -396,14 +370,12 @@ async def _notify_robot(signal, log_file) -> None:
 
 async def _notify_arb(signal, log_file) -> None:
     log_line(log_file, f"⚡ {signal}")
-
     if signal.mode != "ratio_pct" or signal.kind != "divergence":
         # ВРЕМЕННО: bot.py (tg_bot/) пока умеет форматировать только
         # "divergence" в режиме ratio_pct (проценты) — absolute_rub
         # (прострелы/схождения MTLR/MTLRP) в Telegram пока не уходят,
         # см. докстринг модуля.
         return
-
     await telegram_bot.send_arb_alert({
         "pair_name": signal.pair_name,
         "symbol_a": signal.symbol_a,
@@ -418,56 +390,49 @@ async def run_session(live_state: LiveState, log_file) -> None:
     access_token = get_access_token(REFRESH_TOKEN)
     live_state.access_token = access_token
     print("Токен получен, подключаюсь к WebSocket...")
-
     async with websockets.connect(WS_URL, ping_interval=15, ping_timeout=10) as ws:
         live_state.ws = ws
         live_state.guid_to_symbol = {}
         live_state.symbol_to_guid = {}
-
         try:
             all_symbols = build_subscription_symbols(live_state)
             for symbol in sorted(all_symbols):
                 await _subscribe_symbol(live_state, symbol)
-
             print(f"Подписался на {len(all_symbols)} тикеров "
                   f"({len(live_state.detectors)} роботы + "
                   f"{len(live_state.arb_symbols)} арбитраж, с пересечениями), жду сделки...")
-
             loop = asyncio.get_event_loop()
             deadline = loop.time() + RECONNECT_INTERVAL_SEC
-
             while loop.time() < deadline:
                 timeout = deadline - loop.time()
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=max(timeout, 0.1))
                 except asyncio.TimeoutError:
                     break
-
                 message = json.loads(raw)
-
                 if message.get("httpCode") is not None:
                     if message.get("httpCode") != 200:
                         print(f"Ошибка подписки: {message}")
-                    continue
-
+                        continue
                 guid = message.get("guid")
                 symbol = live_state.guid_to_symbol.get(guid)
                 if symbol is None:
                     continue
-
                 data = message.get("data")
                 if not data:
                     continue
-
+                # price добавлен 2026-08-17: детектор копит по серии
+                # справочные ценовые метрики ("двигает цену"/"долбит
+                # стену"), на матчинг они не влияют.
                 trade = {
                     "qty": data["qty"],
                     "side": data["side"],
                     "timestamp": data["timestamp"],
+                    "price": data.get("price"),
                 }
                 for detector in live_state.detectors.get(symbol, []):
                     for signal in detector.on_trade(trade):
                         await _notify_robot(signal, log_file)
-
                 if symbol in live_state.arb_symbols:
                     price = data["price"]
                     ts = data["timestamp"] / 1000.0
@@ -484,22 +449,18 @@ async def main(shared_state: SharedState) -> None:
         shared_state.status = "Ошибка: не найден ALOR_REFRESH_TOKEN в .env"
         print(shared_state.status)
         return
-
     settings = load_settings()
     print(
         f"Активных тикеров: {len(get_active_symbols(settings))} "
         f"(отключённые в ticker_settings.json пропускаются)"
     )
-
     print("Считаю пороги min_qty по вчерашним данным...")
     shared_state.status = "Считаю пороги min_qty..."
     detectors = build_detectors(settings)
     arb_monitors, arb_symbols = build_arb_monitors()
     live_state = LiveState(settings, detectors, arb_monitors, arb_symbols)
-
     funding_cache = FundingCache()
     news_cache = NewsCache()
-
     log_path, log_file = open_log_file()
     print(f"Лог пишется в {log_path}")
     shared_state.status = f"Работает | лог: {log_path.name}"
@@ -512,7 +473,6 @@ async def main(shared_state: SharedState) -> None:
     info_tabs_task = asyncio.create_task(
         info_tabs_loop(live_state, shared_state, funding_cache, news_cache)
     )
-
     async with telegram_bot:
         try:
             while True:
@@ -551,9 +511,7 @@ def start_backend(shared_state: SharedState) -> None:
 
 if __name__ == "__main__":
     shared_state = SharedState()
-
     backend_thread = threading.Thread(target=start_backend, args=(shared_state,), daemon=True)
     backend_thread.start()
-
     app = RobotDashboardWindow(shared_state)
     app.mainloop()
