@@ -2,6 +2,7 @@
 Приблуда на python — мини-окна для стаканов (PySide6).
 Поддержка нескольких тикеров в одной ячейке (через запятую или пробел).
 Автосохранение геометрии (включая позицию на другом мониторе).
+УЛУЧШЕНО: минимальные отступы, раздельные поля, нормальная окраска.
 """
 import json
 import re
@@ -38,6 +39,7 @@ class MiniCell(QLabel):
         self.tickers_str = tickers_str
         self.shared_state = shared_state
         self.setAlignment(Qt.AlignCenter)
+        self.setContentsMargins(1, 0, 1, 0)  # МИНИМАЛЬНЫЕ отступы
         self.update_content()
 
     def _parse_tickers(self):
@@ -48,7 +50,7 @@ class MiniCell(QLabel):
         tickers = self._parse_tickers()
         if not tickers:
             self.setText("")
-            self.setStyleSheet("background: #0a0a1a; border: 1px solid #1a1a2e;")
+            self.setStyleSheet("background: transparent; border: none;")
             return
         
         rows = self.shared_state.rows or []
@@ -62,37 +64,48 @@ class MiniCell(QLabel):
                 all_robots.append((ticker, best))
         
         if not all_robots:
-            # Нет роботов - показываем только тикеры серым
-            tickers_display = ', '.join(tickers)
-            self.setText(f"<span style='color:#555'>{tickers_display}</span>")
-            self.setStyleSheet("background: #1a1a2e; border: 1px solid #2a2a4a;")
+            # ПУСТАЯ ЯЧЕЙКА - ничего не показываем
+            self.setText("")
+            self.setStyleSheet("background: transparent; border: none;")
             return
         
         # Формируем HTML с роботами
         html_parts = []
         for ticker, best in all_robots:
             sec = best.get("seconds_to_next")
-            next_str = f"{sec:.0f}s" if sec else "-"
+            if sec is None:
+                cd_str, cd_color = "-", "#888888"
+            elif sec < 0:
+                overdue = -sec
+                cd_str = f"-{int(overdue // 60)}m" if overdue >= 90 else f"-{int(overdue)}s"
+                cd_color = "#ff4444"          # просрочка - красным
+            elif sec <= 10:
+                cd_str, cd_color = f"{sec:.0f}s", "#ffaa00"  # скоро удар - оранжевым
+            else:
+                cd_str, cd_color = f"{sec:.0f}s", "#ffffff"  # спокойно - белым
+            
             qty = "-".join(str(q) for q in best.get("qty_variants", []))
+            side_color = "#00ff00" if best.get("side", "buy") == "buy" else "#ff4444"
             interval = best.get("interval")
             int_str = f"{interval:.0f}s" if interval else "-"
             rep = best.get("repeats", 0)
-            side = best.get("side", "buy")
-            
-            color = "#00ff00" if side == "buy" else "#ff4444"
             
             html_parts.append(
-                f"<div style='color: {color}; font-weight: bold;'>"
-                f"{next_str} <span style='color: white;'>{ticker}</span> {qty} {int_str} x{rep}"
+                f"<div style='font-weight: bold; white-space: nowrap;'>"
+                f"<span style='color: {cd_color};'>{cd_str}</span>&nbsp;&nbsp;"
+                f"<span style='color: #ffffff;'>{ticker}</span>&nbsp;&nbsp;"
+                f"<span style='color: {side_color};'>{qty}</span>&nbsp;&nbsp;"
+                f"<span style='color: #cccccc;'>{int_str}</span>&nbsp;&nbsp;"
+                f"<span style='color: #999999;'>x{rep}</span>"
                 f"</div>"
             )
         
         html = '\n'.join(html_parts)
         self.setText(html)
         
-        # Цвет рамки - если есть роботы, используем цвет первого
+        # Цвет рамки - по стороне первого робота
         first_color = "#00ff00" if all_robots[0][1].get("side", "buy") == "buy" else "#ff4444"
-        self.setStyleSheet(f"background: #1a1a2e; border: 1px solid {first_color}; border-radius: 2px;")
+        self.setStyleSheet(f"background: rgba(26, 26, 46, 200); border: 1px solid {first_color}; border-radius: 2px; padding: 0px;")
 
 
 class MiniWindow(QWidget):
@@ -102,10 +115,13 @@ class MiniWindow(QWidget):
         self.row_type = row_type
         
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
-        self.setStyleSheet("background: #0a0a1a;")
+        self.setStyleSheet("background: rgba(10, 10, 26, 200);")
         
         self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(2, 2, 2, 2)
+        # МИНИМАЛЬНЫЕ ОТСТУПЫ
+        self.layout.setContentsMargins(0, 0, 0, 0)
+        self.layout.setSpacing(0)
+        
         self.grid = QGridLayout()
         self.grid.setSpacing(2)
         self.layout.addLayout(self.grid)
@@ -144,6 +160,25 @@ class MiniWindow(QWidget):
     def _update_all(self):
         config = load_config()
         tickers_list = config.get(f"{self.row_type}_row", [None]*10)
+        
+        # Проверяем, есть ли хоть один робот
+        has_robots = False
+        for tickers_str in tickers_list:
+            if tickers_str:
+                tickers = parse_tickers(tickers_str)
+                rows = self.shared_state.rows or []
+                for ticker in tickers:
+                    ticker_rows = [r for r in rows if r["symbol"] == ticker and r.get("repeats", 0) >= 2]
+                    if ticker_rows:
+                        has_robots = True
+                        break
+        
+        # Прозрачность всего окна, если нет роботов
+        if not has_robots:
+            self.setStyleSheet("background: transparent;")
+        else:
+            self.setStyleSheet("background: rgba(10, 10, 26, 200);")
+        
         for i, cell in enumerate(self.cells):
             new_tickers_str = tickers_list[i] if i < len(tickers_list) else None
             if cell.tickers_str != new_tickers_str:
@@ -229,7 +264,7 @@ class MiniWindow(QWidget):
             event.accept()
 
     def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton:
+        if event.buttons() == Qt.LeftButton:
             self._resize_edge = None
             self._drag_pos = None
             self._save_geometry()
@@ -242,9 +277,8 @@ class MiniWindow(QWidget):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        height = event.size().height()
-        font_size = max(8, height // 2.5)
-        font = QFont("Segoe UI", font_size, QFont.Bold)
+        # Фиксированный шрифт 8 (читаемый, но компактный)
+        font = QFont("Segoe UI", 8, QFont.Bold)
         for cell in self.cells:
             cell.setFont(font)
         if not self._resize_edge:

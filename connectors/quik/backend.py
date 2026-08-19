@@ -1,12 +1,12 @@
 """
 Приблуда на python — бэкенд для Quik (чтение CSV ленты).
+Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность для живых сделок.
 """
 import sys, time, threading, logging
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Добавляем корень проекта в путь, чтобы импорты работали при запуске из любой папки
 BASE = Path(__file__).resolve().parent.parent.parent
 if str(BASE) not in sys.path:
     sys.path.insert(0, str(BASE))
@@ -19,7 +19,6 @@ from detectors.interval_robot import IntervalRobotDetector
 CSV = BASE / "data" / "quik_trades.csv"
 MSK = ZoneInfo("Europe/Moscow")
 
-# Настройка логгера
 _log = logging.getLogger("quik_backend")
 if not _log.handlers:
     _logdir = BASE / "output"
@@ -65,8 +64,7 @@ class QuikBackend:
         if len(p) < 5:
             return None
         try:
-            # timestamp уже в миллисекундах
-            return {"symbol": p[0], "qty": int(p[1]), "price": float(p[2]),
+            return {"symbol": p[0], "qty": int(float(p[1])), "price": float(p[2]),
                     "side": p[3], "timestamp": int(p[4])}
         except ValueError:
             return None
@@ -85,23 +83,29 @@ class QuikBackend:
 
     def run(self):
         """Основной поток чтения CSV."""
-        # day0 в миллисекундах
         day0_ms = int(datetime.now(MSK).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         _log.info(f"Starting CSV reader, day0_ms={day0_ms}")
-        
-        # 1. Доиграть сегодняшнее (backfill)
+
+        # 1. Быстрый backfill: последние ~500KB, метки времени из CSV (секундная точность)
         try:
             with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
+                f.seek(0, 2)
+                file_size = f.tell()
+                read_size = min(500000, file_size)
+                f.seek(file_size - read_size)
+                f.readline()  # пропускаем неполную строку
                 for line in f:
                     t = self.parse(line)
                     if t and t["timestamp"] >= day0_ms:
                         self.feed(t)
                     self.lines_read += 1
+                    if self.lines_read % 1000 == 0:
+                        _log.info(f"Backfill progress: {self.lines_read} lines, {self.trades_fed} trades")
             _log.info(f"Backfill done: {self.lines_read} lines, {self.trades_fed} trades fed")
         except FileNotFoundError:
             _log.warning(f"CSV not found: {CSV}")
-            
-        # 2. Tail в реальном времени
+
+        # 2. Live tail: метки времени С МИЛЛИСЕКУНДАМИ (время получения строки)
         _log.info("Switching to live tail mode")
         while True:
             try:
@@ -110,9 +114,11 @@ class QuikBackend:
                     while True:
                         line = f.readline()
                         if not line:
-                            time.sleep(0.2); continue
+                            time.sleep(0.05)
+                            continue
                         t = self.parse(line)
                         if t and t["timestamp"] >= day0_ms:
+                            t["timestamp"] = int(time.time() * 1000)
                             self.feed(t)
             except FileNotFoundError:
                 time.sleep(1)
