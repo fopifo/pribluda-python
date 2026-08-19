@@ -1,4 +1,3 @@
-# tests/test_interval_robot.py
 """
 Модульные тесты для детектора IntervalRobotDetector.
 """
@@ -18,6 +17,7 @@ def strict_config():
         "max_interval": 30.0,
         "max_qty_variants": 1,
         "interval_tolerance": 0.15,
+        "close_after_misses": 2,  # Явно задаем 2, как ожидает тест (порог закрытия 60с)
         "preset_name": "fast_strict",
     }
 
@@ -126,14 +126,6 @@ class TestIntervalRobotDetector:
         for t in trades:
             signals.extend(detector.on_trade(t))
         signals.extend(detector.flush())
-        # Первая пара (45,46) не подходит из-за разных qty, поэтому каждая сделка начинает свою серию.
-        # После flush будут закрыты все, у кого repeats >= 2, но ни одна не достигнет 2 повторов,
-        # потому что каждая новая сделка не находит совпадения.
-        # На самом деле первая сделка (45) создаёт кандидата, вторая (46) не подходит (qty не совпадает и max_qty_variants=1)
-        # создаёт нового кандидата, третья (45) найдёт первого кандидата (интервал 6с, но у первого last_interval=None, tolerance не применяется, интервал 6с в диапазоне) - но qty совпадает, так что продлит первую серию до repeats=2.
-        # Вторая серия (46) останется с repeats=1 и не будет закрыта.
-        # Итог: один сигнал с repeats=2, qty_variants=[45].
-        # Проверим.
         assert len(signals) == 1
         s = signals[0]
         assert s.qty_variants == [45]
@@ -151,10 +143,7 @@ class TestIntervalRobotDetector:
         signals = []
         for t in trades:
             signals.extend(detector.on_trade(t))
-        # После третьей сделки, при её обработке, _prune_dead закроет первую серию (repeats=2)
-        # и третья сделка начнёт новую.
         signals.extend(detector.flush())
-        # Должен быть сигнал от первой серии (repeats=2) и, возможно, от третьей (repeats=1, не закрывается)
         assert len(signals) == 1
         s = signals[0]
         assert s.repeats == 2
@@ -196,16 +185,16 @@ class TestIntervalRobotDetector:
         assert len(warnings3) == 0  # после закрытия предупреждение не выдаётся
 
     def test_max_series_length(self, strict_config):
-        """Проверяем, что серия закрывается при достижении MAX_SERIES_LENGTH (20)."""
-        detector = IntervalRobotDetector("SBER", strict_config)
+        """Проверяем, что серия закрывается при достижении max_series (20)."""
+        # Явно задаем max_series=20 для теста, чтобы не спорить с боевым дефолтом 100000
+        cfg = dict(strict_config, max_series=20)
+        detector = IntervalRobotDetector("SBER", cfg)
         # Создадим 21 сделку с интервалом 3 сек
         trades = [make_trade(45, "buy", i * 3.0) for i in range(21)]
         signals = []
         for t in trades:
             signals.extend(detector.on_trade(t))
         signals.extend(detector.flush())
-        # Должны получить сигнал с repeats=20 (первая серия закрылась на 20-й сделке)
-        # и, возможно, новая серия началась с 21-й сделки (repeats=1, не закрывается)
         # Ищем сигнал с repeats=20
         found = [s for s in signals if s.repeats == 20]
         assert len(found) == 1
@@ -216,8 +205,6 @@ class TestIntervalRobotDetector:
         # Установим низкий лимит для теста (переопределим атрибут класса)
         detector = IntervalRobotDetector("SBER", strict_config)
         detector.MAX_ACTIVE_PER_SIDE = 3  # уменьшаем для теста
-        # Создаём много сделок с разными qty, чтобы каждая создавала нового кандидата
-        # Но в strict режиме разные qty не совмещаются, поэтому каждый новый qty создаёт нового кандидата
         trades = [
             make_trade(10, "buy", 0.0),
             make_trade(20, "buy", 1.0),
@@ -228,10 +215,6 @@ class TestIntervalRobotDetector:
         for t in trades:
             signals.extend(detector.on_trade(t))
         signals.extend(detector.flush())
-        # После 4-й сделки лимит превышен, должны быть закрыты некоторые серии (самые старые)
-        # Но каждая серия имеет repeats=1, поэтому не будут закрыты (min_repeats=2)
-        # Однако _enforce_cap удаляет кандидатов без сигналов, если они не достигли min_repeats.
-        # Проверим, что активных осталось не более 3.
         total_active = sum(len(lst) for lst in detector.active.values())
         assert total_active <= 3
 

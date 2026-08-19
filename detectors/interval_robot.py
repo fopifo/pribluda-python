@@ -2,6 +2,7 @@
 Приблуда на python — детектор периодичности (роботов), персистентный.
 С логированием в output/detector.log для отладки.
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
+ВОССТАНОВЛЕН ОРИГИНАЛ + ограничение группировки QTY (2 варианта, ratio 1.25).
 """
 import logging
 import statistics
@@ -43,7 +44,7 @@ class Candidate:
 
 class IntervalRobotDetector(Detector):
     name = "робот-интервал"
-    MAX_ACTIVE_PER_SIDE = 500  # УМЕНЬШЕНО с 3000 до 500
+    MAX_ACTIVE_PER_SIDE = 500
 
     def __init__(self, symbol, settings):
         super().__init__(symbol, settings)
@@ -53,8 +54,8 @@ class IntervalRobotDetector(Detector):
         if self.min_interval is None: self.min_interval = 1.0
         self.max_interval = settings.get("max_interval")
         if self.max_interval is None: self.max_interval = 600
-        self.max_qty_variants = settings.get("max_qty_variants", 3)
-        self.max_qty_ratio = settings.get("max_qty_ratio")
+        self.max_qty_variants = settings.get("max_qty_variants", 2)   # ИЗМЕНЕНО: было 3
+        self.max_qty_ratio = settings.get("max_qty_ratio", 1.25)      # ИЗМЕНЕНО: было None
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
         self.time_window_sec = settings.get("time_window_sec", 0.0)
@@ -240,6 +241,17 @@ class IntervalRobotDetector(Detector):
                     max_fit = c.last_interval * (1 + self.interval_tolerance)
                     if gap > max_fit and not c.warned:
                         c.warned = True
+                        warnings.append({
+                            "symbol": self.symbol,
+                            "side": side,
+                            "qty_variants": sorted(c.qty_variants),
+                            "gap_sec": round(gap, 1),
+                            "max_fit_sec": round(max_fit, 1),
+                            "просрочка": f"{gap:.1f}s > {max_fit:.1f}s",
+                        })
+                        _log.info(f"[{self.symbol}] OVERDUE: side={side}, "
+                                  f"gap={gap:.1f}s > max_fit={max_fit:.1f}s, "
+                                  f"variants={sorted(c.qty_variants)}")
         return signals, warnings
 
     def get_active_snapshot(self, now_ts):
