@@ -6,14 +6,17 @@
 Формат вывода совместим с analysis/week_signals_review.py:
 строки "ДАТА <дата>" и строки сигналов с отступом — обзорный скрипт
 распарсит и сожмёт в компактный отчёт.
+ПРОГРЕСС: в консоль печатается живой счётчик "[дата i/N] тикер k/M"
+(flush=True), чтобы было видно, что скрипт работает, а не "завис".
+Полный вывод (все сигналы) пишется только в файл.
+НАКОПЛЕНИЕ: вывод пишется в ОДИН файл output/signals_all_dates.txt —
+каждый новый прогон перезаписывает предыдущий.
 Запуск (из корня проекта):
 python analysis/run_all_dates.py
-Может идти несколько минут (все тикеры × все даты).
 """
 import json
 import re
 import sys
-from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -27,6 +30,7 @@ from ticker_settings import get_active_symbols, load_settings
 
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
+OUT_PATH = OUTPUT_DIR / "signals_all_dates.txt"
 DATE_RE = re.compile(r"_(\d{4}-\d{2}-\d{2})\.json$")
 
 
@@ -42,21 +46,29 @@ def find_dates() -> list[str]:
 def main() -> None:
     lines: list[str] = []
 
-    def log(line: str = "") -> None:
-        print(line)
+    def flog(line: str = "") -> None:
         lines.append(line)
 
     settings = load_settings()
     symbols = get_active_symbols(settings)
     dates = find_dates()
-    log(f"Активных тикеров: {len(symbols)}")
-    log(f"Найдено дат в data/: {len(dates)}")
+    print(f"Активных тикеров: {len(symbols)}", flush=True)
+    print(f"Найдено дат в data/: {len(dates)}", flush=True)
+    flog(f"Активных тикеров: {len(symbols)}")
+    flog(f"Найдено дат в data/: {len(dates)}")
 
-    for date in dates:
-        log("=" * 60)
-        log(f"ДАТА {date}")
-        log("=" * 60)
-        for symbol in symbols:
+    total_dates = len(dates)
+    total_symbols = len(symbols)
+    for di, date in enumerate(dates, 1):
+        flog("=" * 60)
+        flog(f"ДАТА {date}")
+        flog("=" * 60)
+        day_signals = 0
+        for si, symbol in enumerate(symbols, 1):
+            print(
+                f"\r[{di}/{total_dates}] {date}: тикер {si}/{total_symbols} {symbol}      ",
+                end="", flush=True,
+            )
             path = DATA_DIR / f"{symbol}_{date}.json"
             if not path.exists():
                 continue
@@ -71,16 +83,17 @@ def main() -> None:
             configs = get_detector_configs(symbol, min_qty, override)
             detectors = [IntervalRobotDetector(symbol, cfg) for cfg in configs]
             signals = TradeBuffer(symbol, detectors).process(trades)
-            log(f"{symbol}: найдено сигналов: {len(signals)}")
+            day_signals += len(signals)
+            flog(f"{symbol}: найдено сигналов: {len(signals)}")
             for s in signals:
-                log(f"  {s}")
-        log("")
+                flog(f"  {s}")
+        flog("")
+        print(f"\r[{di}/{total_dates}] {date}: готово, сигналов за день: {day_signals}      ",
+              flush=True)
 
     OUTPUT_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    out_path = OUTPUT_DIR / f"signals_all_dates_{timestamp}.txt"
-    out_path.write_text("\n".join(lines), encoding="utf-8")
-    print(f"Полный вывод сохранён в {out_path}")
+    OUT_PATH.write_text("\n".join(lines), encoding="utf-8")
+    print(f"Полный вывод сохранён в {OUT_PATH}")
 
 
 if __name__ == "__main__":

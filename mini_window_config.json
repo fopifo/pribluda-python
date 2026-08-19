@@ -1,0 +1,34 @@
+{
+  "cell_0": null,
+  "cell_1": null,
+  "cell_2": "СБЕР",
+  "cell_3": null,
+  "cell_4": null,
+  "cell_5": null,
+  "cell_6": null,
+  "cell_7": null,
+  "cell_8": null,
+  "cell_9": null,
+  "cell_10": null,
+  "cell_11": null,
+  "cell_12": null,
+  "cell_13": null,
+  "cell_14": null,
+  "cell_15": null,
+  "cell_16": null,
+  "cell_17": null,
+  "cell_18": null,
+  "cell_19": null,
+  "top_geometry": {
+    "x": 100,
+    "y": 100,
+    "w": 1811,
+    "h": 60
+  },
+  "bottom_geometry": {
+    "x": 100,
+    "y": 200,
+    "w": 1810,
+    "h": 60
+  }
+}

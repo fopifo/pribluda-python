@@ -1,207 +1,255 @@
 """
-Приблуда на python — компактное окно-оверлей для мониторинга поверх
-торгового терминала.
-
-Показывает те же активные серии, что и главное окно, но одной узкой
-таблицей — не делит buy/sell на отдельные блоки, вместо этого красит
-строку целиком в зелёный (лонг) или красный (шорт) прямо по тексту,
-раз отдельного столбца под сторону тут нет. Шрифт мельче, строки
-теснее — чтобы окно занимало на экране минимум места.
-
-Столбцы слева направо: СЛЕД, ТИК, ЛОТ, ИНТ, ПОВТ.
-
-ПОДСВЕТКА НОВЫХ/УМЕРШИХ СЕРИЙ — та же логика, что и в главном окне
-(gui/window.py, см. докстринг там): идентификатор серии — (тикер,
-сторона, пресет, start_ts). Новая серия на один цикл подсвечивается
-голубым фоном, пропавшая рисуется ещё один последний раз серым текстом
-и на следующем цикле уже не показывается.
-
-ЗВУК: на каждую новую серию — короткий сигнал (см. sound.py), один раз
-за цикл, даже если новых серий несколько сразу. Отключается своей
-галочкой "🔊" (независимо от главного окна — у каждого окна своя
-галочка, но оба читают/пишут одно и то же ui_settings.json, поэтому
-при следующем запуске оба открываются с тем состоянием, какое было
-сохранено последним).
-
-ГЕОМЕТРИЯ: позиция и размер сохраняются в ui_settings.json при закрытии
-окна и восстанавливаются при следующем открытии — не нужно каждый раз
-подгонять окно заново под угол экрана поверх терминала.
-
-Двойной клик по ячейке ТИКЕРА копирует его в буфер обмена (строка
-коротко подсвечивается) — так же, как в главном окне.
-
-Открывается сразу закреплённым поверх остальных окон (в этом весь
-смысл — мониторить поверх терминала), галочку "поверх окон" можно
-снять, если понадобится.
+Приблуда на python — мини-окна для стаканов (PySide6).
+Поддержка нескольких тикеров в одной ячейке (через запятую или пробел).
+Автосохранение геометрии (включая позицию на другом мониторе).
 """
+import json
+import re
+from pathlib import Path
+from PySide6.QtCore import Qt, QTimer, QRect
+from PySide6.QtGui import QFont, QCursor
+from PySide6.QtWidgets import QWidget, QGridLayout, QLabel, QVBoxLayout
 
-import tkinter as tk
-from tkinter import ttk
+BASE_DIR = Path(__file__).resolve().parent.parent
+CONFIG_FILE = BASE_DIR / "mini_window_config.json"
 
-from gui.state import SharedState
-from sound import play_new_series_sound
-from ui_settings import load_ui_settings, save_ui_settings
+RESIZE_MARGIN = 8
 
-COLUMNS = ("next", "symbol", "qty", "interval", "repeats")
-HEADERS = {
-    "next": "СЛЕД",
-    "symbol": "ТИК",
-    "qty": "ЛОТ",
-    "interval": "ИНТ",
-    "repeats": "ПОВТ",
-}
-COLUMN_WIDTHS = {
-    "next": 52,
-    "symbol": 55,
-    "qty": 65,
-    "interval": 48,
-    "repeats": 42,
-}
-SYMBOL_COLUMN_INDEX = COLUMNS.index("symbol")
-REFRESH_MS = 1000
-COPY_FLASH_MS = 350
-STYLE_NAME = "Mini.Treeview"
-DEFAULT_GEOMETRY = "320x420"
-COPY_FLASH_COLOR = "#fff2a8"
-NEW_FLASH_COLOR = "#cfe8ff"
-DYING_COLOR = "#999999"
+def load_config():
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f: return json.load(f)
+    return {"top_row": [None]*10, "bottom_row": [None]*10}
+
+def save_config(config):
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f: json.dump(config, f, indent=2, ensure_ascii=False)
+
+def parse_tickers(text):
+    """Парсинг тикеров через запятую или пробел"""
+    if not text:
+        return []
+    tickers = re.split(r'[,\s]+', text)
+    return [t.strip().upper() for t in tickers if t.strip()]
 
 
-def _sort_key(row: dict):
-    seconds = row["seconds_to_next"]
-    return seconds if seconds is not None else float("inf")
-
-
-def _row_key(row: dict):
-    """Стабильный идентификатор серии между обновлениями — см.
-    докстринг модуля и gui/window.py."""
-    return (row["symbol"], row["side"], row["preset"], row["start_ts"])
-
-
-def _handle_symbol_copy(tree: ttk.Treeview, event) -> None:
-    """Двойной клик по ячейке столбца ТИКЕР — копирует значение в буфер
-    обмена и коротко подсвечивает строку. Клик по любой другой ячейке
-    ничего не делает."""
-    if tree.identify("region", event.x, event.y) != "cell":
-        return
-    column = tree.identify_column(event.x)
-    row_id = tree.identify_row(event.y)
-    if not row_id:
-        return
-
-    col_index = int(column.replace("#", "")) - 1
-    if col_index != SYMBOL_COLUMN_INDEX:
-        return
-
-    symbol = tree.item(row_id, "values")[SYMBOL_COLUMN_INDEX]
-    tree.clipboard_clear()
-    tree.clipboard_append(str(symbol))
-
-    original_tags = tree.item(row_id, "tags")
-    tree.tag_configure("copied_flash", background=COPY_FLASH_COLOR)
-    tree.item(row_id, tags=tuple(original_tags) + ("copied_flash",))
-    tree.after(COPY_FLASH_MS, lambda: tree.item(row_id, tags=original_tags))
-
-
-class MiniWindow(tk.Toplevel):
-    def __init__(self, parent: tk.Tk, shared_state: SharedState, on_close=None):
-        super().__init__(parent)
+class MiniCell(QLabel):
+    """Ячейка с поддержкой нескольких тикеров"""
+    def __init__(self, tickers_str, shared_state):
+        super().__init__()
+        self.tickers_str = tickers_str
         self.shared_state = shared_state
-        self.on_close = on_close
+        self.setAlignment(Qt.AlignCenter)
+        self.update_content()
 
-        ui_settings = load_ui_settings()
+    def _parse_tickers(self):
+        """Парсинг строки тикеров в список"""
+        return parse_tickers(self.tickers_str)
 
-        self.title("Роботы")
-        self.geometry(ui_settings.get("mini_window_geometry") or DEFAULT_GEOMETRY)
-        self.attributes("-topmost", True)
-        self.protocol("WM_DELETE_WINDOW", self._handle_close)
-
-        self._prev_keys: set = set()
-        self._prev_rows: dict = {}
-
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=4, pady=(4, 2))
-        self.topmost_var = tk.BooleanVar(value=True)
-        tk.Checkbutton(
-            top, text="поверх окон", variable=self.topmost_var,
-            command=self._toggle_topmost, font=("Segoe UI", 8),
-        ).pack(side="left")
-        self.sound_var = tk.BooleanVar(value=ui_settings.get("sound_enabled", True))
-        tk.Checkbutton(
-            top, text="🔊", variable=self.sound_var, font=("Segoe UI", 8),
-        ).pack(side="left", padx=(8, 0))
-
-        style = ttk.Style(self)
-        style.configure(STYLE_NAME, font=("Segoe UI", 8), rowheight=16)
-        style.configure(f"{STYLE_NAME}.Heading", font=("Segoe UI", 8, "bold"))
-
-        self.tree = ttk.Treeview(self, columns=COLUMNS, show="headings", style=STYLE_NAME)
-        for col in COLUMNS:
-            self.tree.heading(col, text=HEADERS[col])
-            self.tree.column(col, width=COLUMN_WIDTHS[col], anchor="center")
-        self.tree.tag_configure("buy", foreground="#1a7a1a")
-        self.tree.tag_configure("sell", foreground="#a31515")
-        self.tree.tag_configure("new_flash", background=NEW_FLASH_COLOR)
-        self.tree.tag_configure("dying", foreground=DYING_COLOR)
-        self.tree.bind("<Double-1>", lambda event: _handle_symbol_copy(self.tree, event))
-        self.tree.pack(fill="both", expand=True, padx=4, pady=(0, 4))
-
-        self._refresh()
-
-    def _toggle_topmost(self) -> None:
-        self.attributes("-topmost", self.topmost_var.get())
-
-    def _handle_close(self) -> None:
-        """Сохраняем звук и геометрию перед закрытием — читаем текущий
-        файл настроек, чтобы не затереть то, что уже сохранило главное
-        окно (если оно ещё открыто и закроется позже)."""
-        settings = load_ui_settings()
-        settings["sound_enabled"] = self.sound_var.get()
-        settings["mini_window_geometry"] = self.geometry()
-        save_ui_settings(settings)
-
-        if self.on_close:
-            self.on_close()
-        self.destroy()
-
-    def _refresh(self) -> None:
-        rows = list(self.shared_state.rows)
-        current_by_key = {_row_key(r): r for r in rows}
-        current_keys = set(current_by_key)
-
-        new_keys = current_keys - self._prev_keys
-        dying_keys = self._prev_keys - current_keys
-        dying_rows = [self._prev_rows[k] for k in dying_keys if k in self._prev_rows]
-
-        if new_keys and self.sound_var.get():
-            play_new_series_sound(self)
-
-        display_rows = sorted(rows + dying_rows, key=_sort_key)
-
-        self.tree.delete(*self.tree.get_children())
-        for row in display_rows:
-            interval = row["interval"]
-            interval_str = f"{interval:.0f}с" if interval is not None else "-"
-            seconds = row["seconds_to_next"]
-            next_str = f"{seconds:.0f}с" if seconds is not None else "-"
-            qty_str = "-".join(str(q) for q in row["qty_variants"])
-
-            key = _row_key(row)
-            if key in dying_keys:
-                tags = ("dying",)
-            elif key in new_keys:
-                tags = (row["side"], "new_flash")
-            else:
-                tags = (row["side"],)
-
-            self.tree.insert(
-                "",
-                "end",
-                values=(next_str, row["symbol"], qty_str, interval_str, row["repeats"]),
-                tags=tags,
+    def update_content(self):
+        tickers = self._parse_tickers()
+        if not tickers:
+            self.setText("")
+            self.setStyleSheet("background: #0a0a1a; border: 1px solid #1a1a2e;")
+            return
+        
+        rows = self.shared_state.rows or []
+        
+        # Собираем роботов для всех тикеров
+        all_robots = []
+        for ticker in tickers:
+            ticker_rows = [r for r in rows if r["symbol"] == ticker]
+            if ticker_rows:
+                best = max(ticker_rows, key=lambda x: x.get("repeats", 0))
+                all_robots.append((ticker, best))
+        
+        if not all_robots:
+            # Нет роботов - показываем только тикеры серым
+            tickers_display = ', '.join(tickers)
+            self.setText(f"<span style='color:#555'>{tickers_display}</span>")
+            self.setStyleSheet("background: #1a1a2e; border: 1px solid #2a2a4a;")
+            return
+        
+        # Формируем HTML с роботами
+        html_parts = []
+        for ticker, best in all_robots:
+            sec = best.get("seconds_to_next")
+            next_str = f"{sec:.0f}s" if sec else "-"
+            qty = "-".join(str(q) for q in best.get("qty_variants", []))
+            interval = best.get("interval")
+            int_str = f"{interval:.0f}s" if interval else "-"
+            rep = best.get("repeats", 0)
+            side = best.get("side", "buy")
+            
+            color = "#00ff00" if side == "buy" else "#ff4444"
+            
+            html_parts.append(
+                f"<div style='color: {color}; font-weight: bold;'>"
+                f"{next_str} <span style='color: white;'>{ticker}</span> {qty} {int_str} x{rep}"
+                f"</div>"
             )
+        
+        html = '\n'.join(html_parts)
+        self.setText(html)
+        
+        # Цвет рамки - если есть роботы, используем цвет первого
+        first_color = "#00ff00" if all_robots[0][1].get("side", "buy") == "buy" else "#ff4444"
+        self.setStyleSheet(f"background: #1a1a2e; border: 1px solid {first_color}; border-radius: 2px;")
 
-        self._prev_keys = current_keys
-        self._prev_rows = current_by_key
 
-        self.after(REFRESH_MS, self._refresh)
+class MiniWindow(QWidget):
+    def __init__(self, shared_state, row_type="top"):
+        super().__init__()
+        self.shared_state = shared_state
+        self.row_type = row_type
+        
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
+        self.setStyleSheet("background: #0a0a1a;")
+        
+        self.layout = QVBoxLayout(self)
+        self.layout.setContentsMargins(2, 2, 2, 2)
+        self.grid = QGridLayout()
+        self.grid.setSpacing(2)
+        self.layout.addLayout(self.grid)
+        
+        self.cells = []
+        self._build_cells()
+        
+        # Загрузка геометрии
+        config = load_config()
+        geo = config.get(f"{row_type}_geometry")
+        if geo:
+            self.resize(geo.get("w", 1200), geo.get("h", 60))
+            self.move(geo.get("x", 100), geo.get("y", 100))
+        else:
+            self.resize(1200, 60)
+            if row_type == "top": self.move(100, 100)
+            else: self.move(100, 200)
+        
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self._update_all)
+        self.timer.start(1000)
+        
+        self._drag_pos = None
+        self._resize_edge = None
+        self._resize_start_geo = None
+
+    def _build_cells(self):
+        config = load_config()
+        tickers_list = config.get(f"{self.row_type}_row", [None]*10)
+        for i in range(10):
+            tickers_str = tickers_list[i] if i < len(tickers_list) else None
+            cell = MiniCell(tickers_str, self.shared_state)
+            self.grid.addWidget(cell, 0, i)
+            self.cells.append(cell)
+
+    def _update_all(self):
+        config = load_config()
+        tickers_list = config.get(f"{self.row_type}_row", [None]*10)
+        for i, cell in enumerate(self.cells):
+            new_tickers_str = tickers_list[i] if i < len(tickers_list) else None
+            if cell.tickers_str != new_tickers_str:
+                cell.tickers_str = new_tickers_str
+            cell.update_content()
+
+    def _save_geometry(self):
+        config = load_config()
+        config[f"{self.row_type}_geometry"] = {
+            "x": self.x(),
+            "y": self.y(),
+            "w": self.width(),
+            "h": self.height()
+        }
+        save_config(config)
+
+    def _get_edge(self, pos):
+        rect = self.rect()
+        left = pos.x() < RESIZE_MARGIN
+        right = pos.x() > rect.width() - RESIZE_MARGIN
+        top = pos.y() < RESIZE_MARGIN
+        bottom = pos.y() > rect.height() - RESIZE_MARGIN
+
+        if top and left: return Qt.TopLeftCorner
+        if top and right: return Qt.TopRightCorner
+        if bottom and left: return Qt.BottomLeftCorner
+        if bottom and right: return Qt.BottomRightCorner
+        if left: return Qt.LeftEdge
+        if right: return Qt.RightEdge
+        if top: return Qt.TopEdge
+        if bottom: return Qt.BottomEdge
+        return None
+
+    def _get_cursor_for_edge(self, edge):
+        if edge in (Qt.TopLeftCorner, Qt.BottomRightCorner): return QCursor(Qt.SizeFDiagCursor)
+        if edge in (Qt.TopRightCorner, Qt.BottomLeftCorner): return QCursor(Qt.SizeBDiagCursor)
+        if edge in (Qt.LeftEdge, Qt.RightEdge): return QCursor(Qt.SizeHorCursor)
+        if edge in (Qt.TopEdge, Qt.BottomEdge): return QCursor(Qt.SizeVerCursor)
+        return QCursor(Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self._resize_edge = self._get_edge(event.position().toPoint())
+            if self._resize_edge:
+                self._resize_start_geo = QRect(self.x(), self.y(), self.width(), self.height())
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        if event.buttons() == Qt.NoButton:
+            edge = self._get_edge(event.position().toPoint())
+            self.setCursor(self._get_cursor_for_edge(edge))
+            return
+
+        if event.buttons() == Qt.LeftButton:
+            if self._resize_edge:
+                global_pos = event.globalPosition().toPoint()
+                start_pos = self._resize_start_geo.topLeft()
+                delta = global_pos - (start_pos + self._drag_pos)
+                
+                new_x = self._resize_start_geo.x()
+                new_y = self._resize_start_geo.y()
+                new_w = self._resize_start_geo.width()
+                new_h = self._resize_start_geo.height()
+                
+                if self._resize_edge in (Qt.LeftEdge, Qt.TopLeftCorner, Qt.BottomLeftCorner):
+                    new_x += delta.x()
+                    new_w -= delta.x()
+                if self._resize_edge in (Qt.RightEdge, Qt.TopRightCorner, Qt.BottomRightCorner):
+                    new_w += delta.x()
+                if self._resize_edge in (Qt.TopEdge, Qt.TopLeftCorner, Qt.TopRightCorner):
+                    new_y += delta.y()
+                    new_h -= delta.y()
+                if self._resize_edge in (Qt.BottomEdge, Qt.BottomLeftCorner, Qt.BottomRightCorner):
+                    new_h += delta.y()
+                
+                if new_w < 400: new_w = 400
+                if new_h < 30: new_h = 30
+                
+                self.setGeometry(new_x, new_y, new_w, new_h)
+            else:
+                self.move(event.globalPosition().toPoint() - self._drag_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._resize_edge = None
+            self._drag_pos = None
+            self._save_geometry()
+            event.accept()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        if not self._drag_pos:
+            self._save_geometry()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        height = event.size().height()
+        font_size = max(8, height // 2.5)
+        font = QFont("Segoe UI", font_size, QFont.Bold)
+        for cell in self.cells:
+            cell.setFont(font)
+        if not self._resize_edge:
+            self._save_geometry()
+
+    def closeEvent(self, event):
+        self._save_geometry()
+        super().closeEvent(event)

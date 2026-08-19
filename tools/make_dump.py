@@ -1,130 +1,97 @@
 """
-Приблуда на python — автоматический полный дамп проекта.
-Рекурсивно обходит все файлы проекта (кроме исключённых папок/файлов),
-собирает их содержимое и сохраняет в dumps/.
-Больше не включает PROJECT_SUMMARY.md — только актуальный код.
+Приблуда на python — сборка дампа-макета всего проекта для передачи
+помощнику/команде. Обходит дерево проекта АВТОМАТИЧЕСКИ (проект растёт —
+список файлов не хардкодится), и пропускает всё лишнее:
+- СЕКРЕТЫ: .env и любой файл с секретом внутри;
+- ТЯЖЁЛОЕ: data/, output/, logs/, parts/ (ленты, отчёты, логи),
+  а также любой файл крупнее MAX_FILE_BYTES;
+- МУСОР: .git, __pycache__, .venv, *.pyc, *.bak, *.tmp, дампы.
+В дамп попадают только текстовые исходники/настройки/заметки
+(.py, .json, .md, .txt, .bat). Результат — output/dump_<дата>.txt в том
+же формате, что и прежние дампы.
+Запуск (из корня проекта):
+python tools/make_dump.py
 """
-
+import os
 from datetime import datetime
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-DUMP_DIR = BASE_DIR / "dumps"
-MAX_DUMPS = 10
+OUTPUT_DIR = BASE_DIR / "output"
 
-EXCLUDE_DIRS = {
-    ".git",
-    "__pycache__",
-    "venv",
-    ".venv",
-    "env",
-    "dumps",
-    "data",
-    "output",
-    "parts",
-    ".mypy_cache",
-    ".pytest_cache",
-    "node_modules",
+MAX_FILE_BYTES = 200 * 1024          # файлы крупнее 200 КБ не берём
+
+# Папки, которые пропускаем целиком (с любым содержимым).
+SKIP_DIRS = {
+    ".git", "__pycache__", ".venv", "venv", "node_modules",
+    "data", "output", "logs", "parts", ".idea", ".vscode",
 }
 
-EXCLUDE_FILES = {
-    ".env",
-    "*.pyc",
-    ".DS_Store",
-    "Thumbs.db",
-    "PROJECT_SUMMARY.md",
-    "README.md",
-    "make_dump.py",
-    "inspect_window.py",
-    "list_tqbr_shares.py",
-    "explore_alltrades_history.py",
-}
+# Расширения, которые берём в дамп (текст/код/настройки).
+INCLUDE_SUFFIXES = {".py", ".json", ".md", ".txt", ".bat", ".cfg", ".ini"}
 
-TEXT_EXTENSIONS = {".py", ".json", ".md", ".txt", ".toml", ".cfg", ".ini", ".yml", ".yaml"}
+# Файлы, которые никогда не берём (секреты/артефакты).
+SKIP_FILES = {".env", ".gitignore"}
+
+# Подстроки в имени файла — тоже повод пропустить (артефакты/бэкапы).
+SKIP_NAME_PARTS = (".bak", ".tmp", "dump_", "parallel_report_", "weekly_review_")
 
 
-def is_excluded_dir(path: Path) -> bool:
-    return any(part in EXCLUDE_DIRS for part in path.parts)
+def should_skip_dir(name: str) -> bool:
+    return name in SKIP_DIRS
 
 
-def is_excluded_file(file: Path) -> bool:
-    name = file.name
-    if name in EXCLUDE_FILES:
+def should_skip_file(path: Path) -> bool:
+    if path.name in SKIP_FILES:
         return True
-    if file.suffix == ".pyc":
+    if any(part in path.name for part in SKIP_NAME_PARTS):
         return True
-    if name.startswith("."):
+    if path.suffix not in INCLUDE_SUFFIXES:
+        return True
+    try:
+        if path.stat().st_size > MAX_FILE_BYTES:
+            return True
+    except OSError:
         return True
     return False
 
 
-def collect_project_files() -> list[Path]:
-    result = []
-    for path in BASE_DIR.rglob("*"):
-        if path.is_dir():
-            continue
-        if is_excluded_dir(path):
-            continue
-        if is_excluded_file(path):
-            continue
-        if path.suffix not in TEXT_EXTENSIONS:
-            continue
-        result.append(path)
-    return sorted(result, key=lambda p: str(p.relative_to(BASE_DIR)))
-
-
-def read_file_safe(path: Path) -> str:
-    try:
-        return path.read_text(encoding="utf-8")
-    except Exception as e:
-        return f"(Ошибка чтения файла: {e})"
-
-
-def build_dump_text() -> str:
-    now = datetime.now()
-    parts = [
-        "=" * 70,
-        "ПРИБЛУДА НА PYTHON — ПОЛНЫЙ ДАМП ПРОЕКТА",
-        f"Сформирован: {now:%Y-%m-%d %H:%M:%S}",
-        "=" * 70,
-        "",
-        "--- ИСХОДНЫЙ КОД (ВСЕ ФАЙЛЫ ПРОЕКТА) ---",
-    ]
-
-    project_files = collect_project_files()
-    if not project_files:
-        parts.append("(не найдено ни одного файла с кодом)")
-        return "\n".join(parts)
-
-    for file_path in project_files:
-        relative = file_path.relative_to(BASE_DIR)
-        parts.append("")
-        parts.append("-" * 70)
-        parts.append(f"### {relative}")
-        parts.append("-" * 70)
-        parts.append(read_file_safe(file_path))
-
-    return "\n".join(parts)
-
-
-def rotate(pattern: str) -> None:
-    files = sorted(DUMP_DIR.glob(pattern))
-    excess = len(files) - MAX_DUMPS
-    for old_file in files[: max(excess, 0)]:
-        old_file.unlink()
+def iter_project_files():
+    """Обход дерева проекта, выдаёт файлы, подлежащие включению."""
+    for root, dirs, files in os.walk(BASE_DIR):
+        dirs[:] = sorted(d for d in dirs if not should_skip_dir(d))
+        for name in sorted(files):
+            path = Path(root) / name
+            if not should_skip_file(path):
+                yield path
 
 
 def main() -> None:
-    DUMP_DIR.mkdir(exist_ok=True)
-
+    OUTPUT_DIR.mkdir(exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    dump_path = DUMP_DIR / f"dump_{timestamp}.txt"
-    dump_path.write_text(build_dump_text(), encoding="utf-8")
-
-    rotate("dump_*.txt")
-
-    print(f"Дамп сохранён: {dump_path}")
-    print(f"Хранится дампов: {len(list(DUMP_DIR.glob('dump_*.txt')))} (максимум {MAX_DUMPS})")
+    out_path = OUTPUT_DIR / f"dump_{timestamp}.txt"
+    included = 0
+    with open(out_path, "w", encoding="utf-8") as out:
+        out.write("=" * 70 + "\n")
+        out.write("ПРИБЛУДА НА PYTHON — ДАМП ПРОЕКТА (макет)\n")
+        out.write(f"Сформирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        out.write("=" * 70 + "\n")
+        for path in iter_project_files():
+            rel = path.relative_to(BASE_DIR)
+            out.write("-" * 70 + "\n")
+            out.write(f"### {rel}\n")
+            out.write("-" * 70 + "\n")
+            try:
+                text = path.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                text = "(бинарный файл, содержимое пропущено)"
+            out.write(text)
+            if not text.endswith("\n"):
+                out.write("\n")
+            included += 1
+    size_kb = out_path.stat().st_size / 1024
+    print(f"Дамп готов: {out_path}  ({included} файлов, {size_kb:.0f} КБ)")
+    print("Этот файл можно передавать помощнику/команде как макет проекта.")
 
 
 if __name__ == "__main__":
