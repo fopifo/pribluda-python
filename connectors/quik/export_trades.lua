@@ -1,32 +1,33 @@
 -- export_trades.lua
--- ВЕРСИЯ 3.8 (2026-08-20, ветка Qwen_coder).
--- Сделки (OnAllTrade) + ПЛАНКИ медленным опросом Quik.
--- Планки: ломтики по LIMITS_SLICE=10 тикеров за цикл 2 c (~50 вызовов
--- getParamEx за раз — столько же делал рабочий зонд), кэш, атомарная
--- перезапись data/quik_limits.csv. Полный обход ~2 минуты; планки
--- статичны внутри дня, этого достаточно.
--- Котировки (quik_quotes.csv) пишет tools/iss_quotes_sync.py — не здесь.
+-- Экспорт ЛЕНТЫ СДЕЛОК из Quik в CSV.
+-- ВЕРСИЯ 3.10 (2026-08-20, ветка Qwen_coder).
 --
--- ФАЙЛЫ: data/quik_trades.csv, data/quik_limits.csv, data/export_debug.log
+-- СТОРОНА (v3.10): как в LiveScreener getPrint_2.lua — TICK RULE.
+-- В этом Quik бит направления во flags обезличенных сделок не взводится
+-- (проверено: buy=4975/sell=0 и наоборот), operation отсутствует.
+-- Поэтому: цена ВЫШЕ прошлой сделки тикера = buy, НИЖЕ = sell,
+-- РАВНА = наследуем прошлую сторону.
+--
+-- Планки больше НЕ здесь — их пишет отдельный скрипт limits_sweep.lua
+-- (getParamEx глохнет в одном процессе с OnAllTrade; в отдельном — работает).
+-- Котировки пишет tools/iss_quotes_sync.py.
+--
+-- ФАЙЛ: data/quik_trades.csv (добавление), data/export_debug.log (лог)
 
 local trades_file = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_trades.csv"
-local limits_file = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_limits.csv"
-local limits_tmp  = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_limits.tmp"
 local log_file    = "C:/Users/Public/MI_CODES/Qwen_coder/data/export_debug.log"
-
-local LIMITS_SLICE = 10
 
 stopped = false
 trades_handle = nil
 buffer = {}
 trade_count = 0
+buy_count = 0
+sell_count = 0
 last_flush_ms = 0
-last_limits_ms = 0
 last_counter_log_time = 0
 
-local all_secs = nil
-local limits_pos = 0
-local limits_cache = {}
+local last_price = {}
+local last_side = {}
 
 local function now_ms()
     if getTickCount then
@@ -84,88 +85,33 @@ function get_quantity(alltrade)
     return 0
 end
 
+-- v3.10: tick rule (как в LiveScreener getPrint_2.lua)
 function get_side(alltrade)
-    local op = alltrade.operation
-    if op == 1 or op == "B" or op == "b" then
-        return "buy"
+    local code = alltrade.sec_code or ""
+    local p = alltrade.price or 0
+    local prev = last_price[code]
+    last_price[code] = p
+    if prev == nil then
+        local s = last_side[code] or "buy"
+        last_side[code] = s
+        return s
     end
-    return "sell"
-end
-
--- Безопасное чтение числового параметра (type 1 и 4).
-local function get_num(class, sec, param)
-    local r = getParamEx(class, sec, param)
-    if r and (r.param_type == 1 or r.param_type == 4) and r.param_value then
-        return r.param_value
+    local s
+    if p > prev then
+        s = "buy"
+    elseif p < prev then
+        s = "sell"
+    else
+        s = last_side[code] or "buy"
     end
-    return nil
-end
-
-local function fmt(v)
-    if v == nil then return "" end
-    return tostring(v)
-end
-
-local function ensure_secs()
-    if all_secs == nil then
-        all_secs = {}
-        local s = getClassSecurities("TQBR")
-        if s and s ~= "" then
-            for code in string.gmatch(s, "([^,]+)") do
-                all_secs[#all_secs + 1] = code
-            end
-        end
-        write_log("TQBR list cached: " .. #all_secs .. " tickers")
-    end
-    return all_secs
-end
-
--- Ломтик планок: 10 тикеров, кэш, атомарная перезапись файла.
-local function process_limits_slice()
-    local secs = ensure_secs()
-    local n = #secs
-    if n == 0 then return end
-
-    for _ = 1, LIMITS_SLICE do
-        limits_pos = limits_pos % n + 1
-        local code = secs[limits_pos]
-
-        local last = get_num("TQBR", code, "LAST")
-        local prev = get_num("TQBR", code, "PREVWAPRICE")
-        local price = (last and last > 0) and last or prev
-        local up = get_num("TQBR", code, "PRICEMAX")
-        local dn = get_num("TQBR", code, "PRICEMIN")
-        local ch = get_num("TQBR", code, "CHANGE")
-
-        if price and price > 0 and up and dn then
-            limits_cache[code] = code .. ";" .. fmt(price) .. ";" .. fmt(up)
-                .. ";" .. fmt(dn) .. ";" .. fmt(ch) .. "\n"
-        end
-    end
-
-    local f = io.open(limits_tmp, "w")
-    if f then
-        f:write("ticker;current_price;limit_up;limit_down;change_percent\n")
-        local c = 0
-        for _, line in pairs(limits_cache) do
-            f:write(line)
-            c = c + 1
-        end
-        f:close()
-        os.remove(limits_file)
-        os.rename(limits_tmp, limits_file)
-        if limits_pos <= LIMITS_SLICE then
-            write_log("Limits sweep complete: " .. c .. " securities cached")
-        end
-    end
+    last_side[code] = s
+    return s
 end
 
 function OnInit()
-    write_log("=== QUIK EXPORT STARTED (v3.8: trades + slow limits) ===")
-    write_log("Waiting 5 sec for Quik to load data...")
-    sleep(5000)
+    write_log("=== QUIK EXPORT STARTED (v3.10: tick-rule side) ===")
     open_trades()
-    message("Quik Export: Started (v3.8)")
+    message("Quik Export: Started (v3.10)")
 end
 
 function OnAllTrade(alltrade)
@@ -188,6 +134,7 @@ function OnAllTrade(alltrade)
     local ts = trade_time_ms(alltrade)
 
     trade_count = trade_count + 1
+    if side == "buy" then buy_count = buy_count + 1 else sell_count = sell_count + 1 end
     buffer[#buffer + 1] = sec_code .. ";" .. quantity .. ";" .. price
         .. ";" .. side .. ";" .. ts .. "\n"
 end
@@ -204,9 +151,8 @@ function OnStop()
 end
 
 function main()
-    write_log("main() loop started (v3.8)")
+    write_log("main() loop started (v3.10)")
     last_flush_ms = now_ms()
-    last_limits_ms = now_ms()
 
     while not stopped do
         local t_ms = now_ms()
@@ -217,14 +163,10 @@ function main()
             flush_trades()
         end
 
-        if t_ms - last_limits_ms >= 2000 then
-            last_limits_ms = t_ms
-            process_limits_slice()
-        end
-
         if now - last_counter_log_time >= 60 then
             last_counter_log_time = now
-            write_log("trades exported total: " .. trade_count)
+            write_log("trades exported total: " .. trade_count
+                .. " (buy=" .. buy_count .. ", sell=" .. sell_count .. ")")
         end
 
         sleep(100)

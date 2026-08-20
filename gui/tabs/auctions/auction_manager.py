@@ -1,8 +1,8 @@
 """
-Приблуда на python — диалог настроек вкладки "Аукционы" (v2):
+Приблуда на python — диалог настроек вкладки "Аукционы" (v2.1):
 группы (эшелоны), тикеры "в игре", мьют, добавление/удаление/перенос.
-v2: кнопка "＋ Все (MOEX)" — тянет полный список акций TQBR с MOEX ISS
-(публично, без токена) и добавляет в выбранную группу.
+v2.1: фикс NameError QColor (З-001).
+"＋ Все (MOEX)" тянет полный список акций TQBR с MOEX ISS.
 Пишет auction_settings.json через core/auction_settings.
 Архитектура: gui/tabs/auctions/.
 """
@@ -10,6 +10,7 @@ import threading
 
 import requests
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QHBoxLayout,
                                QLabel, QLineEdit, QListWidget, QPushButton,
                                QTableWidget, QTableWidgetItem, QVBoxLayout)
@@ -30,7 +31,6 @@ class AuctionManagerDialog(QDialog):
 
         root = QHBoxLayout(self)
 
-        # --- левая колонка: группы ---
         left = QVBoxLayout()
         left.addWidget(QLabel("Группы (эшелоны):"))
         self.groups_list = QListWidget()
@@ -49,7 +49,6 @@ class AuctionManagerDialog(QDialog):
         left.addLayout(grp_row)
         root.addLayout(left, 1)
 
-        # --- правая колонка: тикеры выбранной группы ---
         right = QVBoxLayout()
         right.addWidget(QLabel("Тикеры выбранной группы:"))
         self.tick_table = QTableWidget(0, 3)
@@ -88,7 +87,6 @@ class AuctionManagerDialog(QDialog):
         root.addLayout(right, 2)
         self._refresh_groups()
 
-    # --- служебное -----------------------------------------------------
     def _save(self):
         try:
             cfg_mod.save_auction_settings(self.cfg)
@@ -141,7 +139,6 @@ class AuctionManagerDialog(QDialog):
                 lambda checked, tk=t: self._remove_ticker(tk))
             self.tick_table.setCellWidget(r, 2, del_btn)
 
-    # --- действия ------------------------------------------------------
     def _toggle_mute(self, ticker, state):
         checked = (state == Qt.CheckState.Checked.value) if hasattr(
             Qt.CheckState.Checked, "value") else (state == 2)
@@ -177,7 +174,6 @@ class AuctionManagerDialog(QDialog):
         self._refresh_groups()
 
     def _add_all_from_moex(self):
-        """v2: все акции TQBR с MOEX ISS в выбранную группу (фоном)."""
         self.add_all_btn.setEnabled(False)
         self.add_all_btn.setText("Загрузка...")
 
@@ -223,8 +219,7 @@ class AuctionManagerDialog(QDialog):
                 added += 1
         self._save()
         self._refresh_groups()
-        self.setWindowTitle(f"Аукционы: настройки тикеров и групп "
-                            f"(добавлено {added} из {len(secids)})")
+        self.setWindowTitle(f"Аукционы: настройки (добавлено {added} из {len(secids)})")
 
     def _move_selected(self):
         rows = sorted({i.row() for i in self.tick_table.selectedItems()})

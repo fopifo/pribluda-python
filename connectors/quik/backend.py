@@ -1,6 +1,9 @@
 """
 Приблуда на python — бэкенд для Quik (чтение CSV ленты).
 Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность для живых сделок.
+Фикс: в live-ветке больше не перезаписываем timestamp arrival-time — lua v3.10
+пишет настоящие миллисекунды из alltrade.datetime.msec. Перезапись давала
+джиттер ±50-200мс от опроса и рвала ритм роботов.
 """
 import sys, time, threading, logging
 from datetime import datetime
@@ -86,7 +89,7 @@ class QuikBackend:
         day0_ms = int(datetime.now(MSK).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         _log.info(f"Starting CSV reader, day0_ms={day0_ms}")
 
-        # 1. Быстрый backfill: последние ~500KB, метки времени из CSV (секундная точность)
+        # 1. Быстрый backfill: последние ~500KB, метки времени из CSV (мс точность)
         try:
             with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
                 f.seek(0, 2)
@@ -105,8 +108,11 @@ class QuikBackend:
         except FileNotFoundError:
             _log.warning(f"CSV not found: {CSV}")
 
-        # 2. Live tail: метки времени С МИЛЛИСЕКУНДАМИ (время получения строки)
-        _log.info("Switching to live tail mode")
+        # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
+        # Lua v3.10 пишет настоящие мс из alltrade.datetime.msec; фолбэк на
+        # arrival-time больше не нужен — он только добавлял джиттер ±50-200мс
+        # и рвал ритм роботов.
+        _log.info("Switching to live tail mode (CSV ms, no overwrite)")
         while True:
             try:
                 with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
@@ -118,7 +124,6 @@ class QuikBackend:
                             continue
                         t = self.parse(line)
                         if t and t["timestamp"] >= day0_ms:
-                            t["timestamp"] = int(time.time() * 1000)
                             self.feed(t)
             except FileNotFoundError:
                 time.sleep(1)

@@ -2,7 +2,9 @@
 Приблуда на python — детектор периодичности (роботов), персистентный.
 С логированием в output/detector.log для отладки.
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
-ВОССТАНОВЛЕН ОРИГИНАЛ + ограничение группировки QTY (2 варианта, ratio 1.25).
+ИСПРАВЛЕНО: get_active_snapshot теперь использует min_display_repeats
+(дефолт 2 — показываем кандидатов, как в v5).
+ВОССТАНОВЛЕНО: блок warnings.append в check_overdue (был потерян).
 """
 import logging
 import statistics
@@ -25,7 +27,7 @@ class Candidate:
     __slots__ = ("qty_variants", "count", "start_ts", "last_ts",
                  "last_interval", "intervals", "warned",
                  "first_price", "last_price", "price_counts", "priced_hits",
-                 "sum_qty")
+                 "sum_qty", "qty_counts")
     def __init__(self, qty, ts, price=None):
         self.qty_variants = {qty}
         self.count = 1
@@ -40,6 +42,7 @@ class Candidate:
         if price is not None: self.price_counts[price] = 1
         self.priced_hits = 1 if price is not None else 0
         self.sum_qty = qty
+        self.qty_counts = {qty: 1}
 
 
 class IntervalRobotDetector(Detector):
@@ -54,20 +57,41 @@ class IntervalRobotDetector(Detector):
         if self.min_interval is None: self.min_interval = 1.0
         self.max_interval = settings.get("max_interval")
         if self.max_interval is None: self.max_interval = 600
-        self.max_qty_variants = settings.get("max_qty_variants", 2)   # ИЗМЕНЕНО: было 3
-        self.max_qty_ratio = settings.get("max_qty_ratio", 1.25)      # ИЗМЕНЕНО: было None
+        self.max_qty_variants = settings.get("max_qty_variants", 2)
+        self.max_qty_ratio = settings.get("max_qty_ratio", 1.10)
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
         self.time_window_sec = settings.get("time_window_sec", 0.0)
         self.close_after_misses = settings.get("close_after_misses", 6)
         self.max_series = settings.get("max_series", 100000)
+        
+        # Н-013: допуск для коротких интервалов
+        self.short_interval_tolerance = settings.get("short_interval_tolerance", 0.12)
+        self.short_interval_threshold = settings.get("short_interval_threshold", 60.0)
+        
+        # Н-004: фильтр стабильного qty для длинных интервалов
+        self.long_interval_threshold = settings.get("long_interval_threshold", 120.0)
+        self.stable_qty_required = settings.get("stable_qty_required", False)
+        self.stable_qty_ratio = settings.get("stable_qty_ratio", 0.8)
+        
+        # Минимальное число повторов для отображения в UI (дефолт 2 — кандидаты)
+        self.min_display_repeats = settings.get("min_display_repeats", 2)
+        
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name: self.name = f"робот-интервал[{preset_name}]"
         self.active = {}
         self.index = {}
+        
+        # Н-010: путь к истории роботов
+        self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
+        self._history_path.parent.mkdir(exist_ok=True)
+        
         _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
-                  f"min_interval={self.min_interval}, max_interval={self.max_interval}")
+                  f"min_interval={self.min_interval}, max_interval={self.max_interval}, "
+                  f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
+                  f"long_thresh={self.long_interval_threshold}s, stable_qty={self.stable_qty_required}, "
+                  f"min_display={self.min_display_repeats}")
 
     def _finalize(self, side, candidate):
         avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
@@ -141,9 +165,16 @@ class IntervalRobotDetector(Detector):
         if self.min_interval is None: return False
         if self.max_interval is None: return False
         if interval < self.min_interval or interval > self.max_interval: return False
-        if self.interval_tolerance is None or candidate.last_interval is None: return True
-        low = candidate.last_interval * (1 - self.interval_tolerance)
-        high = candidate.last_interval * (1 + self.interval_tolerance)
+        
+        # Н-013: адаптивный допуск для коротких интервалов
+        if candidate.last_interval is not None and candidate.last_interval < self.short_interval_threshold:
+            tol = self.short_interval_tolerance
+        else:
+            tol = self.interval_tolerance
+        
+        if tol is None or candidate.last_interval is None: return True
+        low = candidate.last_interval * (1 - tol)
+        high = candidate.last_interval * (1 + tol)
         return low <= interval <= high
 
     def _find_match(self, side, qty, ts):
@@ -168,6 +199,7 @@ class IntervalRobotDetector(Detector):
 
     def _apply_price(self, candidate, qty, price):
         candidate.sum_qty += qty
+        candidate.qty_counts[qty] = candidate.qty_counts.get(qty, 0) + 1
         if price is None: return
         candidate.last_price = price
         candidate.priced_hits += 1
@@ -226,6 +258,8 @@ class IntervalRobotDetector(Detector):
         return signals
 
     def check_overdue(self, now_ts):
+        """Проверяет просроченные серии. Возвращает signals и warnings.
+        ВОССТАНОВЛЕНО: блок warnings.append — был потерян при ошибочном копировании."""
         signals, warnings = [], []
         close_threshold = self.max_interval * self.close_after_misses
         for side, cands in list(self.active.items()):
@@ -237,28 +271,37 @@ class IntervalRobotDetector(Detector):
                     self._unregister(side, c)
                     continue
                 if c.count < self.min_repeats: continue
-                if self.interval_tolerance is not None and c.last_interval is not None:
-                    max_fit = c.last_interval * (1 + self.interval_tolerance)
-                    if gap > max_fit and not c.warned:
-                        c.warned = True
-                        warnings.append({
-                            "symbol": self.symbol,
-                            "side": side,
-                            "qty_variants": sorted(c.qty_variants),
-                            "gap_sec": round(gap, 1),
-                            "max_fit_sec": round(max_fit, 1),
-                            "просрочка": f"{gap:.1f}s > {max_fit:.1f}s",
-                        })
-                        _log.info(f"[{self.symbol}] OVERDUE: side={side}, "
-                                  f"gap={gap:.1f}s > max_fit={max_fit:.1f}s, "
-                                  f"variants={sorted(c.qty_variants)}")
+                if c.last_interval is not None:
+                    # Н-013: адаптивный допуск (короткие vs длинные интервалы)
+                    if c.last_interval < self.short_interval_threshold:
+                        tol = self.short_interval_tolerance
+                    else:
+                        tol = self.interval_tolerance
+                    if tol is not None:
+                        max_fit = c.last_interval * (1 + tol)
+                        if gap > max_fit and not c.warned:
+                            c.warned = True
+                            warnings.append({
+                                "symbol": self.symbol,
+                                "side": side,
+                                "qty_variants": sorted(c.qty_variants),
+                                "gap_sec": round(gap, 1),
+                                "max_fit_sec": round(max_fit, 1),
+                                "просрочка": f"{gap:.1f}s > {max_fit:.1f}s",
+                            })
+                            _log.info(f"[{self.symbol}] OVERDUE: side={side}, "
+                                      f"gap={gap:.1f}s > max_fit={max_fit:.1f}s, "
+                                      f"variants={sorted(c.qty_variants)}")
         return signals, warnings
 
     def get_active_snapshot(self, now_ts):
         rows = []
         for side, cands in self.active.items():
             for c in cands:
-                if c.count < 2: continue
+                # ИСПРАВЛЕНО: используем min_display_repeats (дефолт 2)
+                # Это сохраняет блоки long2/short2 в UI (кандидаты 2-3 повтора)
+                if c.count < self.min_display_repeats: continue
+                
                 seconds_to_next = (c.last_ts + c.last_interval - now_ts) if c.last_interval is not None else None
                 jitter_ms = statistics.pstdev(c.intervals) * 1000 if len(c.intervals) >= 2 else None
                 same_price_ratio = None
