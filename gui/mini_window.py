@@ -2,7 +2,9 @@
 Приблуда на python — мини-окна для стаканов (PySide6).
 Поддержка нескольких тикеров в одной ячейке (через запятую или пробел).
 Автосохранение геометрии (включая позицию на другом мониторе).
-УЛУЧШЕНО: минимальные отступы, раздельные поля, нормальная окраска.
+v2 (2026-08-20): та же косметика, что главное окно —
+ТОЛЬКО рабочие серии (CD >= 0, мёртвые скрыты), repeats >= 2,
+CD белые; окно прозрачное, если рабочих роботов нет.
 """
 import json
 import re
@@ -22,7 +24,7 @@ def load_config():
     return {"top_row": [None]*10, "bottom_row": [None]*10}
 
 def save_config(config):
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f: json.dump(config, f, indent=2, ensure_ascii=False)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f: json.dump(config, indent=2, ensure_ascii=False, fp=f)
 
 def parse_tickers(text):
     """Парсинг тикеров через запятую или пробел"""
@@ -30,6 +32,14 @@ def parse_tickers(text):
         return []
     tickers = re.split(r'[,\s]+', text)
     return [t.strip().upper() for t in tickers if t.strip()]
+
+
+def _is_live(row):
+    """Рабочая серия: repeats >= 2 и CD >= 0 (мёртвые не показываем)."""
+    if row.get("repeats", 0) < 2:
+        return False
+    sec = row.get("seconds_to_next")
+    return sec is None or sec >= 0
 
 
 class MiniCell(QLabel):
@@ -52,44 +62,39 @@ class MiniCell(QLabel):
             self.setText("")
             self.setStyleSheet("background: transparent; border: none;")
             return
-        
+
         rows = self.shared_state.rows or []
-        
-        # Собираем роботов для всех тикеров
+
+        # Собираем ТОЛЬКО рабочих роботов для всех тикеров
         all_robots = []
         for ticker in tickers:
-            ticker_rows = [r for r in rows if r["symbol"] == ticker]
+            ticker_rows = [r for r in rows
+                           if r["symbol"] == ticker and _is_live(r)]
             if ticker_rows:
                 best = max(ticker_rows, key=lambda x: x.get("repeats", 0))
                 all_robots.append((ticker, best))
-        
+
         if not all_robots:
             # ПУСТАЯ ЯЧЕЙКА - ничего не показываем
             self.setText("")
             self.setStyleSheet("background: transparent; border: none;")
             return
-        
+
         # Формируем HTML с роботами
         html_parts = []
         for ticker, best in all_robots:
             sec = best.get("seconds_to_next")
             if sec is None:
                 cd_str, cd_color = "-", "#888888"
-            elif sec < 0:
-                overdue = -sec
-                cd_str = f"-{int(overdue // 60)}m" if overdue >= 90 else f"-{int(overdue)}s"
-                cd_color = "#ff4444"          # просрочка - красным
-            elif sec <= 10:
-                cd_str, cd_color = f"{sec:.0f}s", "#ffaa00"  # скоро удар - оранжевым
             else:
-                cd_str, cd_color = f"{sec:.0f}s", "#ffffff"  # спокойно - белым
-            
+                cd_str, cd_color = f"{sec:.0f}s", "#ffffff"  # рабочие — белым
+
             qty = "-".join(str(q) for q in best.get("qty_variants", []))
             side_color = "#00ff00" if best.get("side", "buy") == "buy" else "#ff4444"
             interval = best.get("interval")
             int_str = f"{interval:.0f}s" if interval else "-"
             rep = best.get("repeats", 0)
-            
+
             html_parts.append(
                 f"<div style='font-weight: bold; white-space: nowrap;'>"
                 f"<span style='color: {cd_color};'>{cd_str}</span>&nbsp;&nbsp;"
@@ -99,10 +104,10 @@ class MiniCell(QLabel):
                 f"<span style='color: #999999;'>x{rep}</span>"
                 f"</div>"
             )
-        
+
         html = '\n'.join(html_parts)
         self.setText(html)
-        
+
         # Цвет рамки - по стороне первого робота
         first_color = "#00ff00" if all_robots[0][1].get("side", "buy") == "buy" else "#ff4444"
         self.setStyleSheet(f"background: rgba(26, 26, 46, 200); border: 1px solid {first_color}; border-radius: 2px; padding: 0px;")
@@ -113,22 +118,22 @@ class MiniWindow(QWidget):
         super().__init__()
         self.shared_state = shared_state
         self.row_type = row_type
-        
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setStyleSheet("background: rgba(10, 10, 26, 200);")
-        
+
         self.layout = QVBoxLayout(self)
         # МИНИМАЛЬНЫЕ ОТСТУПЫ
         self.layout.setContentsMargins(0, 0, 0, 0)
         self.layout.setSpacing(0)
-        
+
         self.grid = QGridLayout()
         self.grid.setSpacing(2)
         self.layout.addLayout(self.grid)
-        
+
         self.cells = []
         self._build_cells()
-        
+
         # Загрузка геометрии
         config = load_config()
         geo = config.get(f"{row_type}_geometry")
@@ -139,11 +144,11 @@ class MiniWindow(QWidget):
             self.resize(1200, 60)
             if row_type == "top": self.move(100, 100)
             else: self.move(100, 200)
-        
+
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._update_all)
         self.timer.start(1000)
-        
+
         self._drag_pos = None
         self._resize_edge = None
         self._resize_start_geo = None
@@ -160,25 +165,24 @@ class MiniWindow(QWidget):
     def _update_all(self):
         config = load_config()
         tickers_list = config.get(f"{self.row_type}_row", [None]*10)
-        
-        # Проверяем, есть ли хоть один робот
+
+        # Проверяем, есть ли хоть один РАБОЧИЙ робот
         has_robots = False
         for tickers_str in tickers_list:
             if tickers_str:
                 tickers = parse_tickers(tickers_str)
                 rows = self.shared_state.rows or []
                 for ticker in tickers:
-                    ticker_rows = [r for r in rows if r["symbol"] == ticker and r.get("repeats", 0) >= 2]
-                    if ticker_rows:
+                    if any(r["symbol"] == ticker and _is_live(r) for r in rows):
                         has_robots = True
                         break
-        
-        # Прозрачность всего окна, если нет роботов
+
+        # Прозрачность всего окна, если нет рабочих роботов
         if not has_robots:
             self.setStyleSheet("background: transparent;")
         else:
             self.setStyleSheet("background: rgba(10, 10, 26, 200);")
-        
+
         for i, cell in enumerate(self.cells):
             new_tickers_str = tickers_list[i] if i < len(tickers_list) else None
             if cell.tickers_str != new_tickers_str:
@@ -238,12 +242,12 @@ class MiniWindow(QWidget):
                 global_pos = event.globalPosition().toPoint()
                 start_pos = self._resize_start_geo.topLeft()
                 delta = global_pos - (start_pos + self._drag_pos)
-                
+
                 new_x = self._resize_start_geo.x()
                 new_y = self._resize_start_geo.y()
                 new_w = self._resize_start_geo.width()
                 new_h = self._resize_start_geo.height()
-                
+
                 if self._resize_edge in (Qt.LeftEdge, Qt.TopLeftCorner, Qt.BottomLeftCorner):
                     new_x += delta.x()
                     new_w -= delta.x()
@@ -254,10 +258,10 @@ class MiniWindow(QWidget):
                     new_h -= delta.y()
                 if self._resize_edge in (Qt.BottomEdge, Qt.BottomLeftCorner, Qt.BottomRightCorner):
                     new_h += delta.y()
-                
+
                 if new_w < 400: new_w = 400
                 if new_h < 30: new_h = 30
-                
+
                 self.setGeometry(new_x, new_y, new_w, new_h)
             else:
                 self.move(event.globalPosition().toPoint() - self._drag_pos)

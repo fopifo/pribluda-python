@@ -1,11 +1,14 @@
-"""Чтение данных о планках из CSV"""
+"""
+Приблуда на python — читалка планок из data/quik_limits.csv (lua v3).
+Планки ставит биржа: PRICEMIN/PRICEMAX из Quik. Ничего не меняет, только чтение.
+Архитектура: connectors/quik/.
+"""
 import csv
-from pathlib import Path
-from typing import Dict, List
 from dataclasses import dataclass
+from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
-LIMITS_FILE = BASE_DIR / "data" / "quik_limits.csv"
+LIMITS_CSV = BASE_DIR / "data" / "quik_limits.csv"
 
 
 @dataclass
@@ -15,60 +18,62 @@ class LimitData:
     limit_up: float
     limit_down: float
     change_percent: float
-    distance_to_up: float
-    distance_to_down: float
+    distance_to_up: float    # % до верхней планки
+    distance_to_down: float  # % до нижней планки
+
+    def nearest(self):
+        """(направление, дистанция) до ближайшей планки."""
+        if self.distance_to_up <= self.distance_to_down:
+            return "up", self.distance_to_up
+        return "down", self.distance_to_down
+
+    def day_position(self):
+        """0% = нижняя планка, 100% = верхняя."""
+        span = self.limit_up - self.limit_down
+        if span <= 0:
+            return None
+        pos = (self.current_price - self.limit_down) / span * 100.0
+        return max(0.0, min(100.0, pos))
 
 
 class LimitsReader:
-    def __init__(self):
-        self.limits: Dict[str, LimitData] = {}
-    
-    def read_limits(self) -> Dict[str, LimitData]:
-        if not LIMITS_FILE.exists():
-            return {}
-        
+    def __init__(self, path=None):
+        self.path = Path(path) if path else LIMITS_CSV
+        self.limits = {}
+
+    def read(self):
+        """Все строки файла -> {тикер: LimitData}. Рваный файл -> {}."""
+        limits = {}
         try:
-            with open(LIMITS_FILE, "r", encoding="utf-8") as f:
-                reader = csv.DictReader(f, delimiter=";")
-                limits = {}
-                
-                for row in reader:
-                    ticker = row["ticker"].strip()
-                    current = float(row["current_price"])
-                    up = float(row["limit_up"])
-                    down = float(row["limit_down"])
-                    change = float(row["change_percent"])
-                    
-                    # Расчёт расстояния до планок
-                    dist_up = ((up - current) / current * 100) if current > 0 else 100
-                    dist_down = ((current - down) / current * 100) if current > 0 else 100
-                    
-                    limits[ticker] = LimitData(
-                        ticker=ticker,
-                        current_price=current,
-                        limit_up=up,
-                        limit_down=down,
-                        change_percent=change,
-                        distance_to_up=dist_up,
-                        distance_to_down=dist_down
-                    )
-                
-                self.limits = limits
-                return limits
-                
-        except Exception as e:
-            print(f"Error reading limits: {e}")
+            with open(self.path, "r", encoding="utf-8", errors="ignore") as f:
+                for row in csv.DictReader(f, delimiter=";"):
+                    t = (row.get("ticker") or "").strip()
+                    if not t:
+                        continue
+                    try:
+                        cur = float(row["current_price"])
+                        up = float(row["limit_up"])
+                        down = float(row["limit_down"])
+                        change = float(row["change_percent"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if cur <= 0 or up <= 0 or down <= 0:
+                        continue
+                    dist_up = (up - cur) / cur * 100.0
+                    dist_down = (cur - down) / cur * 100.0
+                    limits[t] = LimitData(ticker=t, current_price=cur,
+                                          limit_up=up, limit_down=down,
+                                          change_percent=change,
+                                          distance_to_up=dist_up,
+                                          distance_to_down=dist_down)
+        except (FileNotFoundError, OSError):
             return {}
-    
-    def get_near_limits(self, max_percent: float = 5.0) -> List[LimitData]:
-        """Получить тикеры в пределах max_percent% от планки"""
-        self.read_limits()
-        
-        result = []
-        for limit in self.limits.values():
-            if limit.distance_to_up <= max_percent or limit.distance_to_down <= max_percent:
-                result.append(limit)
-        
-        # Сортировка по близости
-        result.sort(key=lambda x: min(x.distance_to_up, x.distance_to_down))
-        return result
+        self.limits = limits
+        return limits
+
+    def get_near_limits(self, pct=5.0):
+        """Список LimitData, у которых ближайшая планка в пределах pct%."""
+        if not self.limits:
+            self.read()
+        return [l for l in self.limits.values()
+                if min(l.distance_to_up, l.distance_to_down) <= pct]

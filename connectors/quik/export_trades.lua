@@ -1,32 +1,32 @@
 -- export_trades.lua
--- Экспорт сделок и планок из Quik в CSV.
--- ВЕРСИЯ 2.1 (2026-08-19, ветка Qwen_coder).
--- Исправлено относительно v1:
--- 1) Сторона: в Quik alltrade.operation — ЧИСЛО (1=buy, 2=sell),
---    а не "B"/"S". Раньше все сделки писались как sell.
---    Для совместимости принимаем и число, и строку.
--- 2) Время: берём ВРЕМЯ СДЕЛКИ с миллисекундами (alltrade.datetime + .msec),
---    а не os.time() в момент колбэка (секундная точность).
--- 3) Не открываем/закрываем файл на каждой сделке: буфер в памяти,
---    сброс раз в ~200 мс из main() — не забиваем очередь колбэков Quik.
--- 4) Планки пишем во временный файл и переименовываем —
---    читатель больше не поймает "рваный" файл на половине записи.
--- 5) Раз в 60 секунд пишем в лог счётчик сделок — видно, живой ли поток.
--- ВЕРСИЯ 2.1: сброс буфера по getTickCount() (настенные мс),
---    а не по os.clock() (процессорное время).
+-- ВЕРСИЯ 3.8 (2026-08-20, ветка Qwen_coder).
+-- Сделки (OnAllTrade) + ПЛАНКИ медленным опросом Quik.
+-- Планки: ломтики по LIMITS_SLICE=10 тикеров за цикл 2 c (~50 вызовов
+-- getParamEx за раз — столько же делал рабочий зонд), кэш, атомарная
+-- перезапись data/quik_limits.csv. Полный обход ~2 минуты; планки
+-- статичны внутри дня, этого достаточно.
+-- Котировки (quik_quotes.csv) пишет tools/iss_quotes_sync.py — не здесь.
+--
+-- ФАЙЛЫ: data/quik_trades.csv, data/quik_limits.csv, data/export_debug.log
 
 local trades_file = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_trades.csv"
 local limits_file = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_limits.csv"
 local limits_tmp  = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_limits.tmp"
 local log_file    = "C:/Users/Public/MI_CODES/Qwen_coder/data/export_debug.log"
 
+local LIMITS_SLICE = 10
+
 stopped = false
 trades_handle = nil
 buffer = {}
 trade_count = 0
 last_flush_ms = 0
-last_limits_time = 0
+last_limits_ms = 0
 last_counter_log_time = 0
+
+local all_secs = nil
+local limits_pos = 0
+local limits_cache = {}
 
 local function now_ms()
     if getTickCount then
@@ -60,8 +60,6 @@ function flush_trades()
     end
 end
 
--- Время СДЕЛКИ в мс: дата/время из alltrade.datetime + миллисекунды.
--- Если datetime нет (старый Quik) — откат на os.time()*1000 (секунды).
 function trade_time_ms(alltrade)
     local dt = alltrade.datetime
     if dt and dt.year then
@@ -94,26 +92,80 @@ function get_side(alltrade)
     return "sell"
 end
 
-function OnInit()
-    local f = io.open(log_file, "w")
-    if f then f:close() end
+-- Безопасное чтение числового параметра (type 1 и 4).
+local function get_num(class, sec, param)
+    local r = getParamEx(class, sec, param)
+    if r and (r.param_type == 1 or r.param_type == 4) and r.param_value then
+        return r.param_value
+    end
+    return nil
+end
 
-    write_log("=== QUIK EXPORT STARTED (v2.1) ===")
-    write_log("Trades file: " .. trades_file)
-    write_log("Limits file: " .. limits_file)
+local function fmt(v)
+    if v == nil then return "" end
+    return tostring(v)
+end
 
-    open_trades()
+local function ensure_secs()
+    if all_secs == nil then
+        all_secs = {}
+        local s = getClassSecurities("TQBR")
+        if s and s ~= "" then
+            for code in string.gmatch(s, "([^,]+)") do
+                all_secs[#all_secs + 1] = code
+            end
+        end
+        write_log("TQBR list cached: " .. #all_secs .. " tickers")
+    end
+    return all_secs
+end
 
-    local lf = io.open(limits_file, "w")
-    if lf then
-        lf:write("ticker;current_price;limit_up;limit_down;change_percent\n")
-        lf:close()
-        write_log("Limits file created OK")
-    else
-        write_log("ERROR: Cannot create limits file")
+-- Ломтик планок: 10 тикеров, кэш, атомарная перезапись файла.
+local function process_limits_slice()
+    local secs = ensure_secs()
+    local n = #secs
+    if n == 0 then return end
+
+    for _ = 1, LIMITS_SLICE do
+        limits_pos = limits_pos % n + 1
+        local code = secs[limits_pos]
+
+        local last = get_num("TQBR", code, "LAST")
+        local prev = get_num("TQBR", code, "PREVWAPRICE")
+        local price = (last and last > 0) and last or prev
+        local up = get_num("TQBR", code, "PRICEMAX")
+        local dn = get_num("TQBR", code, "PRICEMIN")
+        local ch = get_num("TQBR", code, "CHANGE")
+
+        if price and price > 0 and up and dn then
+            limits_cache[code] = code .. ";" .. fmt(price) .. ";" .. fmt(up)
+                .. ";" .. fmt(dn) .. ";" .. fmt(ch) .. "\n"
+        end
     end
 
-    message("Quik Export: Started (v2.1)")
+    local f = io.open(limits_tmp, "w")
+    if f then
+        f:write("ticker;current_price;limit_up;limit_down;change_percent\n")
+        local c = 0
+        for _, line in pairs(limits_cache) do
+            f:write(line)
+            c = c + 1
+        end
+        f:close()
+        os.remove(limits_file)
+        os.rename(limits_tmp, limits_file)
+        if limits_pos <= LIMITS_SLICE then
+            write_log("Limits sweep complete: " .. c .. " securities cached")
+        end
+    end
+end
+
+function OnInit()
+    write_log("=== QUIK EXPORT STARTED (v3.8: trades + slow limits) ===")
+    write_log("Waiting 5 sec for Quik to load data...")
+    sleep(5000)
+    open_trades()
+    message("Quik Export: Started (v3.8)")
 end
 
 function OnAllTrade(alltrade)
@@ -151,70 +203,25 @@ function OnStop()
     message("Quik Export: Stopped")
 end
 
-function write_limits()
-    local f = io.open(limits_tmp, "w")
-    if not f then
-        write_log("ERROR: Cannot open limits tmp file")
-        return
-    end
-    f:write("ticker;current_price;limit_up;limit_down;change_percent\n")
-
-    local secs = getClassSecurities("TQBR")
-    local count = 0
-    if secs and secs ~= "" then
-        for sec_code in string.gmatch(secs, "([^,]+)") do
-            local last_res = getParamEx("TQBR", sec_code, "LAST")
-            if last_res and last_res.param_type == 1 and last_res.param_value > 0 then
-                local price = last_res.param_value
-
-                local min_res = getParamEx("TQBR", sec_code, "PRICEMIN")
-                local max_res = getParamEx("TQBR", sec_code, "PRICEMAX")
-                local limit_down = (min_res and min_res.param_type == 1) and min_res.param_value or 0
-                local limit_up = (max_res and max_res.param_type == 1) and max_res.param_value or 0
-
-                local change_res = getParamEx("TQBR", sec_code, "CHANGE")
-                local change = (change_res and change_res.param_type == 1) and change_res.param_value or 0
-
-                f:write(sec_code .. ";" .. price .. ";" .. limit_up .. ";" .. limit_down .. ";" .. change .. "\n")
-                count = count + 1
-            end
-        end
-    else
-        write_log("ERROR: getClassSecurities returned empty or nil")
-    end
-    f:close()
-
-    -- Атомарная замена: читатель не поймает половину файла.
-    os.remove(limits_file)
-    local ok = os.rename(limits_tmp, limits_file)
-    if not ok then
-        write_log("ERROR: Cannot rename limits tmp -> final")
-    end
-    write_log("Limits written: " .. count .. " securities")
-end
-
 function main()
-    write_log("main() loop started (v2.1)")
-    last_limits_time = os.time()
+    write_log("main() loop started (v3.8)")
     last_flush_ms = now_ms()
+    last_limits_ms = now_ms()
 
     while not stopped do
         local t_ms = now_ms()
         local now = os.time()
 
-        -- Сброс буфера сделок раз в ~200 мс
         if t_ms - last_flush_ms >= 200 then
             last_flush_ms = t_ms
             flush_trades()
         end
 
-        -- Планки раз в 5 секунд
-        if now - last_limits_time >= 5 then
-            last_limits_time = now
-            write_limits()
+        if t_ms - last_limits_ms >= 2000 then
+            last_limits_ms = t_ms
+            process_limits_slice()
         end
 
-        -- Счётчик потока раз в 60 секунд (диагностика потерь)
         if now - last_counter_log_time >= 60 then
             last_counter_log_time = now
             write_log("trades exported total: " .. trade_count)

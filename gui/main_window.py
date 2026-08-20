@@ -1,13 +1,19 @@
 """
 Приблуда на python — главное окно скринера (PySide6).
 Минималистичный дизайн, 4 блока в ряд, группировка по тикерам.
-Системный трей, копирование тикера по двойному клику, поиск.
-ДОБАВЛЕНО: колонка CD (обратный отсчёт), NEXT = время удара МИН:СЕК,
-просроченные роботы показываются красным.
-Вкладки: Роботы, Планки, Аукционы, Арбитраж, Фандинг.
-Звуковые уведомления с возможностью отключения.
+Системный трей (иконка — эмодзи), копирование тикера по двойному клику, поиск.
+КОЛОНКИ: CD (обратный отсчёт), NEXT = время удара МИН:СЕК.
+v5: в окне ТОЛЬКО рабочие серии (CD >= 0, мёртвые скрыты полностью);
+CD/NEXT — белые; LPP — 2 знака; MS — последние три интервала В СЕКУНДАХ
+(074 074 075) с цветом стабильности (зел/жёлт/красн) — у брокера время
+сделки с секундной точностью, поэтому миллисекунды не используем.
+Вкладки: Роботы, Планки, Аукционы, Арбитраж, Фандинг, Графики.
+Чипы "🚏" в верхней панели и мигание тикера у планки (shared_state.limit_alerts).
+Новые вкладки подключаются через _add_safe_tab: падение вкладки не роняет
+приложение — вместо неё заглушка с текстом ошибки.
 """
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -16,7 +22,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (QApplication, QGridLayout, QHeaderView,
                                QHBoxLayout, QLabel, QMainWindow, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QTabWidget,
@@ -67,13 +73,15 @@ def _sort_key(r):
     s = r["seconds_to_next"]; return s if s is not None else float("inf")
 
 def _metro_parts(row):
+    """MS: последние три интервала В СЕКУНДАХ (074 074 075) с цветом
+    стабильности. Миллисекунды у брокера всё равно 0 — показываем секунды."""
     metro = row.get("metro")
     if not metro:
         ms = row.get("jitter_ms")
         if isinstance(ms, (int, float)): return [(f"{ms:.0f}", theme.TEXT)]
         return [("", theme.TEXT)]
     color = {"ok": theme.GREEN, "warn": theme.YELLOW, "bad": theme.RED}
-    return [(f"{ms % 1000:03d}", color[st]) for ms, st in metro]
+    return [(f"{int(ms) // 1000:03d}", color[st]) for ms, st in metro]
 
 
 class MainWindow(QMainWindow):
@@ -101,6 +109,13 @@ class MainWindow(QMainWindow):
         top_bar = QHBoxLayout()
         top_bar.setContentsMargins(4, 2, 4, 2)
         
+        top_bar.addStretch(1)
+
+        # Чипы тикеров у планок (пишет вкладка "Планки")
+        self.limit_lbl = QLabel("")
+        self.limit_lbl.setStyleSheet(f"color: {theme.YELLOW}; background: transparent;")
+        top_bar.addWidget(self.limit_lbl)
+
         top_bar.addStretch(1)
         
         self.clock = QLabel("")
@@ -157,17 +172,39 @@ class MainWindow(QMainWindow):
         self._init_limits_tab(self.limits_tab_widget)
         self.tabs.addTab(self.limits_tab_widget, "📏 Планки")
         
-        # Заглушки
-        self.tabs.addTab(self._placeholder("Аукционы: в разработке"), "🔔 Аукционы")
-        self.tabs.addTab(self._placeholder("Арбитраж: в разработке"), "⚖️ Арбитраж")
-        self.tabs.addTab(self._placeholder("Фандинг: в разработке"), " Фандинг")
-        self.tabs.addTab(self._placeholder("Графики: в разработке"), " Графики")
+        # Рабочие вкладки с защитной обёрткой (падение вкладки не роняет приложение)
+        self._add_safe_tab("Аукционы", "gui.tabs.auctions.auctions_tab", "AuctionsTab", "🔔 ")
+        self._add_safe_tab("Арбитраж", "gui.tabs.arbitrage.arbitrage_tab", "ArbitrageTab", "⚖️ ")
+        self._add_safe_tab("Фандинг", "gui.tabs.funding.funding_tab", "FundingTab", "")
+        self._add_safe_tab("Графики", "gui.tabs.charts.charts_tab", "ChartsTab", "")
         
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(1000)
         self._refresh()
-    
+
+    def _add_safe_tab(self, title, module_path, class_name, icon=""):
+        """Подключает вкладку; при любой ошибке — заглушка, приложение живёт."""
+        try:
+            import importlib
+            mod = importlib.import_module(module_path)
+            cls = getattr(mod, class_name)
+            self.tabs.addTab(cls(self.shared_state), icon + title)
+        except Exception as e:
+            self.tabs.addTab(
+                self._placeholder(f"{title}: недоступно — {type(e).__name__}: {e}"),
+                icon + title)
+
+    def _emoji_icon(self, ch="🖕", size=32):
+        """Иконка трея из эмодзи (рисуем в QPixmap)."""
+        px = QPixmap(size, size)
+        px.fill(Qt.transparent)
+        p = QPainter(px)
+        p.setFont(QFont("Segoe UI Emoji", size - 10))
+        p.drawText(px.rect(), Qt.AlignCenter, ch)
+        p.end()
+        return QIcon(px)
+
     def _on_search_changed(self, text):
         self.search_text = text.strip().upper()
         self._refresh()
@@ -204,7 +241,7 @@ class MainWindow(QMainWindow):
     
     def _setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(self.style().standardIcon(QStyle.SP_MessageBoxInformation))
+        self.tray_icon.setIcon(self._emoji_icon())
         
         tray_menu = QMenu()
         show_action = tray_menu.addAction("Показать окно")
@@ -218,7 +255,7 @@ class MainWindow(QMainWindow):
         self.tray_icon.show()
     
     def _tray_activated(self, reason):
-        if reason == QSystemTrayIcon.DoubleClick:
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.showNormal()
     
     def _quit_app(self):
@@ -282,12 +319,32 @@ class MainWindow(QMainWindow):
         return t
 
     def _on_cell_double_click(self, table, row, col):
-        if col == 1:  # ИЗМЕНЕНО: тикер теперь в колонке 1
+        if col == 1:  # тикер в колонке 1
             item = table.item(row, col)
             if item:
                 self._copy_ticker(item)
 
-    def _fill_table(self, table, rows, now_ts, batch_flash, dying_keys, show_headers):
+    def _make_separator(self, width=1, color=None):
+        """Разделитель с ЖЁСТКОЙ шириной — не схлопывается в layout."""
+        sep = QFrame()
+        sep.setFrameShape(QFrame.VLine)
+        sep.setFixedWidth(width)
+        sep.setStyleSheet(f"background: {color or theme.BORDER}; border: none;")
+        return sep
+
+    def _make_block(self):
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        top = self._make_table(show_headers=True)
+        bottom = self._make_table(show_headers=False)
+        lay.addWidget(top)
+        lay.addWidget(bottom)
+        return w, top, bottom
+
+    def _fill_table(self, table, rows, now_ts, batch_flash, dying_keys,
+                    show_headers, limit_flash=None):
         table.setUpdatesEnabled(False)
         table.setRowCount(len(rows))
         
@@ -303,6 +360,11 @@ class MainWindow(QMainWindow):
             det = batch_flash.get(row["symbol"])
             if det is not None and now_ts - det < 6 and int((now_ts - det) * 3) % 2 == 0: 
                 bg = "#2a2a12"
+            # мигание тикера, который у ценовой планки (из вкладки "Планки")
+            if bg is None and limit_flash:
+                tsf = limit_flash.get(row["symbol"])
+                if tsf is not None and now_ts - tsf <= 60 and int(now_ts * 3) % 2 == 0:
+                    bg = "#3a1a1a"
             
             sec = row["seconds_to_next"]
             interval = row["interval"]
@@ -314,20 +376,16 @@ class MainWindow(QMainWindow):
             variants = sorted(row["qty_variants"])
             qty_str = f"{variants[0]}-{variants[-1]}" if len(variants) > 1 else str(variants[0])
             
-            # CD: обратный отсчёт до удара; просрочка - красным с минусом
+            # CD: только рабочие серии (минусовые скрыты фильтром в _refresh)
             if sec is None:
                 cd_str, cd_fg = "-", theme.MUTED
-            elif sec >= 0:
-                cd_str, cd_fg = f"{sec:.0f}s", theme.TEXT
             else:
-                overdue = -sec
-                cd_str = f"-{int(overdue // 60)}m" if overdue >= 90 else f"-{int(overdue)}s"
-                cd_fg = theme.RED
+                cd_str, cd_fg = f"{sec:.0f}s", theme.TEXT
             
-            # NEXT: время следующего удара МИН:СЕК (синхронно с часами)
+            # NEXT: время следующего удара МИН:СЕК (синхронно с часами), белым
             if sec is not None:
                 next_str = datetime.fromtimestamp(now_ts + sec).strftime("%M:%S")
-                next_fg = theme.RED if sec < 0 else theme.YELLOW
+                next_fg = theme.TEXT
             else:
                 next_str, next_fg = "-", theme.MUTED
             
@@ -337,12 +395,12 @@ class MainWindow(QMainWindow):
                 (f"{interval:.0f}s" if interval else "-", base_fg),
                 (next_str, next_fg),
                 None,
-                (f"{lpp:.3f}" if isinstance(lpp,(int,float)) else "-", theme.TEXT),
+                (f"{lpp:.2f}" if isinstance(lpp,(int,float)) else "-", theme.TEXT),
                 (vpm, theme.TEXT), (str(row["repeats"]), base_fg)
             ]
             
             for c, cell in enumerate(cells):
-                if c == 5:  # колонка MS
+                if c == 5:  # колонка MS: интервалы в секундах с цветом
                     parts = _metro_parts(row)
                     it = QTableWidgetItem(" ".join(p[0] for p in parts))
                     it.setForeground(QColor(parts[-1][1] if parts else theme.TEXT))
@@ -374,33 +432,50 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(parent)
         lay.setContentsMargins(2, 2, 2, 2)
         lay.setSpacing(2)
-        
-        blocks_lay = QHBoxLayout()
-        blocks_lay.setSpacing(4)
-        
-        self.blocks = []
-        for i in range(4):
-            block_widget = QWidget()
-            block_lay = QVBoxLayout(block_widget)
-            block_lay.setContentsMargins(0, 0, 0, 0)
-            block_lay.setSpacing(0)
-            
-            top_table = self._make_table(show_headers=True)
-            block_lay.addWidget(top_table)
-            
-            bottom_table = self._make_table(show_headers=False)
-            block_lay.addWidget(bottom_table)
-            
-            if i < 3:
-                separator = QFrame()
-                separator.setFrameShape(QFrame.VLine)
-                separator.setStyleSheet(f"background: {theme.BORDER}; max-width: 1px;")
-                blocks_lay.addWidget(separator)
-            
-            blocks_lay.addWidget(block_widget, 1)
-            self.blocks.append((top_table, bottom_table))
-        
-        lay.addLayout(blocks_lay)
+
+        root = QHBoxLayout()
+        root.setSpacing(4)
+
+        buy_cap = QLabel("🟢 BUY (лонг)")
+        buy_cap.setStyleSheet(f"color: {theme.GREEN}; font-weight: bold; "
+                              f"font-size: 11px; background: transparent;")
+        buy_group = QWidget()
+        bg_lay = QVBoxLayout(buy_group)
+        bg_lay.setContentsMargins(0, 0, 0, 0)
+        bg_lay.setSpacing(0)
+        bg_lay.addWidget(buy_cap)
+        buy_row = QHBoxLayout()
+        buy_row.setSpacing(0)
+        w0, t0, b0 = self._make_block()
+        w1, t1, b1 = self._make_block()
+        buy_row.addWidget(w0, 1)
+        buy_row.addWidget(self._make_separator(1))
+        buy_row.addWidget(w1, 1)
+        bg_lay.addLayout(buy_row)
+
+        sell_cap = QLabel("🔴 SELL (шорт)")
+        sell_cap.setStyleSheet(f"color: {theme.RED}; font-weight: bold; "
+                               f"font-size: 11px; background: transparent;")
+        sell_group = QWidget()
+        sg_lay = QVBoxLayout(sell_group)
+        sg_lay.setContentsMargins(0, 0, 0, 0)
+        sg_lay.setSpacing(0)
+        sg_lay.addWidget(sell_cap)
+        sell_row = QHBoxLayout()
+        sell_row.setSpacing(0)
+        w2, t2, b2 = self._make_block()
+        w3, t3, b3 = self._make_block()
+        sell_row.addWidget(w2, 1)
+        sell_row.addWidget(self._make_separator(1))
+        sell_row.addWidget(w3, 1)
+        sg_lay.addLayout(sell_row)
+
+        root.addWidget(buy_group, 1)
+        root.addWidget(self._make_separator(2, "#4a4a4a"))
+        root.addWidget(sell_group, 1)
+        lay.addLayout(root)
+
+        self.blocks = [(t0, b0), (t1, b1), (t2, b2), (t3, b3)]
 
     def _init_limits_tab(self, parent):
         """Инициализация вкладки Планки"""
@@ -413,15 +488,34 @@ class MainWindow(QMainWindow):
         self.setUpdatesEnabled(False)
         now_ts = datetime.now().timestamp()
         self.clock.setText(datetime.now().strftime("%H:%M:%S"))
-        
+
+        # Чипы планок из вкладки "Планки"
+        alerts = getattr(self.shared_state, "limit_alerts", None) or []
+        limit_flash = {a["ticker"]: a.get("ts_first", 0) for a in alerts}
+        if alerts:
+            parts = [f"{a['ticker']}{'↑' if a['direction'] == 'up' else '↓'}{a['distance']:.1f}%"
+                     for a in alerts]
+            self.limit_lbl.setText("🚏 " + "  ".join(parts))
+            fresh = any(now_ts - a.get("ts_first", 0) <= 60 for a in alerts)
+            if fresh and int(now_ts * 2) % 2 == 0:
+                self.limit_lbl.setStyleSheet(
+                    "color: #ff4444; font-weight: bold; background: transparent;")
+            else:
+                self.limit_lbl.setStyleSheet(
+                    f"color: {theme.YELLOW}; background: transparent;")
+        else:
+            self.limit_lbl.setText("")
+
         bf = self.shared_state.batch_flash or {}
         rows = [r for r in self.shared_state.rows if not _is_futures(r["symbol"])]
-        
+
         if self.search_text:
             rows = [r for r in rows if self.search_text in r["symbol"]]
-        
-        # ИЗМЕНЕНО: просроченные больше не скрываются (показываются красным в CD)
-        
+
+        # v5: ТОЛЬКО рабочие серии — CD >= 0, минусовые не показываются вообще
+        rows = [r for r in rows
+                if r["seconds_to_next"] is None or r["seconds_to_next"] >= 0]
+
         cur = {(r["symbol"], r["side"], r["preset"], r["start_ts"]) for r in rows}
         dk = self._prev_keys - cur
         
@@ -433,16 +527,16 @@ class MainWindow(QMainWindow):
         short1 = [r for r in grp_sell if r["repeats"] >= CONFIRM_REPEATS]
         short2 = [r for r in grp_sell if 2 <= r["repeats"] < CONFIRM_REPEATS]
         
-        self._fill_table(self.blocks[0][0], long1, now_ts, bf, dk, True)
-        self._fill_table(self.blocks[0][1], [], now_ts, bf, dk, False)
-        self._fill_table(self.blocks[1][0], long2, now_ts, bf, dk, True)
-        self._fill_table(self.blocks[1][1], [], now_ts, bf, dk, False)
+        self._fill_table(self.blocks[0][0], long1, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[0][1], [], now_ts, bf, dk, False, limit_flash)
+        self._fill_table(self.blocks[1][0], long2, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[1][1], [], now_ts, bf, dk, False, limit_flash)
         
-        self._fill_table(self.blocks[2][0], short1, now_ts, bf, dk, True)
-        self._fill_table(self.blocks[2][1], [], now_ts, bf, dk, False)
+        self._fill_table(self.blocks[2][0], short1, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[2][1], [], now_ts, bf, dk, False, limit_flash)
         
-        self._fill_table(self.blocks[3][0], short2, now_ts, bf, dk, True)
-        self._fill_table(self.blocks[3][1], [], now_ts, bf, dk, False)
+        self._fill_table(self.blocks[3][0], short2, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[3][1], [], now_ts, bf, dk, False, limit_flash)
         
         self._prev_keys = cur
         self.setUpdatesEnabled(True)
@@ -451,7 +545,7 @@ class MainWindow(QMainWindow):
         event.ignore()
         self.hide()
         self.tray_icon.showMessage("Приблуда", "Свёрнуто в трей. Двойной клик для открытия.", 
-                                   QSystemTrayIcon.Information, 2000)
+                                   QSystemTrayIcon.MessageIcon.Information, 2000)
         
         if self.mini_windows["top"]:
             self.mini_windows["top"]._save_geometry()
