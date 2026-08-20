@@ -8,3 +8,4 @@ __pycache__/
 *.pyc
 data/
 output/
+ticker_settings.json.bak
