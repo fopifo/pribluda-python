@@ -4,10 +4,11 @@
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
 v5: история (Н-010) пишется в МОМЕНТ ПОДТВЕРЖДЕНИЯ (count==min_repeats),
 а не при закрытии серии — статистика копится в течение дня.
-v6: анти-шум в ВЫДАЧЕ (логика и история не меняются):
-- пары (LEN 2) скрыты (min_display_repeats=3);
-- длинный интервал (>long_interval_threshold) показывается только при
-count>=min_repeats (подтверждённый), как у конкурента.
+v7: КРАТНЫЕ ИНТЕРВАЛЫ — пропуск удара больше не рвёт серию:
+интервал ≈ k*база (k=2..interval_mult_max) принимается; если первый
+интервал сам был кратным (поймали с пропуском), база уточняется вниз.
+Кратные включаются ТОЛЬКО при базе >= short_interval_threshold (10с),
+чтобы НЕ трогать поведение быстрых серий. CD/INT считаются от базы.
 """
 import json
 import logging
@@ -28,7 +29,7 @@ if not _log.handlers:
 
 class Candidate:
     __slots__ = ("qty_variants", "count", "start_ts", "last_ts",
-                 "last_interval", "intervals", "warned",
+                 "last_interval", "base_interval", "intervals", "warned",
                  "first_price", "last_price", "price_counts", "priced_hits",
                  "sum_qty", "qty_counts")
     def __init__(self, qty, ts, price=None):
@@ -37,6 +38,7 @@ class Candidate:
         self.start_ts = ts
         self.last_ts = ts
         self.last_interval = None
+        self.base_interval = None
         self.intervals = []
         self.warned = False
         self.first_price = price
@@ -68,9 +70,10 @@ class IntervalRobotDetector(Detector):
         self.short_interval_tolerance = settings.get("short_interval_tolerance", 0.12)
         self.short_interval_threshold = settings.get("short_interval_threshold", 10.0)
         self.long_interval_threshold = settings.get("long_interval_threshold", 120.0)
+        self.interval_mult_max = settings.get("interval_mult_max", 4)
         self.stable_qty_required = settings.get("stable_qty_required", False)
         self.stable_qty_ratio = settings.get("stable_qty_ratio", 0.8)
-        self.min_display_repeats = settings.get("min_display_repeats", 3)
+        self.min_display_repeats = settings.get("min_display_repeats", 2)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name: self.name = f"робот-интервал[{preset_name}]"
@@ -81,7 +84,8 @@ class IntervalRobotDetector(Detector):
         self._history_path.parent.mkdir(exist_ok=True)
         _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
-                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}")
+                  f"mult_max={self.interval_mult_max}, stable_qty={self.stable_qty_required}, "
+                  f"min_display={self.min_display_repeats}")
 
     def drain_confirms(self):
         out = self._confirms
@@ -181,30 +185,54 @@ class IntervalRobotDetector(Detector):
         return max(candidate.qty_counts.values()) / total >= self.stable_qty_ratio
 
     def _interval_fits(self, candidate, interval):
-        if interval is None: return False
-        if self.min_interval is None: return False
-        if self.max_interval is None: return False
-        if interval < self.min_interval or interval > self.max_interval: return False
-        if candidate.last_interval is not None and candidate.last_interval < self.short_interval_threshold:
+        """Возвращает (ok, base). v7: допускает кратные интервалы
+        (робот пропустил удар): interval ≈ k*base (k=2..mult_max), либо
+        base ≈ k*interval (база уточняется вниз). Кратные только при
+        base >= short_interval_threshold (быстрые серии не трогаем)."""
+        if interval is None: return False, None
+        if self.min_interval is None: return False, None
+        if self.max_interval is None: return False, None
+        if interval < self.min_interval or interval > self.max_interval:
+            return False, None
+        last = candidate.last_interval
+        if last is None: return True, interval
+        base = candidate.base_interval or last
+        if base <= 0: return True, last
+        if base < self.short_interval_threshold:
             tol = self.short_interval_tolerance
         else:
             tol = self.interval_tolerance
-        if tol is None or candidate.last_interval is None: return True
-        low = candidate.last_interval * (1 - tol)
-        high = candidate.last_interval * (1 + tol)
-        return low <= interval <= high
+        if tol is None: return True, base
+        # k=1: обычный шаг
+        if abs(interval - base) <= base * tol:
+            return True, base
+        if base >= self.short_interval_threshold:
+            # k>=2: пропущен удар
+            k = 2
+            while k <= self.interval_mult_max and k * base <= self.max_interval:
+                if abs(interval - k * base) <= k * base * tol:
+                    return True, base
+                k += 1
+            # база сама была кратной — уточняем вниз
+            k = 2
+            while k <= self.interval_mult_max and k * interval <= self.max_interval:
+                if abs(base - k * interval) <= k * interval * tol:
+                    return True, interval
+                k += 1
+        return False, None
 
     def _find_match(self, side, qty, ts):
         if not self.ignore_qty:
             for c in self.index.get(side, {}).get(qty, []):
-                iv = ts - c.last_ts
-                if self._interval_fits(c, iv):
+                ok, _base = self._interval_fits(c, ts - c.last_ts)
+                if ok:
                     return c
         for c in reversed(self.active.get(side, [])):
             iv = ts - c.last_ts
             if iv > self.max_interval:
                 break
-            if not self._interval_fits(c, iv):
+            ok, _base = self._interval_fits(c, iv)
+            if not ok:
                 continue
             if iv >= self.long_interval_threshold and not self._qty_stable_for_long(c):
                 continue
@@ -245,6 +273,9 @@ class IntervalRobotDetector(Detector):
         match = self._find_match(side, qty, ts)
         if match is not None:
             iv = ts - match.last_ts
+            ok, base = self._interval_fits(match, iv)
+            if ok and base is not None:
+                match.base_interval = base
             match.intervals.append(iv)
             match.last_interval = iv
             if qty not in match.qty_variants:
@@ -290,10 +321,11 @@ class IntervalRobotDetector(Detector):
                     self._unregister(side, c)
                     continue
                 if c.count < self.min_repeats: continue
-                if c.last_interval is not None:
-                    tol = self.short_interval_tolerance if c.last_interval < self.short_interval_threshold else self.interval_tolerance
+                base = c.base_interval or c.last_interval
+                if base is not None:
+                    tol = self.short_interval_tolerance if base < self.short_interval_threshold else self.interval_tolerance
                     if tol is not None:
-                        max_fit = c.last_interval * (1 + tol)
+                        max_fit = base * (1 + tol)
                         if gap > max_fit and not c.warned:
                             c.warned = True
                             warnings.append({"symbol": self.symbol, "side": side,
@@ -308,19 +340,15 @@ class IntervalRobotDetector(Detector):
         for side, cands in self.active.items():
             for c in cands:
                 if c.count < self.min_display_repeats: continue
-                # v6: длинный интервал без подтверждения — шум, скрываем
-                if (c.last_interval is not None
-                        and c.last_interval > self.long_interval_threshold
-                        and c.count < self.min_repeats):
-                    continue
-                seconds_to_next = (c.last_ts + c.last_interval - now_ts) if c.last_interval is not None else None
+                base = c.base_interval or c.last_interval
+                seconds_to_next = (c.last_ts + base - now_ts) if base is not None else None
                 jitter_ms = statistics.pstdev(c.intervals) * 1000 if len(c.intervals) >= 2 else None
                 same_price_ratio = None
                 if c.priced_hits > 0 and c.price_counts: same_price_ratio = max(c.price_counts.values()) / c.priced_hits
                 price_shift = None
                 if c.first_price is not None and c.last_price is not None: price_shift = c.last_price - c.first_price
                 rows.append({"symbol": self.symbol, "preset": self.preset_name, "side": side,
-                             "qty_variants": sorted(c.qty_variants), "interval": c.last_interval,
+                             "qty_variants": sorted(c.qty_variants), "interval": base,
                              "repeats": c.count, "seconds_to_next": seconds_to_next,
                              "start_ts": c.start_ts, "jitter_ms": jitter_ms,
                              "price_first": c.first_price, "price_last": c.last_price,
