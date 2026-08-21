@@ -1,2 +1,7 @@
-requests
-python-dotenv
+requests>=2.31
+python-dotenv>=1.0
+PySide6>=6.6
+matplotlib>=3.8
+aiohttp>=3.9
+loguru>=0.7
+pytest>=8.0
