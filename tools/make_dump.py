@@ -1,8 +1,8 @@
 """
 Приблуда на python — сборщик полного дампа исходников для передачи в чат.
-v3: в дамп ДОБАВЛЕНЫ файлы статистики из data/ (whitelist):
-    robots_history.jsonl, competitor_history.jsonl.
-Обход дерева автоматически подхватывает новые папки.
+v5: файлы статистики/эталона из data/ (whitelist) попадают в дамп
+БЕЗ ограничения MAX_SIZE (robots_history.jsonl может быть >300KB).
+Обход дерева подхватывает новые папки автоматически.
 Пропускает тяжёлое: data/* (кроме whitelist), output/, __pycache__, .git.
 Пишет project_dump.txt в корень.
 """
@@ -16,7 +16,8 @@ SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "venv", ".venv",
              "output", "node_modules", ".idea", ".vscode"}
 OK_EXT = {".py", ".lua", ".md", ".txt", ".json", ".ini", ".csv"}
 MAX_SIZE = 300_000
-# whitelist из data/ — только статистика, НЕ quik_trades.csv
+# whitelist из data/ — статистика и эталон, НЕ quik_trades.csv;
+# эти файлы идут в дамп БЕЗ ограничения размера
 DATA_INCLUDE = {"robots_history.jsonl", "competitor_history.jsonl"}
 
 
@@ -29,14 +30,14 @@ def collect() -> list[Path]:
         parts = rel.parts
         if any(part in SKIP_DIRS for part in parts):
             continue
-        if "data" in parts:
-            if p.name not in DATA_INCLUDE:
-                continue
+        in_data = "data" in parts
+        if in_data and p.name not in DATA_INCLUDE:
+            continue
         if p.suffix not in OK_EXT:
             continue
         if p.name == "project_dump.txt":
             continue
-        if p.stat().st_size > MAX_SIZE:
+        if not in_data and p.stat().st_size > MAX_SIZE:
             continue
         files.append(p)
     return files

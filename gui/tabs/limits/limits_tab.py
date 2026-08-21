@@ -1,34 +1,37 @@
 """
-Приблуда на python — вкладка "Планки" (v3).
+Приблуда на python — вкладка "Планки" (v4).
+v4: ИСПРАВЛЕНО BASE_UI_FILE — файл в gui/tabs/limits/, до корня 4 уровня
+(.parent x4); было 3 → limits_ui.json создавался в gui/ вместо корня.
+Теперь настройки зоны лежат в корне рядом с ui_settings.json и др.
 - Колонка "ДО ПЛАНКИ" со стрелкой и цветом, "ПОЗИЦИЯ ДНЯ" мини-полосой,
-  статусы из Quik (аукцион/приостановка).
+статусы из Quik (аукцион/приостановка).
 - Регулируемая зона (спинбокс), фильтр "только интересные",
-  сортировка по близости к планке.
+сортировка по близости к планке.
 - УВЕДОМЛЕНИЕ В МОМЕНТ входа в зону: звук (двойной бип, учитывает 🔊),
-  мигание строки здесь, мигание тикера на главном экране и чипы в верхней
-  панели (через shared_state.limit_alerts, читает main_window).
+мигание строки здесь, мигание тикера на главном экране и чипы в верхней
+панели (через shared_state.limit_alerts, читает main_window).
 - Гистерезис (вход <= зона, выход > зона+0.5) и кулдаун звука 10 минут.
 - v3 (производительность): скрытая вкладка не пересчитывает таблицы;
-  блок "ОСТАЛЬНЫЕ" ограничен 150 строками; обновление раз в 3 c.
+блок "ОСТАЛЬНЫЕ" ограничен 150 строками; обновление раз в 3 c.
 Архитектура: gui/tabs/limits/. Не торгует, только чтение.
 """
 import json
 import threading
 import time
-
+from pathlib import Path
 from PySide6.QtCore import QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout,
                                QLabel, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
-
 from connectors.quik.limits_reader import LimitsReader
 from connectors.quik.quotes_reader import QuotesReader
 from core.sound_manager import SoundManager
 from gui import theme
 
-BASE_UI_FILE = LimitsReader.__init__.__globals__["Path"](
-    __file__).resolve().parent.parent.parent / "limits_ui.json"
+# gui/tabs/limits/limits_tab.py -> корень: 4 уровня вверх
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
+BASE_UI_FILE = BASE_DIR / "limits_ui.json"
 
 SOUND_COOLDOWN_SEC = 600.0   # повторный бип по тикеру не чаще раза в 10 минут
 FLASH_SEC = 60.0             # мигание после входа в зону
