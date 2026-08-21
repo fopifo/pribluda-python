@@ -1,13 +1,13 @@
 """
 Приблуда на python — подстройка настроек детектора против шума.
+v4: добавлен SMALL_QTY — точечные пороги для тикеров, где конкурент
+видит роботов с малым объёмом (4-20 лотов). Без этого мы их не видим.
 - interval_tolerance: 10% -> 5% (только если не настроено)
 - min_repeats: 3 -> 4
-- min_qty: 10 -> 20 (глобально), 50 (для спамеров),
-  но MIN_QTY_OVERRIDES имеет приоритет (тикеры с мелкими роботами конкурента)
+- min_qty: 10 -> 20 (глобально), 50 (для спамеров), SMALL_QTY (приоритет)
 - max_qty_ratio: None -> 1.10
 - min_display_repeats: 3 (кандидаты в UI с 3 повторов)
 Создаёт резервную копию ticker_settings.json.bak
-ПЕРЕНОС: из корня в tools/ (архитектура).
 """
 import json
 import shutil
@@ -29,22 +29,27 @@ SPAMMERS = {
     "VKCO",
 }
 
-# v4: точечные min_qty по эталону (приоритет над SPAMMERS и дефолтом).
-# Значение = минимальный qty робота конкурента (скрины 10:00-11:11
-# и research/competitor_robots_2026-08-20.csv).
-MIN_QTY_OVERRIDES = {
-    "RENI": 4,    # конкурент: RENI 4-5 @16s
-    "BSPB": 10,   # конкурент: BSPB 10-34 @37-74s
-    "LENT": 15,   # конкурент: LENT 19-21 @16s
-    "CNRU": 10,   # конкурент: CNRU 10-11 @10s
-    "PHOR": 9,    # конкурент: PHOR 9-10 @12s
-    "PIKK": 40,   # конкурент: PIKK 40-41 @12s
-    "DOMRF": 20,  # конкурент: DOMRF 23-24 @12s
-    "HEAD": 19,   # конкурент: HEAD 19-20 @12s
-    "SNGS": 25,   # конкурент: SNGS 29-30 @13s
-    "GMKN": 10,   # конкурент: GMKN buy 10-11 @16s
-    "TATNP": 50,  # конкурент: TATNP 50-51 @12s (явно, для ясности)
-    "FLOT": 50,   # конкурент: FLOT 87-88 @12s (явно, для ясности)
+# v4: точечные пороги по наблюдениям за конкурентом (приоритет над SPAMMERS)
+SMALL_QTY = {
+    "RENI": 4,    # конкурент видит 4-5
+    "BSPB": 10,   # конкурент видит 10-30
+    "GMKN": 10,   # конкурент видит 10-11 (buy)
+    "CNRU": 10,   # конкурент видит 10-11
+    "NLMK": 9,    # конкурент видит 9-10
+    "FEES": 19,   # конкурент видит 19
+    "HEAD": 19,   # конкурент видит 19-20
+    "DOMRF": 23,  # конкурент видит 23-24
+    "SNGS": 29,   # конкурент видит 29-30
+    "BELU": 16,   # конкурент видит 16-17
+    "LENT": 20,   # конкурент видит 20
+    "CHMF": 33,   # конкурент видит 33-57
+    "PIKK": 40,   # конкурент видит 40-41
+    "MAGN": 35,   # конкурент видит 35
+    "POSI": 44,   # конкурент видит 44-45
+    "MGNT": 42,   # конкурент видит 42-43
+    "X5": 25,     # конкурент видит 25-144
+    "UGLD": 43,   # конкурент видит 43-54
+    "TATN": 20,   # конкурент видит 20-1405
 }
 
 def main():
@@ -57,23 +62,21 @@ def main():
     changed = 0
     for sym, s in data.items():
         old = dict(s)
-        # min_repeats: всегда 4
         s["min_repeats"] = 4
-        # max_qty_ratio: всегда 1.10
         s["max_qty_ratio"] = 1.10
-        # interval_tolerance: только если не настроено
         if "interval_tolerance" not in s:
             s["interval_tolerance"] = 0.05
-        # min_display_repeats: 3 (кандидаты в UI с 3 повторов)
         s["min_display_repeats"] = 3
-        # min_qty: приоритет у точечных значений, затем спамеры/дефолт
-        if sym in MIN_QTY_OVERRIDES:
-            s["min_qty"] = MIN_QTY_OVERRIDES[sym]
+        
+        # Приоритет: SMALL_QTY -> SPAMMERS -> дефолт 20
+        if sym in SMALL_QTY:
+            s["min_qty"] = SMALL_QTY[sym]
         elif sym in SPAMMERS:
             s["min_qty"] = 50
         else:
             if s.get("min_qty", 10) < 20:
                 s["min_qty"] = 20
+                
         if s != old:
             changed += 1
     SETTINGS.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
