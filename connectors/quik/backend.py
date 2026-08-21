@@ -1,9 +1,8 @@
 """
 Приблуда на python — бэкенд для Quik (чтение CSV ленты).
-Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность для живых сделок.
-Фикс: в live-ветке больше не перезаписываем timestamp arrival-time — lua v3.10
-пишет настоящие миллисекунды из alltrade.datetime.msec. Перезапись давала
-джиттер ±50-200мс от опроса и рвала ритм роботов.
+Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность.
+v2: live-ветка НЕ перезаписывает timestamp (настоящие мс из CSV).
+v3: batch_flash — мигание "пачки" роботов: >=4 тикеров подтвердились за 15с.
 """
 import sys, time, threading, logging
 from datetime import datetime
@@ -31,6 +30,10 @@ if not _log.handlers:
     _log.addHandler(_handler)
     _log.setLevel(logging.INFO)
 
+# Волна: столько тикеров должны подтвердиться за окно, чтобы мигать
+BATCH_MIN_TICKERS = 4
+BATCH_WINDOW_SEC = 15.0
+
 
 class QuikBackend:
     def __init__(self, shared: SharedState):
@@ -40,6 +43,7 @@ class QuikBackend:
         self.dets = {}
         self.lines_read = 0
         self.trades_fed = 0
+        self.confirm_times = {}   # symbol -> ts последнего подтверждения
         _log.info(f"Backend init: {len(self.allowed)} tickers allowed")
 
     def _dets_for(self, sym):
@@ -57,6 +61,8 @@ class QuikBackend:
             return
         for d in self._dets_for(sym):
             d.on_trade(trade)
+            for ts_sec in d.drain_confirms():
+                self.confirm_times[sym] = ts_sec
         self.trades_fed += 1
 
     def parse(self, line):
@@ -72,10 +78,22 @@ class QuikBackend:
         except ValueError:
             return None
 
+    def _update_batch_flash(self, now):
+        """Наполняет shared.batch_flash: мигают тикеры волны (>=4 за 15с)."""
+        recent = [s for s, ts in self.confirm_times.items() if now - ts <= BATCH_WINDOW_SEC]
+        if len(recent) >= BATCH_MIN_TICKERS:
+            self.shared.batch_flash = {s: now for s in recent}
+        else:
+            self.shared.batch_flash = {}
+        # чистим старые
+        self.confirm_times = {s: t for s, t in self.confirm_times.items()
+                              if now - t <= 60}
+
     def publisher(self):
         """Поток обновления GUI (раз в секунду собирает снапшоты)."""
         while True:
             now = datetime.now().timestamp()
+            self._update_batch_flash(now)
             rows = []
             for dets in self.dets.values():
                 for d in dets:
@@ -109,9 +127,6 @@ class QuikBackend:
             _log.warning(f"CSV not found: {CSV}")
 
         # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
-        # Lua v3.10 пишет настоящие мс из alltrade.datetime.msec; фолбэк на
-        # arrival-time больше не нужен — он только добавлял джиттер ±50-200мс
-        # и рвал ритм роботов.
         _log.info("Switching to live tail mode (CSV ms, no overwrite)")
         while True:
             try:
