@@ -1,5 +1,5 @@
 """
-Приблуда на python — вкладка "Планки" (v5).
+Приблуда на python — вкладка "Планки" (v4).
 - Колонка "ДО ПЛАНКИ" со стрелкой и цветом, "ПОЗИЦИЯ ДНЯ" мини-полосой,
 статусы из Quik (аукцион/приостановка).
 - Регулируемая зона (спинбокс), фильтр "только интересные",
@@ -10,11 +10,8 @@
 - Гистерезис (вход <= зона, выход > зона+0.5) и кулдаун звука 10 минут.
 - v3 (производительность): скрытая вкладка не пересчитывает таблицы;
 блок "ОСТАЛЬНЫЕ" ограничен 150 строками; обновление раз в 3 c.
-v5: ИСПРАВЛЕНО BASE_UI_FILE — файл в gui/tabs/limits/, до корня 4 уровня
-(.parent x4); было 3 → limits_ui.json создавался в gui/ вместо корня.
-+ АВТОМИГРАЦИЯ: при старте, если в корне limits_ui.json нет, а старый
-gui/limits_ui.json есть — его содержимое копируется в корень
-(нестандартная зона НЕ теряется, переставлять вручную не нужно).
+v4: BASE_UI_FILE = 4 уровня .parent (limits_ui.json в корне, как остальные
+настройки); было 3 → настройки зоны писались в gui/limits_ui.json.
 Архитектура: gui/tabs/limits/. Не торгует, только чтение.
 """
 import json
@@ -32,31 +29,17 @@ from core.sound_manager import SoundManager
 from gui import theme
 
 # gui/tabs/limits/limits_tab.py -> корень: 4 уровня вверх
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-BASE_UI_FILE = BASE_DIR / "limits_ui.json"
-LEGACY_UI_FILE = BASE_DIR / "gui" / "limits_ui.json"  # старый битый путь
+BASE_UI_FILE = Path(__file__).resolve().parent.parent.parent.parent / "limits_ui.json"
 
 SOUND_COOLDOWN_SEC = 600.0   # повторный бип по тикеру не чаще раза в 10 минут
 FLASH_SEC = 60.0             # мигание после входа в зону
 REST_MAX_ROWS = 150          # ограничение блока "ОСТАЛЬНЫЕ" (производительность)
-
-
-def _migrate_ui():
-    """Одноразово: переносит старую настройку зоны из gui/limits_ui.json в корень."""
-    try:
-        if not BASE_UI_FILE.exists() and LEGACY_UI_FILE.exists():
-            BASE_UI_FILE.write_text(
-                LEGACY_UI_FILE.read_text(encoding="utf-8"), encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        pass
-
 
 def _load_ui():
     try:
         return json.loads(BASE_UI_FILE.read_text(encoding="utf-8"))
     except (FileNotFoundError, OSError, json.JSONDecodeError):
         return {}
-
 
 def _save_ui(data):
     try:
@@ -65,13 +48,11 @@ def _save_ui(data):
     except (OSError, TypeError):
         pass
 
-
 def _bar(pos):
     if pos is None:
         return "-"
     k = int(round(pos / 10))
     return "█" * k + "░" * (10 - k) + f" {pos:.0f}%"
-
 
 def _beep():
     def run():
@@ -84,22 +65,18 @@ def _beep():
             pass
     threading.Thread(target=run, daemon=True).start()
 
-
 class LimitsTab(QWidget):
     def __init__(self, shared_state):
         super().__init__()
         self.shared_state = shared_state
         self.limits_reader = LimitsReader()
         self.quotes_reader = QuotesReader()
-        _migrate_ui()                      # v5: перенос старой зоны в корень
         ui = _load_ui()
         self._known = {}      # тикер -> ts первого входа в зону (для мигания/кулдауна)
         self._last_sound = {}  # тикер -> ts последнего бипа
-
         layout = QVBoxLayout(self)
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
-
         top = QHBoxLayout()
         header = QLabel("📏 ЦЕНОВЫЕ ПЛАНКИ TQBR")
         header.setStyleSheet(f"color: {theme.TEXT}; font-weight: bold; padding: 2px;")
@@ -122,7 +99,6 @@ class LimitsTab(QWidget):
         self.info_lbl.setStyleSheet(f"color: {theme.MUTED}; background: transparent;")
         top.addWidget(self.info_lbl, 1)
         layout.addLayout(top)
-
         blocks_layout = QHBoxLayout()
         blocks_layout.setSpacing(4)
         self.block_zone = self._create_block("🚨 В ЗОНЕ (планка рядом)", theme.RED)
@@ -142,7 +118,6 @@ class LimitsTab(QWidget):
         self.block_rest = self._create_block("ОСТАЛЬНЫЕ", theme.MUTED)
         blocks_layout.addWidget(self.block_rest, 1)
         layout.addLayout(blocks_layout)
-
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._refresh)
         self.timer.start(3000)
@@ -230,7 +205,6 @@ class LimitsTab(QWidget):
             limits = self.limits_reader.read()
             self.quotes = self.quotes_reader.read()
             self.info_lbl.setText(f"инструментов: {len(limits)}")
-
             # --- уведомления: вход/выход из зоны с гистерезисом ---
             alerts = []
             for l in limits.values():
@@ -257,7 +231,6 @@ class LimitsTab(QWidget):
                 self.shared_state.limit_alerts = alerts
             except Exception:
                 pass
-
             # --- блоки ---
             in_zone = [l for l in limits.values()
                        if min(l.distance_to_up, l.distance_to_down) <= zone]
