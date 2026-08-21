@@ -3,16 +3,16 @@
 - interval_tolerance: 10% -> 5% (только если не настроено)
 - min_repeats: 3 -> 4
 - min_qty: 10 -> 20 (глобально), 50 (для спамеров),
-  НО MIN_QTY_OVERRIDES берёт приоритет — тикеры, где эталон видит
-  мелкие лоты (пол qty конкурента), получают пониженный порог.
+  но MIN_QTY_OVERRIDES имеет приоритет (тикеры с мелкими роботами конкурента)
 - max_qty_ratio: None -> 1.10
-- min_display_repeats: 3 (пары LEN2 в UI не показываются)
+- min_display_repeats: 3 (кандидаты в UI с 3 повторов)
 Создаёт резервную копию ticker_settings.json.bak
 ПЕРЕНОС: из корня в tools/ (архитектура).
 """
 import json
 import shutil
 from pathlib import Path
+
 BASE = Path(__file__).resolve().parent.parent
 SETTINGS = BASE / "ticker_settings.json"
 
@@ -29,24 +29,22 @@ SPAMMERS = {
     "VKCO",
 }
 
-# v4: приоритет над SPAMMERS/дефолтом. Пол qty из роботов конкурента
-(скрины 10:00-11:11 + competitor_robots_2026-08-20.csv):
-#   GMKN buy 10-11, LKOH buy 10-11, CNRU buy 10-11, PHOR buy 9-10,
-#   BSPB buy 10-34, LENT sell 19-21, HEAD sell 19-20, DOMRF sell 23-24,
-#   SNGS sell 29-30, MAGN sell 35, CHMF sell 33-57, PIKK buy 40-41.
+# v4: точечные min_qty по эталону (приоритет над SPAMMERS и дефолтом).
+# Значение = минимальный qty робота конкурента (скрины 10:00-11:11
+# и research/competitor_robots_2026-08-20.csv).
 MIN_QTY_OVERRIDES = {
-    "GMKN": 8,
-    "LKOH": 8,
-    "CNRU": 8,
-    "PHOR": 8,
-    "BSPB": 8,
-    "LENT": 15,
-    "HEAD": 15,
-    "DOMRF": 20,
-    "SNGS": 25,
-    "MAGN": 30,
-    "CHMF": 30,
-    "PIKK": 35,
+    "RENI": 4,    # конкурент: RENI 4-5 @16s
+    "BSPB": 10,   # конкурент: BSPB 10-34 @37-74s
+    "LENT": 15,   # конкурент: LENT 19-21 @16s
+    "CNRU": 10,   # конкурент: CNRU 10-11 @10s
+    "PHOR": 9,    # конкурент: PHOR 9-10 @12s
+    "PIKK": 40,   # конкурент: PIKK 40-41 @12s
+    "DOMRF": 20,  # конкурент: DOMRF 23-24 @12s
+    "HEAD": 19,   # конкурент: HEAD 19-20 @12s
+    "SNGS": 25,   # конкурент: SNGS 29-30 @13s
+    "GMKN": 10,   # конкурент: GMKN buy 10-11 @16s
+    "TATNP": 50,  # конкурент: TATNP 50-51 @12s (явно, для ясности)
+    "FLOT": 50,   # конкурент: FLOT 87-88 @12s (явно, для ясности)
 }
 
 def main():
@@ -63,12 +61,12 @@ def main():
         s["min_repeats"] = 4
         # max_qty_ratio: всегда 1.10
         s["max_qty_ratio"] = 1.10
-        # interval_tolerance: только если не настроено (сохраняем short_interval_tolerance)
+        # interval_tolerance: только если не настроено
         if "interval_tolerance" not in s:
             s["interval_tolerance"] = 0.05
-        # min_display_repeats: 3 (пары LEN2 в UI не показываются)
+        # min_display_repeats: 3 (кандидаты в UI с 3 повторов)
         s["min_display_repeats"] = 3
-        # min_qty: приоритет у MIN_QTY_OVERRIDES, иначе 50/20
+        # min_qty: приоритет у точечных значений, затем спамеры/дефолт
         if sym in MIN_QTY_OVERRIDES:
             s["min_qty"] = MIN_QTY_OVERRIDES[sym]
         elif sym in SPAMMERS:
