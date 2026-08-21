@@ -1,16 +1,20 @@
 """
 Приблуда на python — отдельное окно «Поводыри рынка» со свечными
 графиками и полосами Боллинджера. Запускается ОТДЕЛЬНО от скринера
-(python leader_monitor.py), ничего в live_screener.py не меняет —
+(python modules/leader_monitor.py), ничего в live_screener.py не меняет —
 поэтому его можно включать/выключать независимо.
+
 Для скальпера: ищем точку входа на графике поводыря — например, отскок
 от НИЖНЕЙ полосы Боллинджера на покупку. Можно переключать таймфреймы
 (1м/10м/1ч/1д) и поводырей (индекс, RGBI, юань, доллар, нефть).
-Данные — из tg_bot/leader_data.py (MOEX ISS candles, без токена),
+
+Данные — из integrations/tg_bot/leader_data.py (MOEX ISS candles, без токена),
 обновляются в фоне раз в LEADER_REFRESH_SEC секунд.
+
 Нужен matplotlib: pip install matplotlib
+
 Запуск (из корня проекта):
-python leader_monitor.py
+python modules/leader_monitor.py
 """
 import asyncio
 import sys
@@ -20,8 +24,9 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import ttk
 
-BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR / "tg_bot"))
+# ИСПРАВЛЕНО: правильный путь к integrations/tg_bot/
+BASE_DIR = Path(__file__).resolve().parent  # это modules/
+sys.path.insert(0, str(BASE_DIR.parent / "integrations" / "tg_bot"))
 
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
