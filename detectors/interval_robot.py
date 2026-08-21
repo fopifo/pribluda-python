@@ -4,11 +4,10 @@
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
 v5: история (Н-010) пишется в МОМЕНТ ПОДТВЕРЖДЕНИЯ (count==min_repeats),
 а не при закрытии серии — статистика копится в течение дня.
-v6 (окно-правда): в снапшот НЕ попадают:
-  - пары (count < min_display_repeats) — одно совпадение интервалов не робот;
-  - длинные интервалы (> long_interval_threshold) без подтверждения —
-    случайные совпадения на 3-8 мин не показываем, пока не доросли до
-    min_repeats. Логика детекции НЕ тронута — меняется только выдача в GUI.
+v6: анти-шум в ВЫДАЧЕ (логика и история не меняются):
+- пары (LEN 2) скрыты (min_display_repeats=3);
+- длинный интервал (>long_interval_threshold) показывается только при
+count>=min_repeats (подтверждённый), как у конкурента.
 """
 import json
 import logging
@@ -82,8 +81,7 @@ class IntervalRobotDetector(Detector):
         self._history_path.parent.mkdir(exist_ok=True)
         _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
-                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}, "
-                  f"long_gate={self.long_interval_threshold}s")
+                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}")
 
     def drain_confirms(self):
         out = self._confirms
@@ -309,9 +307,8 @@ class IntervalRobotDetector(Detector):
         rows = []
         for side, cands in self.active.items():
             for c in cands:
-                # v6: пары не показываем вовсе
                 if c.count < self.min_display_repeats: continue
-                # v6: длинный интервал — только подтверждённые
+                # v6: длинный интервал без подтверждения — шум, скрываем
                 if (c.last_interval is not None
                         and c.last_interval > self.long_interval_threshold
                         and c.count < self.min_repeats):

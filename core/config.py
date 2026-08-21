@@ -2,7 +2,6 @@
 Приблуда на python — конфигурация детекторов.
 Дефолты: interval_tolerance=0.05, max_qty_ratio=1.10, min_display_repeats=3.
 Н-013: short_interval_threshold=10.0 (адаптивный допуск 12% только для 1-9s).
-v6: min_display_repeats=3 (пары LEN2 не показываем).
 """
 from typing import List, Dict, Any
 

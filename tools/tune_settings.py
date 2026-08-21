@@ -4,9 +4,8 @@
 - min_repeats: 3 -> 4
 - min_qty: 10 -> 20 (глобально), 50 (для спамеров)
 - max_qty_ratio: None -> 1.10
-- min_display_repeats: 2 -> 3 (v3: пары LEN2 = шум, не показываем)
+- min_display_repeats: 3 (v6: пары LEN2 скрыты)
 Создаёт резервную копию ticker_settings.json.bak
-ПЕРЕНОС: из корня в tools/ (архитектура).
 """
 import json
 import shutil
@@ -40,7 +39,7 @@ def main():
         s["max_qty_ratio"] = 1.10
         if "interval_tolerance" not in s:
             s["interval_tolerance"] = 0.05
-        s["min_display_repeats"] = 3   # v3: пары скрыты
+        s["min_display_repeats"] = 3   # v6
         if sym in SPAMMERS:
             s["min_qty"] = 50
         else:
