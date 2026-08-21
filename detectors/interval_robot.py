@@ -4,6 +4,11 @@
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
 v5: история (Н-010) пишется в МОМЕНТ ПОДТВЕРЖДЕНИЯ (count==min_repeats),
 а не при закрытии серии — статистика копится в течение дня.
+v6 (окно-правда): в снапшот НЕ попадают:
+  - пары (count < min_display_repeats) — одно совпадение интервалов не робот;
+  - длинные интервалы (> long_interval_threshold) без подтверждения —
+    случайные совпадения на 3-8 мин не показываем, пока не доросли до
+    min_repeats. Логика детекции НЕ тронута — меняется только выдача в GUI.
 """
 import json
 import logging
@@ -21,7 +26,6 @@ if not _log.handlers:
     _handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"))
     _log.addHandler(_handler)
     _log.setLevel(logging.INFO)
-
 
 class Candidate:
     __slots__ = ("qty_variants", "count", "start_ts", "last_ts",
@@ -44,11 +48,9 @@ class Candidate:
         self.sum_qty = qty
         self.qty_counts = {qty: 1}
 
-
 class IntervalRobotDetector(Detector):
     name = "робот-интервал"
     MAX_ACTIVE_PER_SIDE = 500
-
     def __init__(self, symbol, settings):
         super().__init__(symbol, settings)
         self.min_qty = settings["min_qty"]
@@ -69,7 +71,7 @@ class IntervalRobotDetector(Detector):
         self.long_interval_threshold = settings.get("long_interval_threshold", 120.0)
         self.stable_qty_required = settings.get("stable_qty_required", False)
         self.stable_qty_ratio = settings.get("stable_qty_ratio", 0.8)
-        self.min_display_repeats = settings.get("min_display_repeats", 2)
+        self.min_display_repeats = settings.get("min_display_repeats", 3)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name: self.name = f"робот-интервал[{preset_name}]"
@@ -80,7 +82,8 @@ class IntervalRobotDetector(Detector):
         self._history_path.parent.mkdir(exist_ok=True)
         _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
-                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}")
+                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}, "
+                  f"long_gate={self.long_interval_threshold}s")
 
     def drain_confirms(self):
         out = self._confirms
@@ -264,7 +267,7 @@ class IntervalRobotDetector(Detector):
                       f"repeats={match.count}, variants={sorted(match.qty_variants)}")
             if match.count == self.min_repeats:
                 self._confirms.append(ts)
-                self._write_history(side, match)   # v5: пишем в момент подтверждения
+                self._write_history(side, match)
                 _log.info(f"[{self.symbol}] *** CONFIRMED ***: side={side}, repeats={match.count}, "
                           f"interval={match.last_interval:.2f}s, variants={sorted(match.qty_variants)}")
             if match.count >= self.max_series:
@@ -296,9 +299,9 @@ class IntervalRobotDetector(Detector):
                         if gap > max_fit and not c.warned:
                             c.warned = True
                             warnings.append({"symbol": self.symbol, "side": side,
-                                             "qty_variants": sorted(c.qty_variants),
-                                             "gap_sec": round(gap, 1), "max_fit_sec": round(max_fit, 1),
-                                             "просрочка": f"{gap:.1f}s > {max_fit:.1f}s"})
+                                           "qty_variants": sorted(c.qty_variants),
+                                           "gap_sec": round(gap, 1), "max_fit_sec": round(max_fit, 1),
+                                           "просрочка": f"{gap:.1f}s > {max_fit:.1f}s"})
                             _log.info(f"[{self.symbol}] OVERDUE: gap={gap:.1f}s > {max_fit:.1f}s")
         return signals, warnings
 
@@ -306,7 +309,13 @@ class IntervalRobotDetector(Detector):
         rows = []
         for side, cands in self.active.items():
             for c in cands:
+                # v6: пары не показываем вовсе
                 if c.count < self.min_display_repeats: continue
+                # v6: длинный интервал — только подтверждённые
+                if (c.last_interval is not None
+                        and c.last_interval > self.long_interval_threshold
+                        and c.count < self.min_repeats):
+                    continue
                 seconds_to_next = (c.last_ts + c.last_interval - now_ts) if c.last_interval is not None else None
                 jitter_ms = statistics.pstdev(c.intervals) * 1000 if len(c.intervals) >= 2 else None
                 same_price_ratio = None
