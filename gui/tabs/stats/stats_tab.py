@@ -1,7 +1,9 @@
 """
 Приблуда на python — вкладка "Статистика" (Н-005).
-v2: читает ДВА источника: data/robots_history.jsonl (наш детектор) и
-data/competitor_history.jsonl (роботы конкурента). Колонка ИСТОЧНИК.
+v3: ИСПРАВЛЕНО BASE_DIR — файл лежит в gui/tabs/stats/, до корня 4 уровня
+(.parent x4); было 3 → data/ искалась в gui/data/ и читалась пустой.
+Читает ДВА источника: data/robots_history.jsonl (наш детектор) и
+data/competitor_history.jsonl (эталон конкурента). Колонка ИСТОЧНИК.
 Агрегат по тикеру+стороне: сколько раз, ср.интервал, частый день/час.
 """
 import json
@@ -16,11 +18,11 @@ from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QPushButton,
 
 from gui import theme
 
-BASE_DIR = Path(__file__).resolve().parent.parent.parent
+# gui/tabs/stats/stats_tab.py -> корень: 4 уровня вверх
+BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 OURS = BASE_DIR / "data" / "robots_history.jsonl"
 COMP = BASE_DIR / "data" / "competitor_history.jsonl"
 WEEKDAYS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-
 
 def _load(path, source):
     rows = []
@@ -41,7 +43,6 @@ def _load(path, source):
     except OSError:
         pass
     return rows
-
 
 class StatsTab(QWidget):
     def __init__(self, shared_state=None):
