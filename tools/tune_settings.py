@@ -2,10 +2,13 @@
 Приблуда на python — подстройка настроек детектора против шума.
 - interval_tolerance: 10% -> 5% (только если не настроено)
 - min_repeats: 3 -> 4
-- min_qty: 10 -> 20 (глобально), 50 (для спамеров)
+- min_qty: 10 -> 20 (глобально), 50 (для спамеров),
+  НО MIN_QTY_OVERRIDES берёт приоритет — тикеры, где эталон видит
+  мелкие лоты (пол qty конкурента), получают пониженный порог.
 - max_qty_ratio: None -> 1.10
-- min_display_repeats: 3 (v6: пары LEN2 скрыты)
+- min_display_repeats: 3 (пары LEN2 в UI не показываются)
 Создаёт резервную копию ticker_settings.json.bak
+ПЕРЕНОС: из корня в tools/ (архитектура).
 """
 import json
 import shutil
@@ -13,6 +16,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent.parent
 SETTINGS = BASE / "ticker_settings.json"
 
+# Тикеры-спамеры, которые генерируют тонны мусора с мелкими сделками
 SPAMMERS = {
     "ASTR", "AFKS", "SNGSP", "ALRS", "CHMF", "IVAT", "SVCB", "BELU",
     "LKOH", "OZON", "PLZL", "MTLR", "GMKN", "RUAL", "T", "ROSN",
@@ -25,6 +29,26 @@ SPAMMERS = {
     "VKCO",
 }
 
+# v4: приоритет над SPAMMERS/дефолтом. Пол qty из роботов конкурента
+(скрины 10:00-11:11 + competitor_robots_2026-08-20.csv):
+#   GMKN buy 10-11, LKOH buy 10-11, CNRU buy 10-11, PHOR buy 9-10,
+#   BSPB buy 10-34, LENT sell 19-21, HEAD sell 19-20, DOMRF sell 23-24,
+#   SNGS sell 29-30, MAGN sell 35, CHMF sell 33-57, PIKK buy 40-41.
+MIN_QTY_OVERRIDES = {
+    "GMKN": 8,
+    "LKOH": 8,
+    "CNRU": 8,
+    "PHOR": 8,
+    "BSPB": 8,
+    "LENT": 15,
+    "HEAD": 15,
+    "DOMRF": 20,
+    "SNGS": 25,
+    "MAGN": 30,
+    "CHMF": 30,
+    "PIKK": 35,
+}
+
 def main():
     if not SETTINGS.exists():
         print(f"Файл не найден: {SETTINGS}")
@@ -35,12 +59,19 @@ def main():
     changed = 0
     for sym, s in data.items():
         old = dict(s)
+        # min_repeats: всегда 4
         s["min_repeats"] = 4
+        # max_qty_ratio: всегда 1.10
         s["max_qty_ratio"] = 1.10
+        # interval_tolerance: только если не настроено (сохраняем short_interval_tolerance)
         if "interval_tolerance" not in s:
             s["interval_tolerance"] = 0.05
-        s["min_display_repeats"] = 3   # v6
-        if sym in SPAMMERS:
+        # min_display_repeats: 3 (пары LEN2 в UI не показываются)
+        s["min_display_repeats"] = 3
+        # min_qty: приоритет у MIN_QTY_OVERRIDES, иначе 50/20
+        if sym in MIN_QTY_OVERRIDES:
+            s["min_qty"] = MIN_QTY_OVERRIDES[sym]
+        elif sym in SPAMMERS:
             s["min_qty"] = 50
         else:
             if s.get("min_qty", 10) < 20:
