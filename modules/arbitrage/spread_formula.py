@@ -10,7 +10,6 @@ import ast
 
 _ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div)
 
-
 def parse_formula(formula):
     """Возвращает (ast-узел, set тикеров). ValueError, если формула
     содержит что-то недопустимое."""
@@ -27,7 +26,6 @@ def parse_formula(formula):
         raise ValueError("в формуле нет ни одного тикера")
     return tree.body, tickers
 
-
 def _validate(node, tickers):
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
         return
@@ -42,7 +40,6 @@ def _validate(node, tickers):
         _validate(node.operand, tickers)
         return
     raise ValueError(f"недопустимый элемент: {ast.dump(node)}")
-
 
 def eval_formula(node, values):
     """Вычисляет формулу. values: {ТИКЕР: число}. Возвращает число или None

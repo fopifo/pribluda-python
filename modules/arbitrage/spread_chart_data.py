@@ -1,20 +1,25 @@
 """
 Приблуда на python — данные для произвольного спред-графика (свечами).
-Формула — любое арифметическое выражение с тикерами ("MTLR - MTLRP",
-трёхногое "USDRUBF - CNYRUBF - GLDRUBF", с коэффициентами). Свечи ног —
-через ticker_chart_data (честный перебор площадок RFUD/TQBR).
-Спред считается на 1-минутном разрешении (формула от close ног), затем
-агрегируется в СВЕЧИ таймфрейма: open=первое, close=последнее,
-high=max, low=min внутри интервала — как в референсе (Astras).
+Формула — любое арифметическое выражение с тикерами. Свечи ног —
+через ticker_chart_data (честный перебор площадок TQBR/RFUD).
+Спред на 1-мин разрешении, агрегируется в свечи таймфрейма.
 Боллинджер (50; 2/3/4σ) — по close свечей спреда.
+v2: импорты полными путями modules.arbitrage.* (работают из GUI и напрямую).
 """
+import sys
+from pathlib import Path
 from datetime import datetime
 
-from arb_spread_data import bollinger_multi
-from ticker_chart_data import (
+# корень проекта в sys.path — чтобы modules.arbitrage.* резолвились отовсюду
+_BASE = Path(__file__).resolve().parent.parent.parent
+if str(_BASE) not in sys.path:
+    sys.path.insert(0, str(_BASE))
+
+from modules.arbitrage.arb_spread_data import bollinger_multi
+from modules.arbitrage.ticker_chart_data import (
     MSK, fetch_candles_1min, parse_begin, _days_back_for_tf,
 )
-import spread_formula as sf
+from modules.arbitrage import spread_formula as sf
 
 MIN_POINTS = 55
 
@@ -46,12 +51,12 @@ def build_custom_spread_data(formula, tf_minutes):
             continue
         spread_1m.append((ts, val))
 
-    # Агрегация 1-минутного спреда в свечи таймфрейма.
     buckets = {}
     for ts, val in spread_1m:
         epoch = int(ts.timestamp())
         bucket_start = epoch - (epoch % (tf_minutes * 60))
         buckets.setdefault(bucket_start, []).append(val)
+
     candles = []
     for bucket_start in sorted(buckets):
         vals = buckets[bucket_start]

@@ -28,11 +28,9 @@ BB_PERIOD = 50
 BB_SIGMAS = [2, 3, 4]
 TIMEFRAMES_MIN = [1, 5, 15, 30, 60]
 
-
 def parse_begin(begin_str):
     """'2026-08-17 10:00:00' (MSK) -> datetime с tzinfo=MSK."""
     return datetime.strptime(begin_str, "%Y-%m-%d %H:%M:%S").replace(tzinfo=MSK)
-
 
 def fetch_candles_1min(symbol, days_back=12):
     """1-минутные свечи за последние days_back дней. ISS отдаёт до 500
@@ -75,7 +73,6 @@ def fetch_candles_1min(symbol, days_back=12):
         time.sleep(0.2)
     return candles
 
-
 def aggregate_to_tf(candles_1min, tf_minutes):
     """Агрегация 1-минутных свечей в таймфрейм tf_minutes."""
     if tf_minutes == 1:
@@ -104,7 +101,6 @@ def aggregate_to_tf(candles_1min, tf_minutes):
         })
     return result
 
-
 def compute_spread_series(candles_a, candles_b, mode):
     """Спред по общим временным точкам (close свечи таймфрейма)."""
     map_b = {c["begin"]: c["close"] for c in candles_b}
@@ -124,7 +120,6 @@ def compute_spread_series(candles_a, candles_b, mode):
         spread.append({"begin": ca["begin"], "value": value})
     return spread
 
-
 def bollinger_multi(values, period=BB_PERIOD, sigmas=BB_SIGMAS):
     """SMA + три ленты Боллинджера. Для первых period-1 точек — None."""
     n = len(values)
@@ -142,13 +137,11 @@ def bollinger_multi(values, period=BB_PERIOD, sigmas=BB_SIGMAS):
             result[f"lower_{s}"][i] = m - s * sd
     return result
 
-
 def _days_back_for_tf(tf_minutes):
     """Сколько дней истории взять, чтобы получилось ~300 свечей таймфрейма
     (торги ~480 минут в день)."""
     days = (300 * tf_minutes) // 480 + 2
     return max(2, min(days, 60))
-
 
 def build_spread_chart_data(symbol_a, symbol_b, mode, tf_minutes):
     """Полные данные для графика спреда. None, если данных недостаточно."""
