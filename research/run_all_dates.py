@@ -1,18 +1,25 @@
 """
 Приблуда на python — пакетный прогон детекторов по ВСЕМ датам, для
-которых в data/ есть файлы {SYMBOL}_{ДАТА}.json. Нужен для A/B-сравнения
-правок детектора: старый недельный журнал (data_sample/Week_trades.txt)
-сравнивается с новым прогоном тех же дат на новом коде.
+которых в data/ есть файлы {SYMBOL}_{ДАТА}.json.
+
+Поддерживает два источника данных:
+1. JSON-файлы data/{SYMBOL}_{ДАТА}.json (старый формат)
+2. Quik-лента data/quik_trades.csv (актуальный формат, фильтрует по дате)
+
+Автоматически выбирает: если есть JSON для даты — использует его,
+иначе читает Quik-ленту.
+
 Формат вывода совместим с analysis/week_signals_review.py:
-строки "ДАТА <дата>" и строки сигналов с отступом — обзорный скрипт
-распарсит и сожмёт в компактный отчёт.
+строки "ДАТА <дата>" и строки сигналов с отступом.
+
 ПРОГРЕСС: в консоль печатается живой счётчик "[дата i/N] тикер k/M"
 (flush=True), чтобы было видно, что скрипт работает, а не "завис".
-Полный вывод (все сигналы) пишется только в файл.
-НАКОПЛЕНИЕ: вывод пишется в ОДИН файл output/signals_all_dates.txt —
-каждый новый прогон перезаписывает предыдущий.
+
+Полный вывод (все сигналы) пишется только в файл output/signals_all_dates.txt.
+Каждый новый прогон перезаписывает предыдущий.
+
 Запуск (из корня проекта):
-python analysis/run_all_dates.py
+python research/run_all_dates.py
 """
 import json
 import re
@@ -22,11 +29,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import get_detector_configs, get_min_qty_percentile
+from core.config import get_detector_configs
+from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
-from engine import TradeBuffer
-from stats import qty_percentile
-from ticker_settings import get_active_symbols, load_settings
 
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
@@ -41,6 +46,74 @@ def find_dates() -> list[str]:
         if m:
             dates.add(m.group(1))
     return sorted(dates)
+
+
+def get_active_symbols(settings: dict) -> list[str]:
+    """Возвращает список активных тикеров из настроек."""
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
+
+
+def load_trades_json(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки из JSON-файла."""
+    path = DATA_DIR / f"{symbol}_{date}.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_trades_quik(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки из Quik-ленты для символа и даты."""
+    csv_path = DATA_DIR / "quik_trades.csv"
+    if not csv_path.exists():
+        return None
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    MSK = ZoneInfo("Europe/Moscow")
+    target_date = dt.strptime(date, "%Y-%m-%d").date()
+    
+    trades = []
+    with open(csv_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(";")
+            if len(parts) < 5:
+                continue
+            if parts[0] != symbol:
+                continue
+            try:
+                ts = int(float(parts[4]))
+                trade_dt = dt.fromtimestamp(ts / 1000, tz=MSK)
+                if trade_dt.date() != target_date:
+                    continue
+                trades.append({
+                    "symbol": parts[0],
+                    "qty": int(float(parts[1])),
+                    "price": float(parts[2]),
+                    "side": parts[3],
+                    "timestamp": ts,
+                })
+            except (ValueError, IndexError):
+                continue
+    return trades if trades else None
+
+
+def load_trades(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки: сначала пробует JSON, если нет — Quik-ленту."""
+    trades = load_trades_json(symbol, date)
+    if trades is not None:
+        return trades
+    return load_trades_quik(symbol, date)
+
+
+def run_detectors_on_trades(detectors: list[IntervalRobotDetector], trades: list[dict]) -> list:
+    """Прогоняет сделки через детекторы, возвращает сигналы."""
+    signals = []
+    for t in trades:
+        for d in detectors:
+            signals.extend(d.on_trade(t))
+    for d in detectors:
+        signals.extend(d.flush())
+    return signals
 
 
 def main() -> None:
@@ -69,20 +142,16 @@ def main() -> None:
                 f"\r[{di}/{total_dates}] {date}: тикер {si}/{total_symbols} {symbol}      ",
                 end="", flush=True,
             )
-            path = DATA_DIR / f"{symbol}_{date}.json"
-            if not path.exists():
+            trades = load_trades(symbol, date)
+            if not trades:
                 continue
-            with open(path, encoding="utf-8") as f:
-                trades = json.load(f)
+            
             override = settings.get(symbol, {})
             manual = override.get("min_qty")
-            if manual is not None:
-                min_qty = manual
-            else:
-                min_qty = qty_percentile(trades, get_min_qty_percentile(symbol))
+            min_qty = manual if manual is not None else 10  # дефолт
             configs = get_detector_configs(symbol, min_qty, override)
             detectors = [IntervalRobotDetector(symbol, cfg) for cfg in configs]
-            signals = TradeBuffer(symbol, detectors).process(trades)
+            signals = run_detectors_on_trades(detectors, trades)
             day_signals += len(signals)
             flog(f"{symbol}: найдено сигналов: {len(signals)}")
             for s in signals:

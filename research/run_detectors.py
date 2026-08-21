@@ -2,46 +2,31 @@
 Приблуда на python — запуск детекторов на сохранённых лентах сделок
 по нескольким тикерам сразу.
 
-Ожидает файлы вида data/{SYMBOL}_{ДАТА}.json — по одному на тикер,
-скачанные заранее через analysis/save_trades.py. Дата в имени файла не
-хардкодится здесь: для каждого тикера берётся файл с самой свежей датой
-из тех, что реально лежат в data/.
+Поддерживает два источника данных:
+1. JSON-файлы data/{SYMBOL}_{ДАТА}.json (старый формат, скачанные заранее)
+2. Quik-лента data/quik_trades.csv (актуальный формат, собирается lua-скриптом)
 
-Список тикеров и их активность (мониторим/нет) берутся из
-ticker_settings.json (см. ticker_settings.py) — отключённые тикеры
-просто пропускаются.
+Автоматически выбирает источник: если есть JSON для последней даты —
+использует его, иначе — читает Quik-ленту.
 
-Порог min_qty (в лотах): если у тикера в ticker_settings.json задан
-ручной min_qty — используется как есть. Если нет — вычисляется заново
-при каждом запуске из фактического распределения объёмов сделок ЭТОГО
-дня по ЭТОМУ тикеру (см. config.py — min_qty_percentile) — подстраивается
-под текущую ликвидность, а не берётся фиксированным числом.
+Список тикеров и их активность берутся из core.ticker_settings.
+Порог min_qty: если задан вручную в ticker_settings.json — используется,
+иначе вычисляется из фактического распределения объёмов (p50 по умолчанию).
 
-Использует текущий config.py — значит, автоматически прогоняет и
-fast_strict, и twap_strict (если оба включены для тикера), с джиттером
-в каждом сигнале (это уже часть Signal.__str__, отдельно ничего не
-добавлено) — по сути, "перемотка" живого скринера на прошлый день.
-
-Весь вывод одновременно печатается в консоль И сохраняется в файл
-output/signals_<дата>_<время>.txt.
+Весь вывод печатается в консоль И сохраняется в output/signals_<дата>_<время>.txt.
 """
-
 import json
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
-# analysis/ находится на уровень глубже корня проекта — добавляем
-# корень в sys.path, чтобы работали импорты вроде "from config import".
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import get_detector_configs, get_min_qty_percentile
+from core.config import get_detector_configs
+from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
-from engine import TradeBuffer
-from stats import qty_percentile
-from ticker_settings import get_active_symbols, load_settings
 
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
@@ -49,13 +34,26 @@ OUTPUT_DIR = BASE_DIR / "output"
 LogFunc = Callable[[str], None]
 
 
-def find_latest_file(symbol: str) -> Path | None:
+def qty_percentile(trades: list[dict], pct: float) -> int:
+    """Процентиль по объёму сделок. pct в процентах (0-100)."""
+    if not trades:
+        return 1
+    qtys = sorted(t["qty"] for t in trades if "qty" in t)
+    if not qtys:
+        return 1
+    idx = int(len(qtys) * pct / 100)
+    return qtys[min(idx, len(qtys) - 1)]
+
+
+def find_latest_json(symbol: str) -> Path | None:
+    """Находит самый свежий JSON-файл для символа."""
     candidates = sorted(DATA_DIR.glob(f"{symbol}_*.json"))
     return candidates[-1] if candidates else None
 
 
-def load_trades(symbol: str, log: LogFunc) -> list[dict] | None:
-    data_file = find_latest_file(symbol)
+def load_trades_json(symbol: str, log: LogFunc) -> list[dict] | None:
+    """Загружает сделки из JSON-файла."""
+    data_file = find_latest_json(symbol)
     if data_file is None:
         log(f"  Файлы не найдены для {symbol} (искал {DATA_DIR}/{symbol}_*.json)")
         return None
@@ -65,15 +63,66 @@ def load_trades(symbol: str, log: LogFunc) -> list[dict] | None:
     return trades
 
 
+def load_trades_quik(symbol: str, log: LogFunc) -> list[dict] | None:
+    """Загружает сделки из Quik-ленты (data/quik_trades.csv) для символа."""
+    csv_path = DATA_DIR / "quik_trades.csv"
+    if not csv_path.exists():
+        log(f"  Quik-лента не найдена: {csv_path}")
+        return None
+    trades = []
+    with open(csv_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(";")
+            if len(parts) < 5:
+                continue
+            if parts[0] != symbol:
+                continue
+            try:
+                trades.append({
+                    "symbol": parts[0],
+                    "qty": int(float(parts[1])),
+                    "price": float(parts[2]),
+                    "side": parts[3],
+                    "timestamp": int(float(parts[4])),  # уже в мс
+                })
+            except (ValueError, IndexError):
+                continue
+    if not trades:
+        log(f"  В Quik-ленте нет сделок для {symbol}")
+        return None
+    log(f"{symbol}: загружено сделок: {len(trades)} (из {csv_path.name})")
+    return trades
+
+
+def load_trades(symbol: str, log: LogFunc) -> list[dict] | None:
+    """Загружает сделки: сначала пробует JSON, если нет — Quik-ленту."""
+    trades = load_trades_json(symbol, log)
+    if trades is not None:
+        return trades
+    return load_trades_quik(symbol, log)
+
+
 def resolve_min_qty(symbol: str, override: dict, trades: list[dict], log: LogFunc) -> int:
+    """Определяет min_qty: ручной из настроек или автоматический (p50)."""
     manual = override.get("min_qty")
     if manual is not None:
         log(f"{symbol}: min_qty = {manual} лотов (задано вручную в ticker_settings.json)")
         return manual
-    pct = get_min_qty_percentile(symbol)
+    pct = 50  # дефолтный процентиль
     min_qty = qty_percentile(trades, pct)
     log(f"{symbol}: min_qty = {min_qty} лотов (p{pct:.0f} объёма за этот день)")
     return min_qty
+
+
+def run_detectors_on_trades(detectors: list[IntervalRobotDetector], trades: list[dict]) -> list:
+    """Прогоняет сделки через детекторы, возвращает сигналы."""
+    signals = []
+    for t in trades:
+        for d in detectors:
+            signals.extend(d.on_trade(t))
+    for d in detectors:
+        signals.extend(d.flush())
+    return signals
 
 
 def run_for_symbol(symbol: str, override: dict, log: LogFunc) -> None:
@@ -82,17 +131,19 @@ def run_for_symbol(symbol: str, override: dict, log: LogFunc) -> None:
         return
 
     min_qty = resolve_min_qty(symbol, override, trades, log)
-
     configs = get_detector_configs(symbol, min_qty, override)
     detectors = [IntervalRobotDetector(symbol, cfg) for cfg in configs]
 
-    buffer = TradeBuffer(symbol, detectors)
-    signals = buffer.process(trades)
-
+    signals = run_detectors_on_trades(detectors, trades)
     log(f"{symbol}: найдено сигналов: {len(signals)}")
     for s in signals:
         log(f"  {s}")
     log("")
+
+
+def get_active_symbols(settings: dict) -> list[str]:
+    """Возвращает список активных тикеров из настроек."""
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
 
 
 def main() -> None:

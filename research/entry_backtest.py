@@ -5,17 +5,18 @@
 тиков прошла цена», а «продолжит ли серия бить» — это и есть настоящий
 робот: случайное совпадение трёх сделок не даст 5-ю и 8-ю сделку с тем
 же интервалом.
-ВЕРСИЯ 2 (2026-08-17): добавлен признак "пачка" (batch) — робот,
-стартовавший одновременно (±BATCH_WINDOW_SEC) с >= 2 другими роботами
-по ДРУГИМ тикерам. Это имитирует вход "на хайпе включения пачки" —
-когда по рынку сразу просыпается несколько роботов и за ними идут
-скальперы.
+
+ВЕРСИЯ 3 (2026-08-22): поддержка Quik-ленты (data/quik_trades.csv)
+как альтернативного источника данных. Автоматически выбирает:
+если есть JSON-файлы для даты — использует их, иначе читает Quik-ленту.
+
 Метрики «настоящий робот»:
 - continued_5: серия доросла до >= 5 повторов
 - continued_8: серия доросла до >= 8 повторов (уверенный робот)
 Дополнительно: ход цены в тиках в окне WINDOW_SEC после 3-го удара
 (медиана / p25 / p75 благоприятного хода) и «чистый» вход (fav>=GOOD_TICKS
 и против нас <= MAX_ADVERSE_TICKS).
+
 Ключевая разбивка — по трём осям, которые видны в момент 3-го удара:
 1. ДЕФОЛТНЫЙ тикер: здесь серии с >= DEFAULT_REPEATS_MARK повторов
    появляются в >= DEFAULT_DAYS_MIN днях из всех.
@@ -25,15 +26,17 @@
    - "wall"    — долбит одну цену (spr3 >= WALL_SPR): самый ценный
                   признак, маркер реального интереса, не толпы;
    - "moving"  — уже сдвинул цену (shift3 != 0): это маркер того,
-                  что толпа уже зашла (см. докстринг), сам по себе
-                  не показатель силы робота;
+                  что толпа уже зашла, сам по себе не показатель силы робота;
    - "flat"    — стоит на месте, цену пока не двигает.
+
 В отчёте в конце — ТОП профилей по вероятности «настоящий», чтобы
 сразу видеть, на что смотреть в живой таблице.
+
 Один проход по данным. ПРОГРЕСС печатается (flush=True).
 Отчёт пишется в ОДИН файл output/entry_backtest.txt (новый поверх).
+
 Запуск (из корня проекта):
-python analysis/entry_backtest.py
+python research/entry_backtest.py
 """
 import bisect
 import json
@@ -44,10 +47,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import get_detector_configs, get_min_qty_percentile
+from core.config import get_detector_configs
+from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
-from stats import qty_percentile
-from ticker_settings import get_active_symbols, load_settings
 
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = BASE_DIR / "output"
@@ -107,12 +109,56 @@ class TrackedDetector(IntervalRobotDetector):
         return signals
 
 
-def load_day(symbol: str, date_str: str) -> list[dict] | None:
+def load_day_json(symbol: str, date_str: str) -> list[dict] | None:
+    """Загружает сделки из JSON-файла для конкретной даты."""
     path = DATA_DIR / f"{symbol}_{date_str}.json"
     if not path.exists():
         return None
     with open(path, encoding="utf-8") as f:
         return json.load(f)
+
+
+def load_day_quik(symbol: str, date_str: str) -> list[dict] | None:
+    """Загружает сделки из Quik-ленты для символа (фильтрует по дате)."""
+    csv_path = DATA_DIR / "quik_trades.csv"
+    if not csv_path.exists():
+        return None
+    from datetime import datetime as dt
+    from zoneinfo import ZoneInfo
+    MSK = ZoneInfo("Europe/Moscow")
+    target_date = dt.strptime(date_str, "%Y-%m-%d").date()
+    
+    trades = []
+    with open(csv_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(";")
+            if len(parts) < 5:
+                continue
+            if parts[0] != symbol:
+                continue
+            try:
+                ts = int(float(parts[4]))
+                trade_dt = dt.fromtimestamp(ts / 1000, tz=MSK)
+                if trade_dt.date() != target_date:
+                    continue
+                trades.append({
+                    "symbol": parts[0],
+                    "qty": int(float(parts[1])),
+                    "price": float(parts[2]),
+                    "side": parts[3],
+                    "timestamp": ts,
+                })
+            except (ValueError, IndexError):
+                continue
+    return trades if trades else None
+
+
+def load_day(symbol: str, date_str: str) -> list[dict] | None:
+    """Загружает сделки: сначала пробует JSON, если нет — Quik-ленту."""
+    trades = load_day_json(symbol, date_str)
+    if trades is not None:
+        return trades
+    return load_day_quik(symbol, date_str)
 
 
 def estimate_tick(prices: list[float]) -> float | None:
@@ -193,6 +239,22 @@ def mark_batch(entries: list[dict]) -> None:
         entries[i]["neighbors"] = neighbors
 
 
+def get_active_symbols(settings: dict) -> list[str]:
+    """Возвращает список активных тикеров из настроек."""
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
+
+
+def qty_percentile(trades: list[dict], pct: float) -> int:
+    """Процентиль по объёму сделок. pct в процентах (0-100)."""
+    if not trades:
+        return 1
+    qtys = sorted(t["qty"] for t in trades if "qty" in t)
+    if not qtys:
+        return 1
+    idx = int(len(qtys) * pct / 100)
+    return qtys[min(idx, len(qtys) - 1)]
+
+
 def main() -> None:
     settings = load_settings()
     symbols = get_active_symbols(settings)
@@ -215,8 +277,7 @@ def main() -> None:
                 continue
             override = settings.get(symbol, {})
             manual = override.get("min_qty")
-            min_qty = manual if manual is not None else qty_percentile(
-                trades, get_min_qty_percentile(symbol))
+            min_qty = manual if manual is not None else qty_percentile(trades, 50)
             configs = get_detector_configs(symbol, min_qty, override)
             detectors = [TrackedDetector(symbol, cfg) for cfg in configs]
             ts_list = [t["timestamp"] / 1000.0 for t in trades]
@@ -284,7 +345,7 @@ def main() -> None:
 
     lines = []
     lines.append("=" * 78)
-    lines.append("БЭКТЕСТ v2: НАСТОЯЩИЙ ЛИ РОБОТ НА 3-М УДАРЕ")
+    lines.append("БЭКТЕСТ v3: НАСТОЯЩИЙ ЛИ РОБОТ НА 3-М УДАРЕ")
     lines.append(f"окно цены {WINDOW_SEC:.0f}с | «чистый вход» = +{GOOD_TICKS} тика "
                  f"и против <= {MAX_ADVERSE_TICKS} | стена = spr>={WALL_SPR}")
     lines.append(f"дефолтный = робот в >= {DEFAULT_DAYS_MIN} из {n_days} дней")
@@ -309,8 +370,7 @@ def main() -> None:
         alone_n = len(rows) - batch_n
         lines.append(f"  пачкой: {batch_n}, одиночкой: {alone_n}")
 
-    # Разбивка: пачка × портрет (по каждому пресету, без дефолтности — чтобы
-    # видеть чистый эффект пачки, дефолтность добавим в топ-профили)
+    # Разбивка: пачка × портрет (по каждому пресету, без дефолтности)
     for preset in ("fast_strict", "twap_strict"):
         rows_preset = [e for e in all_entries if e["preset"] == preset]
         if not rows_preset:

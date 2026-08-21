@@ -1,9 +1,18 @@
 """
 Приблуда на python — снапшот роботов на момент времени.
+
+Поддерживает два источника данных:
+1. JSON-файлы data/{SYMBOL}_{ДАТА}.json (старый формат)
+2. Quik-лента data/quik_trades.csv (актуальный формат)
+
+Автоматически выбирает: если есть JSON для даты — использует его,
+иначе читает Quik-ленту и фильтрует по дате.
+
 Режимы:
-  обычный: python analysis/robot_snapshot.py 2026-08-17 11:34
+  обычный: python research/robot_snapshot.py 2026-08-17 11:34
   loose  : ... 11:34 loose  — эксперимент: min_qty=1, close_after_misses=5,
            interval_tolerance=0.2, печатает ТОЛЬКО целевые тикеры (земля).
+
 Цель loose — проверить, появляются ли роботы конкурента с высоким LEN,
 если снять пороги. Если да — фиксируем пороги.
 """
@@ -13,10 +22,9 @@ from pathlib import Path
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
-from config import get_detector_configs, get_min_qty_percentile
+from core.config import get_detector_configs
+from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
-from stats import qty_percentile
-from ticker_settings import get_active_symbols, load_settings
 
 DATA = BASE / "data"
 OUT = BASE / "output"
@@ -29,9 +37,65 @@ TARGETS = {
 }
 
 
+def get_active_symbols(settings: dict) -> list[str]:
+    """Возвращает список активных тикеров из настроек."""
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
+
+
+def load_trades_json(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки из JSON-файла."""
+    path = DATA / f"{symbol}_{date}.json"
+    if not path.exists():
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def load_trades_quik(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки из Quik-ленты для символа и даты."""
+    csv_path = DATA / "quik_trades.csv"
+    if not csv_path.exists():
+        return None
+    from zoneinfo import ZoneInfo
+    MSK = ZoneInfo("Europe/Moscow")
+    target_date = datetime.strptime(date, "%Y-%m-%d").date()
+    
+    trades = []
+    with open(csv_path, encoding="utf-8", errors="ignore") as f:
+        for line in f:
+            parts = line.strip().split(";")
+            if len(parts) < 5:
+                continue
+            if parts[0] != symbol:
+                continue
+            try:
+                ts = int(float(parts[4]))
+                trade_dt = datetime.fromtimestamp(ts / 1000, tz=MSK)
+                if trade_dt.date() != target_date:
+                    continue
+                trades.append({
+                    "symbol": parts[0],
+                    "qty": int(float(parts[1])),
+                    "price": float(parts[2]),
+                    "side": parts[3],
+                    "timestamp": ts,
+                })
+            except (ValueError, IndexError):
+                continue
+    return trades if trades else None
+
+
+def load_trades(symbol: str, date: str) -> list[dict] | None:
+    """Загружает сделки: сначала пробует JSON, если нет — Quik-ленту."""
+    trades = load_trades_json(symbol, date)
+    if trades is not None:
+        return trades
+    return load_trades_quik(symbol, date)
+
+
 def main():
     if len(sys.argv) < 3:
-        print("Использование: python analysis/robot_snapshot.py 2026-08-17 11:34 [loose]")
+        print("Использование: python research/robot_snapshot.py 2026-08-17 11:34 [loose]")
         return
     date, hm = sys.argv[1], sys.argv[2]
     loose = len(sys.argv) > 3 and sys.argv[3] == "loose"
@@ -42,18 +106,19 @@ def main():
     for symbol in get_active_symbols(settings):
         if loose and not any(t[1] == symbol for t in TARGETS):
             continue
-        path = DATA / f"{symbol}_{date}.json"
-        if not path.exists():
+        
+        trades = load_trades(symbol, date)
+        if not trades:
             continue
-        trades = json.load(open(path, encoding="utf-8"))
+        
         override = settings.get(symbol, {})
         manual = override.get("min_qty")
-        min_qty = manual if manual is not None else qty_percentile(trades, get_min_qty_percentile(symbol))
+        min_qty = manual if manual is not None else 10  # дефолт
         dets = [IntervalRobotDetector(symbol, c) for c in get_detector_configs(symbol, min_qty, override)]
         if loose:
             for d in dets:
                 d.min_qty = 1
-                d.CLOSE_AFTER_MISSES = 5
+                d.close_after_misses = 5  # ИСПРАВЛЕНО: было CLOSE_AFTER_MISSES
                 d.interval_tolerance = 0.2
         for t in trades:
             if t["timestamp"] / 1000 > T:
