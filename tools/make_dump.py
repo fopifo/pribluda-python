@@ -1,7 +1,10 @@
 """
 Приблуда на python — сборщик полного дампа исходников для передачи в чат.
-v5: файлы статистики/эталона из data/ (whitelist) попадают в дамп
-БЕЗ ограничения MAX_SIZE (robots_history.jsonl может быть >300KB).
+v4: в дамп ВСЕГДА попадают файлы статистики/эталона из data/:
+robots_history.jsonl (наш поток, отладка) и
+competitor_history.jsonl (эталон конкурента).
+v5: файлы из whitelist data/ идут в дамп БЕЗ ограничения MAX_SIZE
+(robots_history.jsonl бывает >300KB и раньше вырезался — это был баг).
 Обход дерева подхватывает новые папки автоматически.
 Пропускает тяжёлое: data/* (кроме whitelist), output/, __pycache__, .git.
 Пишет project_dump.txt в корень.
@@ -16,10 +19,8 @@ SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "venv", ".venv",
              "output", "node_modules", ".idea", ".vscode"}
 OK_EXT = {".py", ".lua", ".md", ".txt", ".json", ".ini", ".csv"}
 MAX_SIZE = 300_000
-# whitelist из data/ — статистика и эталон, НЕ quik_trades.csv;
-# эти файлы идут в дамп БЕЗ ограничения размера
+# whitelist из data/ — статистика и эталон, НЕ quik_trades.csv
 DATA_INCLUDE = {"robots_history.jsonl", "competitor_history.jsonl"}
-
 
 def collect() -> list[Path]:
     files = []
@@ -37,11 +38,11 @@ def collect() -> list[Path]:
             continue
         if p.name == "project_dump.txt":
             continue
+        # v5: лимит размера НЕ применяется к файлам статистики/эталона
         if not in_data and p.stat().st_size > MAX_SIZE:
             continue
         files.append(p)
     return files
-
 
 def main():
     files = collect()
@@ -63,7 +64,6 @@ def main():
     print(f"Файлов в дампе: {total}")
     print(f"Размер: {OUT.stat().st_size/1024:.0f} KB")
     print(f"Сохранено: {OUT}")
-
 
 if __name__ == "__main__":
     main()
