@@ -1,8 +1,5 @@
 """
-Приблуда на python — вкладка "Планки" (v4).
-v4: ИСПРАВЛЕНО BASE_UI_FILE — файл в gui/tabs/limits/, до корня 4 уровня
-(.parent x4); было 3 → limits_ui.json создавался в gui/ вместо корня.
-Теперь настройки зоны лежат в корне рядом с ui_settings.json и др.
+Приблуда на python — вкладка "Планки" (v5).
 - Колонка "ДО ПЛАНКИ" со стрелкой и цветом, "ПОЗИЦИЯ ДНЯ" мини-полосой,
 статусы из Quik (аукцион/приостановка).
 - Регулируемая зона (спинбокс), фильтр "только интересные",
@@ -13,6 +10,11 @@ v4: ИСПРАВЛЕНО BASE_UI_FILE — файл в gui/tabs/limits/, до к�
 - Гистерезис (вход <= зона, выход > зона+0.5) и кулдаун звука 10 минут.
 - v3 (производительность): скрытая вкладка не пересчитывает таблицы;
 блок "ОСТАЛЬНЫЕ" ограничен 150 строками; обновление раз в 3 c.
+v5: ИСПРАВЛЕНО BASE_UI_FILE — файл в gui/tabs/limits/, до корня 4 уровня
+(.parent x4); было 3 → limits_ui.json создавался в gui/ вместо корня.
++ АВТОМИГРАЦИЯ: при старте, если в корне limits_ui.json нет, а старый
+gui/limits_ui.json есть — его содержимое копируется в корень
+(нестандартная зона НЕ теряется, переставлять вручную не нужно).
 Архитектура: gui/tabs/limits/. Не торгует, только чтение.
 """
 import json
@@ -32,10 +34,21 @@ from gui import theme
 # gui/tabs/limits/limits_tab.py -> корень: 4 уровня вверх
 BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
 BASE_UI_FILE = BASE_DIR / "limits_ui.json"
+LEGACY_UI_FILE = BASE_DIR / "gui" / "limits_ui.json"  # старый битый путь
 
 SOUND_COOLDOWN_SEC = 600.0   # повторный бип по тикеру не чаще раза в 10 минут
 FLASH_SEC = 60.0             # мигание после входа в зону
 REST_MAX_ROWS = 150          # ограничение блока "ОСТАЛЬНЫЕ" (производительность)
+
+
+def _migrate_ui():
+    """Одноразово: переносит старую настройку зоны из gui/limits_ui.json в корень."""
+    try:
+        if not BASE_UI_FILE.exists() and LEGACY_UI_FILE.exists():
+            BASE_UI_FILE.write_text(
+                LEGACY_UI_FILE.read_text(encoding="utf-8"), encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        pass
 
 
 def _load_ui():
@@ -78,6 +91,7 @@ class LimitsTab(QWidget):
         self.shared_state = shared_state
         self.limits_reader = LimitsReader()
         self.quotes_reader = QuotesReader()
+        _migrate_ui()                      # v5: перенос старой зоны в корень
         ui = _load_ui()
         self._known = {}      # тикер -> ts первого входа в зону (для мигания/кулдауна)
         self._last_sound = {}  # тикер -> ts последнего бипа
