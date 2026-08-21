@@ -1,9 +1,9 @@
 """
 Приблуда на python — сохранение ленты сделок в файл для офлайн-разработки
 детекторов (чтобы не дёргать API Алора при каждом тесте) и для
-"перемотки" через analysis/run_detectors.py.
+"перемотки" через research/run_detectors.py.
+v2: мигрирован на core.ticker_settings (вместо устаревшего config.TRACKED_SYMBOLS).
 """
-
 import json
 import os
 import sys
@@ -16,16 +16,11 @@ from dotenv import load_dotenv
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# analysis/ находится на уровень глубже корня проекта — добавляем
-# корень в sys.path, чтобы работали импорты вроде "from config import".
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-# ИСПРАВЛЕНО: раньше здесь импортировался TRACKED_SYMBOLS из config.py —
-# этой константы там больше нет с тех пор, как список тикеров переехал
-# в ticker_settings.json. Теперь берём тот же список, что использует
-# живой скринер — активные тикеры из ticker_settings.json.
-from config import get_tracked_symbols
+# v2: мигрировано с config.get_tracked_symbols на core.ticker_settings
+from core.ticker_settings import load_settings
 
 ENV_PATH = BASE_DIR / ".env"
 DATA_DIR = BASE_DIR / "data"
@@ -40,6 +35,12 @@ PLACEHOLDER = "вставь_сюда_свой_refresh_token"
 BOARD = "TQBR"
 EXCHANGE = "MOEX"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+
+
+def get_tracked_symbols() -> list[str]:
+    """Активные тикеры из ticker_settings.json (замена устаревшего config.TRACKED_SYMBOLS)."""
+    settings = load_settings()
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
 
 
 def make_session() -> requests.Session:
@@ -108,7 +109,6 @@ def get_all_trades_for_day(
 ) -> list[dict]:
     all_trades: list[dict] = []
     offset = 0
-
     while True:
         payload = get_alltrades_history_page(
             session, access_token, symbol, date_from, date_to,
@@ -116,34 +116,23 @@ def get_all_trades_for_day(
         )
         page = payload.get("list", [])
         total = payload.get("total", 0)
-
         if not page:
             break
-
         all_trades.extend(page)
         offset += len(page)
-
         if offset >= total:
             break
-
     return all_trades
 
 
 def save_trades_to_file(symbol: str, day: datetime, trades: list[dict]) -> Path:
-    """Сохраняем ленту сделок в data/<symbol>_<дата>.json.
-
-    Сортируем по timestamp на всякий случай — Алор обычно и так отдаёт
-    сделки по порядку, но лучше не полагаться на это молча.
-    """
+    """Сохраняем ленту сделок в data/<symbol>_<дата>.json."""
     DATA_DIR.mkdir(exist_ok=True)
     trades_sorted = sorted(trades, key=lambda t: t["timestamp"])
-
     filename = f"{symbol}_{day.date()}.json"
     filepath = DATA_DIR / filename
-
     with open(filepath, "w", encoding="utf-8") as f:
         json.dump(trades_sorted, f, ensure_ascii=False, indent=2)
-
     return filepath
 
 
@@ -159,7 +148,6 @@ def main() -> None:
         return
 
     session = make_session()
-
     try:
         access_token = get_access_token(session, REFRESH_TOKEN)
         print("Подключение успешно!")

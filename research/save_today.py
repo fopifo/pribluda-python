@@ -1,10 +1,9 @@
 """
 Приблуда на python — скачать ПОЛНУЮ ленту сделок за СЕГОДНЯ через MOEX ISS
 trades.json. ISS отдаёт максимум 5000 сделок за запрос, поэтому пагинация
-идёт шагом 5000 через start, пока страница не станет неполной. Без этого
-качались только первые 5000 (утро) и сверка была смещена во времени.
+идёт шагом 5000 через start, пока страница не станет неполной.
 Кладёт data/{TICKER}_{сегодня}.json. Есть индикатор [i/75] + число страниц.
-Запуск: python analysis/save_today.py
+Запуск: python research/save_today.py
 """
 import sys, json, time
 from datetime import datetime
@@ -14,7 +13,7 @@ import requests
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
-from ticker_settings import get_active_symbols, load_settings
+from core.ticker_settings import load_settings
 
 MSK = ZoneInfo("Europe/Moscow")
 DATA = BASE / "data"
@@ -23,8 +22,11 @@ ISS = ("https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR"
        "/securities/{sym}/trades.json")
 
 
+def get_active_symbols(settings: dict) -> list[str]:
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
+
+
 def fetch_all(symbol):
-    """Все сделки символа за сегодня, пагинация по 5000."""
     trades = []
     start = 0
     pages = 0

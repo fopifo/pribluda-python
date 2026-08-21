@@ -6,16 +6,13 @@
 ИДЕМПОТЕНТНО: если data/{SYMBOL}_{ДАТА}.json уже лежит — файл
 пропускается (не скачивается и не перезаписывается). Значит, можно
 спокойно запускать поверх имеющейся недели — дотащит только новое
-(14.08) и недостающие файлы (SMLT_2026-08-13 и т.п.). Накопления нет:
-имя файла определяется тикером и датой, новое пишет поверх старого
-только при явном удалении старого.
-Сортировка по timestamp и формат файла — один в один как в
-save_trades.py, чтобы run_all_dates.py и entry_backtest.py читали без
-изменений.
-Все даты — с часовым поясом Europe/Moscow (иначе сравнение naive и
-aware datetimes падает с TypeError).
+и недостающие файлы. Сортировка по timestamp и формат файла — один
+в один как в save_trades.py, чтобы run_all_dates.py и entry_backtest.py
+читали без изменений.
+Все даты — с часовым поясом Europe/Moscow.
+v2: мигрирован на core.ticker_settings.
 Запуск (из корня проекта):
-python analysis/save_trades_range.py [start_date end_date]
+python research/save_trades_range.py [start_date end_date]
 Даты в формате ГГГГ-ММ-ДД. По умолчанию: с 2026-08-10 по последний
 торговый день (пятница перед сегодня).
 """
@@ -35,7 +32,8 @@ from urllib3.util.retry import Retry
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
 
-from config import get_tracked_symbols
+# v2: мигрировано с config.get_tracked_symbols на core.ticker_settings
+from core.ticker_settings import load_settings
 
 ENV_PATH = BASE_DIR / ".env"
 DATA_DIR = BASE_DIR / "data"
@@ -50,7 +48,13 @@ BOARD = "TQBR"
 EXCHANGE = "MOEX"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 DEFAULT_START = "2026-08-10"
-REQUEST_PAUSE_SEC = 0.2  # пауза между запросами, чтобы не долбить API
+REQUEST_PAUSE_SEC = 0.2
+
+
+def get_tracked_symbols() -> list[str]:
+    """Активные тикеры из ticker_settings.json (замена устаревшего config.TRACKED_SYMBOLS)."""
+    settings = load_settings()
+    return [sym for sym, cfg in settings.items() if cfg.get("active", True)]
 
 
 def make_session() -> requests.Session:
