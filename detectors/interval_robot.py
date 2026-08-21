@@ -2,21 +2,17 @@
 Приблуда на python — детектор периодичности (роботов), персистентный.
 С логированием в output/detector.log для отладки.
 MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
-v3:
- - ВОССТАНОВЛЕНО: stable_qty (Н-004) — _qty_stable_for_long + применение в
-   _find_match (было потеряно в поздней переписи);
- - Н-013: порог адаптивного допуска short_interval_threshold 60 -> 10 s
-   (мс-точность жива, поэтому настроенные 5% работают для 10-60s, а 12%
-   остаются только для сверхкоротких 1-9s валютных роботов);
- - добавлен drain_confirms() — отдаёт моменты подтверждения для batch_flash.
+v5: история (Н-010) пишется в МОМЕНТ ПОДТВЕРЖДЕНИЯ (count==min_repeats),
+а не при закрытии серии — статистика копится в течение дня.
 """
+import json
 import logging
 import statistics
 import os
+from datetime import datetime
 from pathlib import Path
 from .base import Detector, Signal
 
-# --- Настройка логгера ---
 _log = logging.getLogger("detector")
 if not _log.handlers:
     _logdir = Path(__file__).resolve().parent.parent / "output"
@@ -68,42 +64,46 @@ class IntervalRobotDetector(Detector):
         self.time_window_sec = settings.get("time_window_sec", 0.0)
         self.close_after_misses = settings.get("close_after_misses", 6)
         self.max_series = settings.get("max_series", 100000)
-
-        # Н-013: адаптивный допуск. ПОРОГ 10s (было 60): настроенные 5%
-        # работают для 10-60s, 12% — только для сверхкоротких 1-9s.
         self.short_interval_tolerance = settings.get("short_interval_tolerance", 0.12)
         self.short_interval_threshold = settings.get("short_interval_threshold", 10.0)
-
-        # Н-004: фильтр стабильного qty для длинных интервалов (ВОССТАНОВЛЕНО)
         self.long_interval_threshold = settings.get("long_interval_threshold", 120.0)
         self.stable_qty_required = settings.get("stable_qty_required", False)
         self.stable_qty_ratio = settings.get("stable_qty_ratio", 0.8)
-
-        # Минимальное число повторов для отображения в UI (дефолт 2 — кандидаты)
         self.min_display_repeats = settings.get("min_display_repeats", 2)
-
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name: self.name = f"робот-интервал[{preset_name}]"
         self.active = {}
         self.index = {}
-        self._confirms = []  # моменты подтверждения (для batch_flash)
-
-        # Н-010: путь к истории роботов
+        self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-
         _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
-                  f"min_interval={self.min_interval}, max_interval={self.max_interval}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
-                  f"long_thresh={self.long_interval_threshold}s, stable_qty={self.stable_qty_required}, "
-                  f"min_display={self.min_display_repeats}")
+                  f"stable_qty={self.stable_qty_required}, min_display={self.min_display_repeats}")
 
     def drain_confirms(self):
-        """Отдаёт и очищает список ts-подтверждений (для batch_flash в backend)."""
         out = self._confirms
         self._confirms = []
         return out
+
+    def _write_history(self, side, candidate):
+        try:
+            record = {
+                "timestamp": datetime.now().isoformat(timespec="seconds"),
+                "symbol": self.symbol, "side": side,
+                "qty_variants": sorted(candidate.qty_variants),
+                "interval_avg": round((candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1), 2),
+                "repeats": candidate.count,
+                "start_ts": candidate.start_ts, "end_ts": candidate.last_ts,
+                "jitter_ms": round(statistics.pstdev(candidate.intervals) * 1000, 1) if len(candidate.intervals) >= 2 else None,
+                "price_first": candidate.first_price, "price_last": candidate.last_price,
+                "preset": self.preset_name,
+            }
+            with open(self._history_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            _log.warning(f"[{self.symbol}] history write failed: {e}")
 
     def _finalize(self, side, candidate):
         avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
@@ -173,27 +173,21 @@ class IntervalRobotDetector(Detector):
         return high / low <= self.max_qty_ratio
 
     def _qty_stable_for_long(self, candidate):
-        """Н-004 (ВОССТАНОВЛЕНО): для длинных интервалов требуем стабильный qty
-        (одна доминирующая величина) — режет TWAP-дробление и шум."""
         if not self.stable_qty_required: return True
         if not candidate.qty_counts: return False
         total = sum(candidate.qty_counts.values())
-        if total < 3: return True  # мало данных — пропускаем
-        max_count = max(candidate.qty_counts.values())
-        return max_count / total >= self.stable_qty_ratio
+        if total < 3: return True
+        return max(candidate.qty_counts.values()) / total >= self.stable_qty_ratio
 
     def _interval_fits(self, candidate, interval):
         if interval is None: return False
         if self.min_interval is None: return False
         if self.max_interval is None: return False
         if interval < self.min_interval or interval > self.max_interval: return False
-
-        # Н-013: адаптивный допуск (порог 10s)
         if candidate.last_interval is not None and candidate.last_interval < self.short_interval_threshold:
             tol = self.short_interval_tolerance
         else:
             tol = self.interval_tolerance
-
         if tol is None or candidate.last_interval is None: return True
         low = candidate.last_interval * (1 - tol)
         high = candidate.last_interval * (1 + tol)
@@ -211,7 +205,6 @@ class IntervalRobotDetector(Detector):
                 break
             if not self._interval_fits(c, iv):
                 continue
-            # Н-004 (ВОССТАНОВЛЕНО): длинные интервалы — только стабильный qty
             if iv >= self.long_interval_threshold and not self._qty_stable_for_long(c):
                 continue
             if self.ignore_qty:
@@ -271,6 +264,7 @@ class IntervalRobotDetector(Detector):
                       f"repeats={match.count}, variants={sorted(match.qty_variants)}")
             if match.count == self.min_repeats:
                 self._confirms.append(ts)
+                self._write_history(side, match)   # v5: пишем в момент подтверждения
                 _log.info(f"[{self.symbol}] *** CONFIRMED ***: side={side}, repeats={match.count}, "
                           f"interval={match.last_interval:.2f}s, variants={sorted(match.qty_variants)}")
             if match.count >= self.max_series:
@@ -296,25 +290,16 @@ class IntervalRobotDetector(Detector):
                     continue
                 if c.count < self.min_repeats: continue
                 if c.last_interval is not None:
-                    if c.last_interval < self.short_interval_threshold:
-                        tol = self.short_interval_tolerance
-                    else:
-                        tol = self.interval_tolerance
+                    tol = self.short_interval_tolerance if c.last_interval < self.short_interval_threshold else self.interval_tolerance
                     if tol is not None:
                         max_fit = c.last_interval * (1 + tol)
                         if gap > max_fit and not c.warned:
                             c.warned = True
-                            warnings.append({
-                                "symbol": self.symbol,
-                                "side": side,
-                                "qty_variants": sorted(c.qty_variants),
-                                "gap_sec": round(gap, 1),
-                                "max_fit_sec": round(max_fit, 1),
-                                "просрочка": f"{gap:.1f}s > {max_fit:.1f}s",
-                            })
-                            _log.info(f"[{self.symbol}] OVERDUE: side={side}, "
-                                      f"gap={gap:.1f}s > max_fit={max_fit:.1f}s, "
-                                      f"variants={sorted(c.qty_variants)}")
+                            warnings.append({"symbol": self.symbol, "side": side,
+                                             "qty_variants": sorted(c.qty_variants),
+                                             "gap_sec": round(gap, 1), "max_fit_sec": round(max_fit, 1),
+                                             "просрочка": f"{gap:.1f}s > {max_fit:.1f}s"})
+                            _log.info(f"[{self.symbol}] OVERDUE: gap={gap:.1f}s > {max_fit:.1f}s")
         return signals, warnings
 
     def get_active_snapshot(self, now_ts):
@@ -328,15 +313,13 @@ class IntervalRobotDetector(Detector):
                 if c.priced_hits > 0 and c.price_counts: same_price_ratio = max(c.price_counts.values()) / c.priced_hits
                 price_shift = None
                 if c.first_price is not None and c.last_price is not None: price_shift = c.last_price - c.first_price
-                rows.append({
-                    "symbol": self.symbol, "preset": self.preset_name, "side": side,
-                    "qty_variants": sorted(c.qty_variants), "interval": c.last_interval,
-                    "repeats": c.count, "seconds_to_next": seconds_to_next,
-                    "start_ts": c.start_ts, "jitter_ms": jitter_ms,
-                    "price_first": c.first_price, "price_last": c.last_price,
-                    "price_shift": price_shift, "same_price_ratio": same_price_ratio,
-                    "sum_qty": c.sum_qty, "metro": self._metro(c),
-                })
+                rows.append({"symbol": self.symbol, "preset": self.preset_name, "side": side,
+                             "qty_variants": sorted(c.qty_variants), "interval": c.last_interval,
+                             "repeats": c.count, "seconds_to_next": seconds_to_next,
+                             "start_ts": c.start_ts, "jitter_ms": jitter_ms,
+                             "price_first": c.first_price, "price_last": c.last_price,
+                             "price_shift": price_shift, "same_price_ratio": same_price_ratio,
+                             "sum_qty": c.sum_qty, "metro": self._metro(c)})
         return rows
 
     def flush(self):
