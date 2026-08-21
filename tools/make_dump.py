@@ -1,98 +1,67 @@
 """
-Приблуда на python — сборка дампа-макета всего проекта для передачи
-помощнику/команде. Обходит дерево проекта АВТОМАТИЧЕСКИ (проект растёт —
-список файлов не хардкодится), и пропускает всё лишнее:
-- СЕКРЕТЫ: .env и любой файл с секретом внутри;
-- ТЯЖЁЛОЕ: data/, output/, logs/, parts/ (ленты, отчёты, логи),
-  а также любой файл крупнее MAX_FILE_BYTES;
-- МУСОР: .git, __pycache__, .venv, *.pyc, *.bak, *.tmp, дампы.
-В дамп попадают только текстовые исходники/настройки/заметки
-(.py, .json, .md, .txt, .bat, .lua — lua-экспортер Quik с 2026-08-20).
-Результат — output/dump_<дата>.txt в том же формате, что и прежние дампы.
-Запуск (из корня проекта):
-python tools/make_dump.py
+Приблуда на python — сборщик полного дампа исходников для передачи в чат.
+v3: в дамп ДОБАВЛЕНЫ файлы статистики из data/ (whitelist):
+    robots_history.jsonl, competitor_history.jsonl.
+Обход дерева автоматически подхватывает новые папки.
+Пропускает тяжёлое: data/* (кроме whitelist), output/, __pycache__, .git.
+Пишет project_dump.txt в корень.
 """
-import os
-from datetime import datetime
+import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent.parent
-OUTPUT_DIR = BASE_DIR / "output"
+BASE = Path(__file__).resolve().parent.parent
+OUT = BASE / "project_dump.txt"
 
-MAX_FILE_BYTES = 200 * 1024          # файлы крупнее 200 КБ не берём
-
-# Папки, которые пропускаем целиком (с любым содержимым).
-SKIP_DIRS = {
-    ".git", "__pycache__", ".venv", "venv", "node_modules",
-    "data", "output", "logs", "parts", ".idea", ".vscode",
-}
-
-# Расширения, которые берём в дамп (текст/код/настройки).
-# .lua добавлен 2026-08-20: экспортёр Quik — часть проекта.
-INCLUDE_SUFFIXES = {".py", ".json", ".md", ".txt", ".bat", ".cfg", ".ini", ".lua"}
-
-# Файлы, которые никогда не берём (секреты/артефакты).
-SKIP_FILES = {".env", ".gitignore"}
-
-# Подстроки в имени файла — тоже повод пропустить (артефакты/бэкапы).
-SKIP_NAME_PARTS = (".bak", ".tmp", "dump_", "parallel_report_", "weekly_review_")
+SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "venv", ".venv",
+             "output", "node_modules", ".idea", ".vscode"}
+OK_EXT = {".py", ".lua", ".md", ".txt", ".json", ".ini", ".csv"}
+MAX_SIZE = 300_000
+# whitelist из data/ — только статистика, НЕ quik_trades.csv
+DATA_INCLUDE = {"robots_history.jsonl", "competitor_history.jsonl"}
 
 
-def should_skip_dir(name: str) -> bool:
-    return name in SKIP_DIRS
+def collect() -> list[Path]:
+    files = []
+    for p in sorted(BASE.rglob("*")):
+        if not p.is_file():
+            continue
+        rel = p.relative_to(BASE)
+        parts = rel.parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        if "data" in parts:
+            if p.name not in DATA_INCLUDE:
+                continue
+        if p.suffix not in OK_EXT:
+            continue
+        if p.name == "project_dump.txt":
+            continue
+        if p.stat().st_size > MAX_SIZE:
+            continue
+        files.append(p)
+    return files
 
 
-def should_skip_file(path: Path) -> bool:
-    if path.name in SKIP_FILES:
-        return True
-    if any(part in path.name for part in SKIP_NAME_PARTS):
-        return True
-    if path.suffix not in INCLUDE_SUFFIXES:
-        return True
-    try:
-        if path.stat().st_size > MAX_FILE_BYTES:
-            return True
-    except OSError:
-        return True
-    return False
-
-
-def iter_project_files():
-    """Обход дерева проекта, выдаёт файлы, подлежащие включению."""
-    for root, dirs, files in os.walk(BASE_DIR):
-        dirs[:] = sorted(d for d in dirs if not should_skip_dir(d))
-        for name in sorted(files):
-            path = Path(root) / name
-            if not should_skip_file(path):
-                yield path
-
-
-def main() -> None:
-    OUTPUT_DIR.mkdir(exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-    out_path = OUTPUT_DIR / f"dump_{timestamp}.txt"
-    included = 0
-    with open(out_path, "w", encoding="utf-8") as out:
-        out.write("=" * 70 + "\n")
-        out.write("ПРИБЛУДА НА PYTHON — ДАМП ПРОЕКТА (макет)\n")
-        out.write(f"Сформирован: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        out.write("=" * 70 + "\n")
-        for path in iter_project_files():
-            rel = path.relative_to(BASE_DIR)
-            out.write("-" * 70 + "\n")
-            out.write(f"### {rel}\n")
-            out.write("-" * 70 + "\n")
-            try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                text = "(бинарный файл, содержимое пропущено)"
-            out.write(text)
-            if not text.endswith("\n"):
-                out.write("\n")
-            included += 1
-    size_kb = out_path.stat().st_size / 1024
-    print(f"Дамп готов: {out_path}  ({included} файлов, {size_kb:.0f} КБ)")
-    print("Этот файл можно передавать помощнику/команде как макет проекта.")
+def main():
+    files = collect()
+    chunks = []
+    total = 0
+    for p in files:
+        rel = p.relative_to(BASE).as_posix()
+        try:
+            text = p.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        chunks.append("=" * 70)
+        chunks.append(f"##### {rel}")
+        chunks.append("=" * 70)
+        chunks.append(text.rstrip("\n"))
+        chunks.append("")
+        total += 1
+    OUT.write_text("\n".join(chunks), encoding="utf-8")
+    print(f"Файлов в дампе: {total}")
+    print(f"Размер: {OUT.stat().st_size/1024:.0f} KB")
+    print(f"Сохранено: {OUT}")
 
 
 if __name__ == "__main__":
