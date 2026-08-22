@@ -1,17 +1,79 @@
-@'
-{"symbol": "CNY_TOM", "side": "buy", "qty_variants": [37], "interval_avg": 1, "timestamp": "2026-08-21T10:11:00+03:00", "market": "CURS"}
-{"symbol": "CNY_TOM", "side": "buy", "qty_variants": [58], "interval_avg": 2, "timestamp": "2026-08-21T10:11:00+03:00", "market": "CURS"}
-{"symbol": "MIX-9", "side": "sell", "qty_variants": [15, 26], "interval_avg": 22, "timestamp": "2026-08-21T10:11:00+03:00", "market": "SPBFUT"}
-{"symbol": "RUAL-9", "side": "sell", "qty_variants": [29, 55], "interval_avg": 24, "timestamp": "2026-08-21T10:11:00+03:00", "market": "SPBFUT"}
-{"symbol": "LKOH", "side": "buy", "qty_variants": [100], "interval_avg": 242, "timestamp": "2026-08-21T10:15:00+03:00"}
-{"symbol": "GAZP", "side": "buy", "qty_variants": [122, 123], "interval_avg": 30, "timestamp": "2026-08-21T10:16:00+03:00"}
-{"symbol": "BSPB", "side": "buy", "qty_variants": [10], "interval_avg": 44, "timestamp": "2026-08-21T10:16:00+03:00"}
-{"symbol": "FEES", "side": "sell", "qty_variants": [9, 10], "interval_avg": 16, "timestamp": "2026-08-21T10:16:00+03:00"}
-{"symbol": "GMKN", "side": "sell", "qty_variants": [10, 11], "interval_avg": 16, "timestamp": "2026-08-21T10:16:00+03:00"}
-{"symbol": "GMKN", "side": "sell", "qty_variants": [13, 14], "interval_avg": 16, "timestamp": "2026-08-21T10:16:00+03:00"}
-{"symbol": "SMLT", "side": "sell", "qty_variants": [200], "interval_avg": 273, "timestamp": "2026-08-21T10:17:00+03:00"}
-{"symbol": "PLZL", "side": "sell", "qty_variants": [2473], "interval_avg": 301, "timestamp": "2026-08-21T10:17:00+03:00"}
-{"symbol": "SNGSP", "side": "buy", "qty_variants": [64, 65], "interval_avg": 15, "timestamp": "2026-08-21T10:24:00+03:00"}
-{"symbol": "RENI", "side": "buy", "qty_variants": [4, 5], "interval_avg": 16, "timestamp": "2026-08-21T10:44:00+03:00"}
-{"symbol": "BSPB", "side": "sell", "qty_variants": [32, 34], "interval_avg": 74, "timestamp": "2026-08-21T10:44:00+03:00"}
-'@ | Set-Content -Path research\competitor_supplement_2026-08-21.jsonl -Encoding UTF8
+{"symbol": "LKOH", "side": "sell", "qty_variants": [50], "interval_avg": 14, "timestamp": "2026-08-21T10:13:46+03:00"}
+{"symbol": "LKOH", "side": "sell", "qty_variants": [101], "interval_avg": 32, "timestamp": "2026-08-21T10:21:00+03:00"}
+{"symbol": "LKOH", "side": "sell", "qty_variants": [19, 20], "interval_avg": 105, "timestamp": "2026-08-21T10:28:07+03:00"}
+{"symbol": "LKOH", "side": "sell", "qty_variants": [96], "interval_avg": 43, "timestamp": "2026-08-21T10:50:50+03:00"}
+{"symbol": "LKOH", "side": "sell", "qty_variants": [100], "interval_avg": 30, "timestamp": "2026-08-21T11:00:45+03:00"}
+{"symbol": "LKOH", "side": "sell", "qty_variants": [58, 59], "interval_avg": 45, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "ALRS", "side": "sell", "qty_variants": [80], "interval_avg": 10, "timestamp": "2026-08-21T10:15:01+03:00"}
+{"symbol": "ALRS", "side": "buy", "qty_variants": [559, 560], "interval_avg": 16, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "ASTR", "side": "buy", "qty_variants": [156, 157], "interval_avg": 14, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "MTLR", "side": "buy", "qty_variants": [1644, 1645], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "POSI", "side": "buy", "qty_variants": [44, 45], "interval_avg": 14, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "RUAL", "side": "buy", "qty_variants": [500], "interval_avg": 17, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "RUAL", "side": "sell", "qty_variants": [200, 201], "interval_avg": 20, "timestamp": "2026-08-21T10:26:59+03:00"}
+{"symbol": "RUAL", "side": "sell", "qty_variants": [1500], "interval_avg": 47, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "VKCO", "side": "buy", "qty_variants": [647, 648], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "MAGN", "side": "buy", "qty_variants": [769, 770], "interval_avg": 13, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "MAGN", "side": "sell", "qty_variants": [16, 19], "interval_avg": 11, "timestamp": "2026-08-21T10:58:00+03:00"}
+{"symbol": "MAGN", "side": "sell", "qty_variants": [137, 138], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "SMLT", "side": "sell", "qty_variants": [100], "interval_avg": 10, "timestamp": "2026-08-21T10:18:24+03:00"}
+{"symbol": "SMLT", "side": "sell", "qty_variants": [53, 54], "interval_avg": 22, "timestamp": "2026-08-21T10:26:59+03:00"}
+{"symbol": "SMLT", "side": "sell", "qty_variants": [500, 501], "interval_avg": 23, "timestamp": "2026-08-21T10:59:17+03:00"}
+{"symbol": "SMLT", "side": "sell", "qty_variants": [121], "interval_avg": 21, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "X5", "side": "sell", "qty_variants": [50], "interval_avg": 11, "timestamp": "2026-08-21T10:18:24+03:00"}
+{"symbol": "X5", "side": "sell", "qty_variants": [44], "interval_avg": 36, "timestamp": "2026-08-21T10:59:17+03:00"}
+{"symbol": "TATN", "side": "buy", "qty_variants": [199, 200], "interval_avg": 52, "timestamp": "2026-08-21T10:28:07+03:00"}
+{"symbol": "TATN", "side": "sell", "qty_variants": [111, 112], "interval_avg": 36, "timestamp": "2026-08-21T10:59:17+03:00"}
+{"symbol": "TATN", "side": "sell", "qty_variants": [23, 24], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "TATNP", "side": "sell", "qty_variants": [14, 15], "interval_avg": 13, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "TATNP", "side": "sell", "qty_variants": [49], "interval_avg": 13, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "BSPB", "side": "buy", "qty_variants": [20], "interval_avg": 54, "timestamp": "2026-08-21T10:16:00+03:00"}
+{"symbol": "BSPB", "side": "sell", "qty_variants": [31, 34], "interval_avg": 37, "timestamp": "2026-08-21T10:31:46+03:00"}
+{"symbol": "BSPB", "side": "sell", "qty_variants": [40, 44], "interval_avg": 18, "timestamp": "2026-08-21T10:58:00+03:00"}
+{"symbol": "BSPB", "side": "sell", "qty_variants": [51], "interval_avg": 185, "timestamp": "2026-08-21T10:59:17+03:00"}
+{"symbol": "CHMF", "side": "sell", "qty_variants": [99, 100], "interval_avg": 56, "timestamp": "2026-08-21T10:28:07+03:00"}
+{"symbol": "CHMF", "side": "sell", "qty_variants": [50, 51], "interval_avg": 16, "timestamp": "2026-08-21T11:13:51+03:00"}
+{"symbol": "CHMF", "side": "sell", "qty_variants": [30, 31], "interval_avg": 12, "timestamp": "2026-08-21T11:19:35+03:00"}
+{"symbol": "HYDR", "side": "sell", "qty_variants": [71, 74], "interval_avg": 39, "timestamp": "2026-08-21T10:28:07+03:00"}
+{"symbol": "LENT", "side": "sell", "qty_variants": [19, 21], "interval_avg": 16, "timestamp": "2026-08-21T11:01:53+03:00"}
+{"symbol": "LENT", "side": "buy", "qty_variants": [9, 10], "interval_avg": 10, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "SNGS", "side": "buy", "qty_variants": [33], "interval_avg": 59, "timestamp": "2026-08-21T10:30:30+03:00"}
+{"symbol": "SNGS", "side": "sell", "qty_variants": [79, 80], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "SVCB", "side": "sell", "qty_variants": [28], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "OZON", "side": "sell", "qty_variants": [31, 34], "interval_avg": 24, "timestamp": "2026-08-21T10:26:59+03:00"}
+{"symbol": "OZON", "side": "sell", "qty_variants": [174, 175], "interval_avg": 43, "timestamp": "2026-08-21T10:50:50+03:00"}
+{"symbol": "OZON", "side": "sell", "qty_variants": [70, 71], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "AFKS", "side": "sell", "qty_variants": [240, 241], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "AFKS", "side": "sell", "qty_variants": [50], "interval_avg": 11, "timestamp": "2026-08-21T10:58:18+03:00"}
+{"symbol": "AFLT", "side": "sell", "qty_variants": [623, 624], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "ROSN", "side": "buy", "qty_variants": [587, 588], "interval_avg": 44, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "ROSN", "side": "sell", "qty_variants": [1000], "interval_avg": 250, "timestamp": "2026-08-21T11:19:35+03:00"}
+{"symbol": "SBER", "side": "sell", "qty_variants": [974, 975], "interval_avg": 44, "timestamp": "2026-08-21T10:50:50+03:00"}
+{"symbol": "SBER", "side": "sell", "qty_variants": [1600, 1606], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "SBERP", "side": "sell", "qty_variants": [243, 244], "interval_avg": 15, "timestamp": "2026-08-21T11:11:12+03:00"}
+{"symbol": "GAZP", "side": "sell", "qty_variants": [132, 133], "interval_avg": 30, "timestamp": "2026-08-21T10:49:17+03:00"}
+{"symbol": "GAZP", "side": "sell", "qty_variants": [505, 506], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "MTSS", "side": "buy", "qty_variants": [24, 25], "interval_avg": 43, "timestamp": "2026-08-21T10:26:59+03:00"}
+{"symbol": "MTSS", "side": "sell", "qty_variants": [122, 123], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "NVTK", "side": "sell", "qty_variants": [134, 135], "interval_avg": 41, "timestamp": "2026-08-21T11:09:12+03:00"}
+{"symbol": "NVTK", "side": "sell", "qty_variants": [102], "interval_avg": 16, "timestamp": "2026-08-21T11:42:10+03:00"}
+{"symbol": "MONT", "side": "sell", "qty_variants": [43, 45], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "MOEX", "side": "sell", "qty_variants": [44, 45], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "PIKK", "side": "sell", "qty_variants": [27], "interval_avg": 13, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "RTKMP", "side": "sell", "qty_variants": [32, 33], "interval_avg": 12, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "FLOT", "side": "sell", "qty_variants": [50], "interval_avg": 12, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "HEAD", "side": "sell", "qty_variants": [15, 16], "interval_avg": 17, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "TRNFP", "side": "sell", "qty_variants": [140], "interval_avg": 15, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "MGNT", "side": "sell", "qty_variants": [9, 10], "interval_avg": 16, "timestamp": "2026-08-21T11:13:51+03:00"}
+{"symbol": "MGNT", "side": "buy", "qty_variants": [20], "interval_avg": 10, "timestamp": "2026-08-21T11:01:59+03:00"}
+{"symbol": "RAGR", "side": "buy", "qty_variants": [332], "interval_avg": 10, "timestamp": "2026-08-21T11:11:53+03:00"}
+{"symbol": "YDEX", "side": "sell", "qty_variants": [800], "interval_avg": 86, "timestamp": "2026-08-21T11:13:51+03:00"}
+{"symbol": "DOMRF", "side": "buy", "qty_variants": [47], "interval_avg": 84, "timestamp": "2026-08-21T11:13:51+03:00"}
+{"symbol": "PHOR", "side": "buy", "qty_variants": [16], "interval_avg": 85, "timestamp": "2026-08-21T11:13:51+03:00"}
+{"symbol": "SNGSP", "side": "buy", "qty_variants": [24], "interval_avg": 17, "timestamp": "2026-08-21T11:00:45+03:00"}
+{"symbol": "SNGSP", "side": "buy", "qty_variants": [54, 55], "interval_avg": 27, "timestamp": "2026-08-21T11:01:53+03:00"}
+{"symbol": "SNGSP", "side": "sell", "qty_variants": [290, 291], "interval_avg": 39, "timestamp": "2026-08-21T10:59:17+03:00"}
+{"symbol": "SNGSP", "side": "sell", "qty_variants": [23, 24], "interval_avg": 17, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "SNGSP", "side": "sell", "qty_variants": [34, 35], "interval_avg": 27, "timestamp": "2026-08-21T11:08:16+03:00"}
+{"symbol": "PLZL", "side": "sell", "qty_variants": [40], "interval_avg": 22, "timestamp": "2026-08-21T11:36:34+03:00"}
+{"symbol": "WUSH", "side": "buy", "qty_variants": [769, 770], "interval_avg": 13, "timestamp": "2026-08-21T11:19:35+03:00"}

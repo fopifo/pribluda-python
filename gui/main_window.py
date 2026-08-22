@@ -12,12 +12,16 @@ CD/NEXT — белые; LPP — 2 знака; MS — последние три �
 Чипы "🚏" в верхней панели и мигание тикера у планки (shared_state.limit_alerts).
 Новые вкладки подключаются через _add_safe_tab: падение вкладки не роняет
 приложение — вместо неё заглушка с текстом ошибки.
+v6.1 (2026-08-22): время часов и NEXT — явно в МСК (было локальное ОС).
 """
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
+from zoneinfo import ZoneInfo
+
+MSK = ZoneInfo("Europe/Moscow")
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE_DIR))
@@ -386,9 +390,10 @@ class MainWindow(QMainWindow):
             else:
                 cd_str, cd_fg = f"{sec:.0f}s", theme.TEXT
             
-            # NEXT: время следующего удара МИН:СЕК (синхронно с часами), белым
+            # NEXT: время следующего удара МИН:СЕК (синхронно с часами), белым.
+            # v6.1: явно в МСК (было локальное время ОС).
             if sec is not None:
-                next_str = datetime.fromtimestamp(now_ts + sec).strftime("%M:%S")
+                next_str = datetime.fromtimestamp(now_ts + sec, tz=MSK).strftime("%M:%S")
                 next_fg = theme.TEXT
             else:
                 next_str, next_fg = "-", theme.MUTED
@@ -490,8 +495,10 @@ class MainWindow(QMainWindow):
 
     def _refresh(self):
         self.setUpdatesEnabled(False)
-        now_ts = datetime.now().timestamp()
-        self.clock.setText(datetime.now().strftime("%H:%M:%S"))
+        # v6.1: время явно в МСК (было локальное ОС).
+        now_msk = datetime.now(MSK)
+        now_ts = now_msk.timestamp()
+        self.clock.setText(now_msk.strftime("%H:%M:%S"))
 
         # Чипы планок из вкладки "Планки"
         alerts = getattr(self.shared_state, "limit_alerts", None) or []
