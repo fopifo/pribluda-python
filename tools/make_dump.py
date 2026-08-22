@@ -7,13 +7,13 @@ v5: файлы из whitelist data/ идут в дамп БЕЗ ограниче
 (robots_history.jsonl бывает >300KB и раньше вырезался — это был баг).
 Обход дерева подхватывает новые папки автоматически.
 Пропускает тяжёлое: data/* (кроме whitelist), output/, __pycache__, .git.
-Пишет project_dump.txt в корень.
+Пишет project_dump_YYYY-MM-DD_HH-MM-SS.txt в корень.
 """
 import sys
 from pathlib import Path
+from datetime import datetime
 
 BASE = Path(__file__).resolve().parent.parent
-OUT = BASE / "project_dump.txt"
 
 SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", "venv", ".venv",
              "output", "node_modules", ".idea", ".vscode"}
@@ -36,7 +36,8 @@ def collect() -> list[Path]:
             continue
         if p.suffix not in OK_EXT:
             continue
-        if p.name == "project_dump.txt":
+        # пропускаем все предыдущие дампы
+        if p.name.startswith("project_dump_") and p.name.endswith(".txt"):
             continue
         # v5: лимит размера НЕ применяется к файлам статистики/эталона
         if not in_data and p.stat().st_size > MAX_SIZE:
@@ -45,6 +46,10 @@ def collect() -> list[Path]:
     return files
 
 def main():
+    # имя с датой и временем
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    out_path = BASE / f"project_dump_{timestamp}.txt"
+    
     files = collect()
     chunks = []
     total = 0
@@ -60,10 +65,10 @@ def main():
         chunks.append(text.rstrip("\n"))
         chunks.append("")
         total += 1
-    OUT.write_text("\n".join(chunks), encoding="utf-8")
+    out_path.write_text("\n".join(chunks), encoding="utf-8")
     print(f"Файлов в дампе: {total}")
-    print(f"Размер: {OUT.stat().st_size/1024:.0f} KB")
-    print(f"Сохранено: {OUT}")
+    print(f"Размер: {out_path.stat().st_size/1024:.0f} KB")
+    print(f"Сохранено: {out_path}")
 
 if __name__ == "__main__":
     main()

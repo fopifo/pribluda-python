@@ -2,6 +2,8 @@
 Приблуда на python — конфигурация детекторов.
 Дефолты: interval_tolerance=0.05, max_qty_ratio=1.10, min_display_repeats=3.
 Н-013: short_interval_threshold=10.0 (адаптивный допуск 12% только для 1-9s).
+v8: jitter_ratio_max=0.3 — фильтр джиттера (0 = выключен).
+v9: grid_lock=True, grid_tolerance_ms=700 — защёлка на сетку после подтверждения.
 """
 from typing import List, Dict, Any
 
@@ -26,6 +28,9 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
         "stable_qty_required": overrides.get("stable_qty_required", False),
         "stable_qty_ratio": overrides.get("stable_qty_ratio", 0.8),
         "min_display_repeats": overrides.get("min_display_repeats", 3),
+        "jitter_ratio_max": overrides.get("jitter_ratio_max", 0.3),
+        "grid_lock": overrides.get("grid_lock", True),
+        "grid_tolerance_ms": overrides.get("grid_tolerance_ms", 700),
     }
     configs.append(base_config)
     return configs
