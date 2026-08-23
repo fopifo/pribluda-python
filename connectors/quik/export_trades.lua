@@ -1,18 +1,26 @@
 -- export_trades.lua
 -- Экспорт ЛЕНТЫ СДЕЛОК из Quik в CSV.
--- ВЕРСИЯ 3.10 (2026-08-20, ветка Qwen_coder).
+-- ВЕРСИЯ 3.20 (2026-08-23, ветка Qwen_coder).
 --
--- СТОРОНА (v3.10): как в LiveScreener getPrint_2.lua — TICK RULE.
--- В этом Quik бит направления во flags обезличенных сделок не взводится
--- (проверено: buy=4975/sell=0 и наоборот), operation отсутствует.
--- Поэтому: цена ВЫШЕ прошлой сделки тикера = buy, НИЖЕ = sell,
+-- СТОРОНА (v3.20): метод по флагам (чётность).
+-- Гипотеза: нечётный флаг = продажа, чётный = покупка.
+-- Основание: независимое подтверждение из обратной связи (другой проект
+-- использует правило флаги % 2 == 1 -> продажа), зонд показал 97.3%
+-- совпадений с предыдущим методом. Прямой сверки с Алором пока нет.
+--
+-- ВАЖНО: старый метод (на основе последовательных цен, v3.10) оставлен
+-- в 6-м поле для сравнения и возможного отката. НЕ УДАЛЯТЬ до
+-- подтверждения, что новый метод лучше через ab_compare на свежих данных.
+--
+-- Формат: символ;объём;цена;сторона_флаги;время;сторона_тек.метод;флаги
+-- Боевой код (backend.py) читает первые 5 полей, лишние игнорирует.
+--
+-- ПРЕЖНИЙ МЕТОД (помечен как deprecated, v3.10):
+-- В этом Quik бит направления во флагах обезличенных сделок не взводится
+-- (проверено: покупка=4975/продажа=0 и наоборот), операция отсутствует.
+-- Поэтому: цена ВЫШЕ прошлой сделки тикера = покупка, НИЖЕ = продажа,
 -- РАВНА = наследуем прошлую сторону.
---
--- Планки больше НЕ здесь — их пишет отдельный скрипт limits_sweep.lua
--- (getParamEx глохнет в одном процессе с OnAllTrade; в отдельном — работает).
--- Котировки пишет tools/iss_quotes_sync.py.
---
--- ФАЙЛ: data/quik_trades.csv (добавление), data/export_debug.log (лог)
+-- Этот метод даёт 87.6% совпадений с Алором (сверка 2026-08-21).
 
 local trades_file = "C:/Users/Public/MI_CODES/Qwen_coder/data/quik_trades.csv"
 local log_file    = "C:/Users/Public/MI_CODES/Qwen_coder/data/export_debug.log"
@@ -85,8 +93,20 @@ function get_quantity(alltrade)
     return 0
 end
 
--- v3.10: tick rule (как в LiveScreener getPrint_2.lua)
-function get_side(alltrade)
+-- v3.20: метод по флагам (чётность)
+-- Гипотеза: нечётный флаг = продажа, чётный = покупка
+function get_side_by_flags(alltrade)
+    local flags = alltrade.flags or 0
+    if flags % 2 == 1 then
+        return "sell"
+    else
+        return "buy"
+    end
+end
+
+-- v3.10 (deprecated): метод на основе последовательных цен
+-- Оставлен для сравнения и возможного отката. НЕ УДАЛЯТЬ.
+function get_side_tickrule(alltrade)
     local code = alltrade.sec_code or ""
     local p = alltrade.price or 0
     local prev = last_price[code]
@@ -109,9 +129,9 @@ function get_side(alltrade)
 end
 
 function OnInit()
-    write_log("=== QUIK EXPORT STARTED (v3.10: tick-rule side) ===")
+    write_log("=== QUIK EXPORT STARTED (v3.20: flags parity side) ===")
     open_trades()
-    message("Quik Export: Started (v3.10)")
+    message("Quik Export: Started (v3.20)")
 end
 
 function OnAllTrade(alltrade)
@@ -130,18 +150,23 @@ function OnAllTrade(alltrade)
 
     local sec_code = alltrade.sec_code or ""
     local price = alltrade.price or 0
-    local side = get_side(alltrade)
+    local flags = alltrade.flags or 0
     local ts = trade_time_ms(alltrade)
 
+    -- v3.20: основной метод - по флагам
+    local side_flags = get_side_by_flags(alltrade)
+    -- v3.10 (deprecated): старый метод - для сравнения
+    local side_tickrule = get_side_tickrule(alltrade)
+
     trade_count = trade_count + 1
-    if side == "buy" then buy_count = buy_count + 1 else sell_count = sell_count + 1 end
+    if side_flags == "buy" then buy_count = buy_count + 1 else sell_count = sell_count + 1 end
     buffer[#buffer + 1] = sec_code .. ";" .. quantity .. ";" .. price
-        .. ";" .. side .. ";" .. ts .. "\n"
+        .. ";" .. side_flags .. ";" .. ts
+        .. ";" .. side_tickrule .. ";" .. flags .. "\n"
 end
 
 function OnStop()
     stopped = true
-    flush_trades()
     if trades_handle then
         trades_handle:close()
         trades_handle = nil
@@ -151,7 +176,7 @@ function OnStop()
 end
 
 function main()
-    write_log("main() loop started (v3.10)")
+    write_log("main() loop started (v3.20)")
     last_flush_ms = now_ms()
 
     while not stopped do
@@ -168,8 +193,6 @@ function main()
             write_log("trades exported total: " .. trade_count
                 .. " (buy=" .. buy_count .. ", sell=" .. sell_count .. ")")
         end
-
-        sleep(100)
     end
 
     flush_trades()
