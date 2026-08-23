@@ -1,8 +1,9 @@
-"""
-Приблуда на python — бэкенд для Quik (чтение CSV ленты).
+﻿"""
+Приблуда на python - бэкенд для Quik (чтение CSV ленты).
 Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность.
 v2: live-ветка НЕ перезаписывает timestamp (настоящие мс из CSV).
-v3: batch_flash — мигание "пачки" роботов: >=4 тикеров подтвердились за 15с.
+v3: batch_flash - мигание "пачки" роботов: >=4 тикеров подтвердились за 15с.
+v4: интеграция SpringMonitor (спред тикера относительно IMOEXF).
 """
 import sys, time, threading, logging
 from datetime import datetime
@@ -17,6 +18,7 @@ from core.state import SharedState
 from core.config import get_detector_configs
 from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
+from modules.arbitrage.spring_monitor import SpringMonitor, load_spring_settings, fetch_imoex_price
 
 CSV = BASE / "data" / "quik_trades.csv"
 MSK = ZoneInfo("Europe/Moscow")
@@ -34,6 +36,9 @@ if not _log.handlers:
 BATCH_MIN_TICKERS = 4
 BATCH_WINDOW_SEC = 15.0
 
+# IMOEXF: период обновления индекса
+IMOEX_PERIOD = 5.0
+
 
 class QuikBackend:
     def __init__(self, shared: SharedState):
@@ -44,7 +49,17 @@ class QuikBackend:
         self.lines_read = 0
         self.trades_fed = 0
         self.confirm_times = {}   # symbol -> ts последнего подтверждения
-        _log.info(f"Backend init: {len(self.allowed)} tickers allowed")
+        
+        # NEW: SpringMonitor для спредов тикеров относительно IMOEXF
+        self.spring_settings = load_spring_settings()
+        self.spring_monitors = {}
+        for ticker, cfg in self.spring_settings.items():
+            threshold = cfg.get("threshold", 0.5)
+            half_life = cfg.get("half_life_sec", 600.0)
+            self.spring_monitors[ticker] = SpringMonitor(ticker, threshold, half_life)
+            _log.info(f"[spring] created monitor for {ticker}: threshold={threshold}%, half_life={half_life}s")
+        
+        _log.info(f"Backend init: {len(self.allowed)} tickers allowed, {len(self.spring_monitors)} spring monitors")
 
     def _dets_for(self, sym):
         if sym not in self.dets:
@@ -59,10 +74,20 @@ class QuikBackend:
         sym = trade["symbol"]
         if sym not in self.allowed:
             return
+        
+        # Interval robot detector (рабочий код, не трогать)
         for d in self._dets_for(sym):
             d.on_trade(trade)
             for ts_sec in d.drain_confirms():
                 self.confirm_times[sym] = ts_sec
+        
+        # NEW: Spring monitor (спред тикера относительно IMOEXF)
+        if sym in self.spring_monitors:
+            price = trade.get("price")
+            ts_sec = trade["timestamp"] / 1000.0
+            if price is not None:
+                self.spring_monitors[sym].on_trade(sym, price, ts_sec)
+        
         self.trades_fed += 1
 
     def parse(self, line):
@@ -89,18 +114,46 @@ class QuikBackend:
         self.confirm_times = {s: t for s, t in self.confirm_times.items()
                               if now - t <= 60}
 
+    def _update_spring_rows(self, now):
+        """NEW: Наполняет shared.spring_rows - текущее состояние спредов."""
+        rows = []
+        for ticker, monitor in self.spring_monitors.items():
+            snap = monitor.snapshot(now_ts=now)
+            if snap["price_ticker"] is not None and snap["price_index"] is not None:
+                rows.append(snap)
+        self.shared.spring_rows = rows
+
     def publisher(self):
         """Поток обновления GUI (раз в секунду собирает снапшоты)."""
         while True:
             now = datetime.now().timestamp()
             self._update_batch_flash(now)
+            
+            # Interval robot detector rows
             rows = []
             for dets in self.dets.values():
                 for d in dets:
                     d.check_overdue(now)
                     rows.extend(d.get_active_snapshot(now))
             self.shared.rows = rows
+            
+            # NEW: Spring monitor rows
+            self._update_spring_rows(now)
+            
             time.sleep(1.0)
+
+    def imoex_updater(self):
+        """NEW: Поток обновления IMOEXF (раз в IMOEX_PERIOD секунд)."""
+        _log.info(f"IMOEX updater started (period={IMOEX_PERIOD}s)")
+        while True:
+            price = fetch_imoex_price()
+            if price is not None:
+                for monitor in self.spring_monitors.values():
+                    monitor.update_index(price)
+                _log.debug(f"IMOEX updated: {price}")
+            else:
+                _log.warning("IMOEX fetch failed")
+            time.sleep(IMOEX_PERIOD)
 
     def run(self):
         """Основной поток чтения CSV."""
@@ -126,7 +179,7 @@ class QuikBackend:
         except FileNotFoundError:
             _log.warning(f"CSV not found: {CSV}")
 
-        # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
+        # 2. Live tail: метки времени из CSV (мс) - БЕЗ перезаписи arrival-time.
         _log.info("Switching to live tail mode (CSV ms, no overwrite)")
         while True:
             try:
@@ -148,4 +201,5 @@ def start_backend(shared: SharedState):
     b = QuikBackend(shared)
     threading.Thread(target=b.run, daemon=True, name="QuikReader").start()
     threading.Thread(target=b.publisher, daemon=True, name="QuikPublisher").start()
-    _log.info("Quik backend threads started.")
+    threading.Thread(target=b.imoex_updater, daemon=True, name="IMOEXUpdater").start()  # NEW
+    _log.info("Quik backend threads started (reader, publisher, imoex_updater).")
