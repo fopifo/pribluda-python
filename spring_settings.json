@@ -1,0 +1,14 @@
+{
+  "SBER": {
+    "threshold": 0.5,
+    "half_life_sec": 600
+  },
+  "GAZP": {
+    "threshold": 0.5,
+    "half_life_sec": 600
+  },
+  "LKOH": {
+    "threshold": 0.3,
+    "half_life_sec": 600
+  }
+}
