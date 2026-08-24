@@ -8,6 +8,11 @@ v2: пишет ТОЛЬКО data/quik_quotes.csv. Планки (quik_limits.csv)
 Колонки читаются ДИНАМИЧЕСКИ (используются только найденные).
 Запуск в ОТДЕЛЬНОЙ консоли:
 python tools/iss_quotes_sync.py
+
+v2.1 (2026-08-24): добавлен retry переименования tmp->csv.
+Когда Приблуда держит quik_quotes.csv на чтении, Windows блокирует
+replace() с WinError 5 (Отказано в доступе). Retry 3 попытки с паузой
+0.3 с — почти всегда успевает, т.к. читатель держит файл миллисекунды.
 """
 import time
 from pathlib import Path
@@ -21,6 +26,9 @@ QUOTES_TMP = BASE_DIR / "data" / "quik_quotes.tmp"
 URL = ("https://iss.moex.com/iss/engines/stock/markets/shares/boards/"
        "TQBR/securities.json?iss.meta=off")
 PERIOD = 5.0
+
+RENAME_RETRIES = 3
+RENAME_RETRY_DELAY = 0.3
 
 
 def num(v):
@@ -44,6 +52,23 @@ def block_to_rows(block):
     for row in (block or {}).get("data") or []:
         rows.append({c: (row[i] if i < len(row) else None) for c, i in idx.items()})
     return rows, idx
+
+
+def safe_replace(tmp: Path, dst: Path) -> bool:
+    """Переименовывает tmp -> dst с retry. Возвращает True при успехе."""
+    last_err = None
+    for attempt in range(RENAME_RETRIES):
+        try:
+            tmp.replace(dst)
+            if attempt > 0:
+                print(f"{time.strftime('%H:%M:%S')} rename retry {attempt + 1} OK")
+            return True
+        except Exception as e:
+            last_err = e
+            if attempt < RENAME_RETRIES - 1:
+                time.sleep(RENAME_RETRY_DELAY)
+    print(f"{time.strftime('%H:%M:%S')} rename FAILED after {RENAME_RETRIES} tries: {last_err}")
+    return False
 
 
 def main():
@@ -79,8 +104,8 @@ def main():
                          + ";" + str(ts))
 
             QUOTES_TMP.write_text("\n".join(q) + "\n", encoding="utf-8")
-            QUOTES_TMP.replace(QUOTES_CSV)
-            print(f"{time.strftime('%H:%M:%S')} quotes={len(q)-1}")
+            if safe_replace(QUOTES_TMP, QUOTES_CSV):
+                print(f"{time.strftime('%H:%M:%S')} quotes={len(q)-1}")
         except Exception as e:
             print(f"ISS error: {type(e).__name__}: {e}")
         time.sleep(PERIOD)
