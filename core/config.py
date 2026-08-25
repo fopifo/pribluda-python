@@ -11,7 +11,14 @@ v9: grid_lock=True, grid_tolerance_ms=700 — защёлка на сетку п�
 v10 (2026-08-25, свип):
 - grid_tolerance_ms ВЕРНУЛ к 700 (шаг 3 с grid=1000 уронил TP 16->13).
 - jitter_ratio_max=0.0 — ВРЕМЕННЫЙ эксперимент шага 4 ("не режет ли
-  джиттер-фильтр"); если TP не вырастет — вернуть 0.3.
+  джиттер-фильтр"): TP вырос (16->21), но FP взорвался (3405->28047).
+v11 (2026-08-25, финализация):
+- jitter_ratio_max ВЕРНУЛ к 0.3 по пункту 5 плана (FP резко растёт —
+  откатить именно его, пометить "не трогать дальше").
+- Итог финальной конфигурации: threshold=20.0, grid=700, jitter=0.3.
+- Следующий одиночный эксперимент (отдельный прогон): interval_tolerance
+  0.05->0.08 ЧЕРЕЗ ticker_settings.json — базовый дефолт здесь перебивается
+  пер-тикерными override (у всех тикеров interval_tolerance=0.05).
 """
 from typing import List, Dict, Any
 
@@ -36,7 +43,7 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
         "stable_qty_required": overrides.get("stable_qty_required", False),
         "stable_qty_ratio": overrides.get("stable_qty_ratio", 0.8),
         "min_display_repeats": overrides.get("min_display_repeats", 3),
-        "jitter_ratio_max": overrides.get("jitter_ratio_max", 0.0),
+        "jitter_ratio_max": overrides.get("jitter_ratio_max", 0.3),
         "grid_lock": overrides.get("grid_lock", True),
         "grid_tolerance_ms": overrides.get("grid_tolerance_ms", 700),
     }
