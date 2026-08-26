@@ -25,11 +25,15 @@
 тикер и не увидел наш робот / увидел другого). Если скриншотов в окне
 нет — сигнал UNVERIFIED (не с чем сравнивать) и в FP не попадает.
 Без этого FP был мусором: считал ВСЕ наши сигналы без пары за все дни.
+
+ПРОГРЕСС-БАР (2026-08-26): визуальная шкала с процентами, скоростью
+и ETA для всех длинных операций (прогон по ленте, матчинг).
 """
 import bisect
 import json
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -54,6 +58,46 @@ SIG_RE = re.compile(
     r"^\[робот-интервал\]\s+(\S+)\s+(buy|sell)\s+qty=(\S+)\s+повторов=(\d+)\s+"
     r"интервал~([\d.]+)с\s+джиттер=([\d.]+)мс\s+с\s+(\d{2}:\d{2}:\d{2})\s+по\s+(\d{2}:\d{2}:\d{2})"
 )
+
+
+# ---------- ПРОГРЕСС-БАР (2026-08-26) ----------
+def _format_eta(seconds):
+    """Форматирует секунды в человекочитаемый вид."""
+    if seconds < 60:
+        return f"{seconds:.0f}с"
+    if seconds < 3600:
+        return f"{seconds/60:.1f}мин"
+    return f"{seconds/3600:.1f}ч"
+
+
+def _progress_bar(current, total, width=30):
+    """ASCII прогресс-бар: [██████░░░░] 60.0%."""
+    if total <= 0:
+        return f"[{'?' * width}]"
+    pct = current / total
+    filled = int(width * pct)
+    bar = "█" * filled + "░" * (width - filled)
+    return f"[{bar}] {pct*100:5.1f}%"
+
+
+def _print_progress(prefix, current, total, start_time, extra=""):
+    """Печатает строку прогресса с процентами, скоростью и ETA."""
+    elapsed = time.time() - start_time
+    speed = current / max(elapsed, 0.001)
+    remaining = (total - current) / max(speed, 1) if total > 0 else 0
+    bar = _progress_bar(current, total)
+    speed_str = f"{speed/1000:.0f}K/с" if speed > 1000 else f"{speed:.0f}/с"
+    print(
+        f"\r{prefix} {bar} {current:,}/{total:,} | {speed_str} | "
+        f"ETA {_format_eta(remaining)}{extra}",
+        end="", flush=True
+    )
+
+
+def count_lines(path):
+    """Подсчёт строк в файле (один проход)."""
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return sum(1 for _ in f)
 
 
 # ---------- КЭШ ПО ДАТАМ ----------
@@ -181,7 +225,7 @@ def signal_to_dict(sig):
 
 
 # ---------- ПРОГОН ПО ДНЮ (С ПРОГРЕСС-БАРОМ) ----------
-def run_detectors_on_day(day_str, settings):
+def run_detectors_on_day(day_str, settings, total_lines):
     """Гонит детекторы по ленте за один день. Возвращает список dict."""
     signals = []
     day_dt = datetime.strptime(day_str, "%Y-%m-%d").date()
@@ -193,21 +237,23 @@ def run_detectors_on_day(day_str, settings):
     skipped_sym = 0
     skipped_qty = 0
 
-    print(
-        f"[ab_compare]   читаю ленту за {day_str}...", flush=True
-    )
+    print(f"[ab_compare]   читаю ленту за {day_str}...", flush=True)
+    start_time = time.time()
+    last_print_time = start_time
+    
     with open(TAPE_PATH, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             lines_total += 1
 
-            # ПРОГРЕСС-БАР каждые 100K строк
-            if lines_total % 100_000 == 0:
-                print(
-                    f"[ab_compare]   {day_str}: {lines_total:,} строк, "
-                    f"скормлено={fed:,}, сигналов={len(signals)} "
-                    f"(пропущено: sym={skipped_sym}, дата={skipped_date}, qty={skipped_qty})",
-                    flush=True,
+            # ПРОГРЕСС-БАР каждые 100K строк или каждые 0.5с
+            current_time = time.time()
+            if lines_total % 100_000 == 0 or current_time - last_print_time >= 0.5:
+                _print_progress(
+                    f"[ab_compare] {day_str}",
+                    lines_total, total_lines, start_time,
+                    f" | скормлено={fed:,} сигн={len(signals)}"
                 )
+                last_print_time = current_time
 
             parts = line.strip().split(";")
             if len(parts) < 5:
@@ -260,13 +306,8 @@ def run_detectors_on_day(day_str, settings):
                     signals.append(signal_to_dict(sig))
             fed += 1
 
-    # Дожимаем оставшиеся серии
-    if day_detectors is not None:
-        for dets in day_detectors.values():
-            for det in dets:
-                for sig in det.flush():
-                    signals.append(signal_to_dict(sig))
-
+    # Финальная строка прогресса
+    print()
     print(
         f"[ab_compare]   {day_str} ГОТОВО: строк={lines_total:,}, "
         f"скормлено={fed:,}, сигналов={len(signals)}",
@@ -387,6 +428,11 @@ def main():
             flush=True,
         )
 
+    # Подсчёт общего количества строк в ленте (для прогресс-бара)
+    print("[ab_compare] Подсчёт строк в ленте...", flush=True)
+    total_lines = count_lines(TAPE_PATH)
+    print(f"[ab_compare] Всего строк в ленте: {total_lines:,}", flush=True)
+
     # Прогон по датам с кэшем
     all_signals = []
     cached_count = 0
@@ -401,7 +447,7 @@ def main():
             cached_count += 1
         else:
             print(f"[ab_compare] === ПРОГОН за {day} ===", flush=True)
-            day_signals = run_detectors_on_day(day, settings)
+            day_signals = run_detectors_on_day(day, settings, total_lines)
             all_signals.extend(day_signals)
             save_cache(day, day_signals)
             print(
@@ -415,17 +461,22 @@ def main():
         flush=True,
     )
 
-    # Матчинг
+    # Матчинг с прогресс-баром
     tp_list, fn_list = [], []
     print(f"[ab_compare] Матчинг {len(refs)} эталонных записей...", flush=True)
+    start_time = time.time()
+    last_print_time = start_time
     for i, ref in enumerate(refs, 1):
-        if i % 50 == 0:
-            print(f"  матчинг: {i}/{len(refs)}", flush=True)
+        current_time = time.time()
+        if i % 10 == 0 or current_time - last_print_time >= 0.5:
+            _print_progress("[ab_compare] Матчинг", i, len(refs), start_time)
+            last_print_time = current_time
         sig = match_signal_to_ref(ref, all_signals)
         if sig:
             tp_list.append((ref, sig))
         else:
             fn_list.append(ref)
+    print()  # перевод строки после прогресс-бара
 
     # FP (реальные) vs UNVERIFIED: наши сигналы без пары в эталоне.
     # Реальный FP = в окне жизни серии ЕСТЬ момент скриншота конкурента
