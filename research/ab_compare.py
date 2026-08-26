@@ -7,6 +7,9 @@
     python research/ab_compare.py              # использует кэш для старых дат
     python research/ab_compare.py --recalc     # полный пересчёт всех дат
 
+ЗАПУСКАТЬ БЕЗ ПЕРЕНАПРАВЛЕНИЯ ("> file"). Прогресс-бар виден в терминале,
+а полный лог скрипт САМ пишет в output/ab_compare_log_<время>.txt (UTF-8).
+
 Кэш по датам (output/ab_compare_cache_<дата>.json):
 - результат прогона по дате сохраняется и переиспользуется
 - старые даты (20.08, 21.08) берутся из кэша мгновенно
@@ -28,14 +31,11 @@
 
 ПРОГРЕСС-БАР (2026-08-26): визуальная шкала с процентами, скоростью
 и ETA для всех длинных операций (прогон по ленте, матчинг).
+Только ASCII-символы (# и .) — не ломаются ни в какой кодировке.
 
-UTF-8 FIX (2026-08-26): принудительный UTF-8 для stdout — иначе
-PowerShell при перенаправлении ">" использует cp1251 и символы
-прогресс-бара (█░) падают с UnicodeEncodeError.
-
-ПРОГРЕСС-БАР v2 (2026-08-26): авто-определение режима — терминал или
-перенаправление в файл. В терминале \r обновляет строку на месте.
-В файле каждая строка на новой линии с временной меткой [HH:MM:SS].
+ЛОГ-ФАЙЛ (2026-08-26): скрипт сам дублирует весь вывод в
+output/ab_compare_log_<время>.txt в UTF-8 (класс _TeeStream), минуя
+перекодировку PowerShell. Перенаправление ">" больше не нужно.
 """
 import bisect
 import json
@@ -71,35 +71,64 @@ SIG_RE = re.compile(
 )
 
 
+# ---------- ЛОГ-ФАЙЛ (2026-08-26) ----------
+class _TeeStream:
+    """Дублирует вывод: терминал + лог-файл (UTF-8)."""
+
+    def __init__(self, terminal, logfile):
+        self._terminal = terminal
+        self._logfile = logfile
+
+    def write(self, s):
+        try:
+            self._terminal.write(s)
+        except Exception:
+            pass
+        self._logfile.write(s)
+
+    def flush(self):
+        try:
+            self._terminal.flush()
+        except Exception:
+            pass
+        self._logfile.flush()
+
+    def isatty(self):
+        return False
+
+    def reconfigure(self, **kwargs):
+        pass
+
+
 # ---------- ПРОГРЕСС-БАР (2026-08-26) ----------
 def _format_eta(seconds):
     """Форматирует секунды в человекочитаемый вид."""
     if seconds < 60:
-        return f"{seconds:.0f}с"
+        return f"{seconds:.0f}s"
     if seconds < 3600:
-        return f"{seconds/60:.1f}мин"
-    return f"{seconds/3600:.1f}ч"
+        return f"{seconds/60:.1f}min"
+    return f"{seconds/3600:.1f}h"
 
 
 def _progress_bar(current, total, width=30):
-    """ASCII прогресс-бар: [██████░░░░] 60.0%."""
+    """ASCII прогресс-бар: [######......] 60.0% (только ASCII)."""
     if total <= 0:
         return f"[{'?' * width}]"
     pct = current / total
     filled = int(width * pct)
-    bar = "█" * filled + "░" * (width - filled)
+    bar = "#" * filled + "." * (width - filled)
     return f"[{bar}] {pct*100:5.1f}%"
 
 
 def _print_progress(prefix, current, total, start_time, extra=""):
     """Печатает строку прогресса с процентами, скоростью и ETA.
-    В терминале — обновляет строку на месте (\r).
+    В терминале — обновляет строку на месте (\\r).
     В файле — каждая строка на новой линии с временной меткой [HH:MM:SS]."""
     elapsed = time.time() - start_time
     speed = current / max(elapsed, 0.001)
     remaining = (total - current) / max(speed, 1) if total > 0 else 0
     bar = _progress_bar(current, total)
-    speed_str = f"{speed/1000:.0f}K/с" if speed > 1000 else f"{speed:.0f}/с"
+    speed_str = f"{speed/1000:.0f}K/s" if speed > 1000 else f"{speed:.0f}/s"
     line = (
         f"{prefix} {bar} {current:,}/{total:,} | {speed_str} | "
         f"ETA {_format_eta(remaining)}{extra}"
@@ -262,7 +291,7 @@ def run_detectors_on_day(day_str, settings, total_lines):
     # В режиме файла — печатаем реже (каждые 5с), чтобы не засорять файл
     print_interval = 5.0 if not _IS_TTY else 0.5
     print_step = 500_000 if not _IS_TTY else 100_000
-    
+
     with open(TAPE_PATH, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             lines_total += 1
@@ -273,7 +302,7 @@ def run_detectors_on_day(day_str, settings, total_lines):
                 _print_progress(
                     f"[ab_compare] {day_str}",
                     lines_total, total_lines, start_time,
-                    f" | скормлено={fed:,} сигн={len(signals)}"
+                    f" | fed={fed:,} sigs={len(signals)}"
                 )
                 last_print_time = current_time
 
@@ -414,22 +443,8 @@ def diagnose_fn(ref, signals, top_n=5):
     return lines
 
 
-# ---------- MAIN ----------
-def main():
-    # UTF-8 FIX (2026-08-26): принудительный UTF-8 для stdout.
-    # Без этого PowerShell при перенаправлении ">" использует cp1251
-    # и символы прогресс-бара (█░) падают с UnicodeEncodeError.
-    if hasattr(sys.stdout, "reconfigure"):
-        sys.stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
-
-    # Сообщение о режиме (терминал vs файл)
-    if _IS_TTY:
-        print("[ab_compare] Режим: терминал (прогресс обновляется на месте)", flush=True)
-    else:
-        print("[ab_compare] Режим: перенаправление в файл (прогресс построчно)", flush=True)
-
+# ---------- ОСНОВНАЯ ЛОГИКА ----------
+def _run():
     recalc_all = "--recalc" in sys.argv
 
     settings = load_settings()
@@ -582,6 +597,31 @@ def main():
     print(flush=True)
 
     print("[ab_compare] Готово.", flush=True)
+
+
+# ---------- MAIN ----------
+def main():
+    orig_stdout = sys.stdout
+    # UTF-8 для терминала (VSCode корректно показывает)
+    if hasattr(orig_stdout, "reconfigure"):
+        orig_stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
+    # Лог-файл в UTF-8 (скрипт пишет сам, минуя перекодировку PowerShell)
+    log_path = CACHE_DIR / f"ab_compare_log_{datetime.now(MSK).strftime('%Y-%m-%d_%H-%M-%S')}.txt"
+    CACHE_DIR.mkdir(exist_ok=True)
+    log_file = open(log_path, "w", encoding="utf-8")
+    sys.stdout = _TeeStream(orig_stdout, log_file)
+
+    try:
+        _run()
+    finally:
+        sys.stdout = orig_stdout
+        log_file.close()
+
+    orig_stdout.write(f"[ab_compare] Полный лог сохранён: {log_path}\n")
+    orig_stdout.flush()
 
 
 if __name__ == "__main__":
