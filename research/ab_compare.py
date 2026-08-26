@@ -28,6 +28,10 @@
 
 ПРОГРЕСС-БАР (2026-08-26): визуальная шкала с процентами, скоростью
 и ETA для всех длинных операций (прогон по ленте, матчинг).
+
+UTF-8 FIX (2026-08-26): принудительный UTF-8 для stdout — иначе
+PowerShell при перенаправлении ">" использует cp1251 и символы
+прогресс-бара (█░) падают с UnicodeEncodeError.
 """
 import bisect
 import json
@@ -393,6 +397,14 @@ def diagnose_fn(ref, signals, top_n=5):
 
 # ---------- MAIN ----------
 def main():
+    # UTF-8 FIX (2026-08-26): принудительный UTF-8 для stdout.
+    # Без этого PowerShell при перенаправлении ">" использует cp1251
+    # и символы прогресс-бара (█░) падают с UnicodeEncodeError.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8")
+
     recalc_all = "--recalc" in sys.argv
 
     settings = load_settings()
