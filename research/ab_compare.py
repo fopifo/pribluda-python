@@ -19,7 +19,14 @@
     ticker_settings.json           — настройки тикеров
 
 Печатает таблицу TP/FN/FP и ДИАГНОСТИКУ первых 5 FN.
+
+ФИКС МЕТРИКИ FP (2026-08-25, по ревью): FP считается ТОЛЬКО если в окне
+жизни серии есть момент скриншота конкурента (конкурент смотрел на этот
+тикер и не увидел наш робот / увидел другого). Если скриншотов в окне
+нет — сигнал UNVERIFIED (не с чем сравнивать) и в FP не попадает.
+Без этого FP был мусором: считал ВСЕ наши сигналы без пары за все дни.
 """
+import bisect
 import json
 import re
 import sys
@@ -95,6 +102,40 @@ def load_ref():
             except Exception:
                 continue
     return refs
+
+
+def build_shots_by_date(refs):
+    """Моменты скриншотов конкурента по датам (timestamp эталона = момент
+    скриншота). Несколько записей с одним timestamp = один скриншот."""
+    shots = {}
+    for r in refs:
+        ts_str = r.get("timestamp", "")
+        try:
+            ts = datetime.fromisoformat(ts_str).timestamp()
+        except (ValueError, TypeError):
+            continue
+        day = datetime.fromtimestamp(ts, tz=MSK).date().isoformat()
+        shots.setdefault(day, set()).add(ts)
+    return {day: sorted(s) for day, s in shots.items()}
+
+
+def has_screenshot_in_window(sig, shots_by_date):
+    """Есть ли момент скриншота конкурента ВНУТРИ жизни нашей серии
+    [start, end + REF_AFTER_END_SEC]. Если да — конкурент смотрел на этот
+    тикер и не увидел наш робот (или увидел другого) => настоящий FP.
+    Если скриншотов в окне нет — сигнал UNVERIFIED (не с чем сравнивать)."""
+    start = sig.get("start_ts")
+    end = sig.get("end_ts")
+    if start is None or end is None:
+        return False
+    day = datetime.fromtimestamp(start, tz=MSK).date().isoformat()
+    shots = shots_by_date.get(day)
+    if not shots:
+        return False
+    lo = start
+    hi = end + REF_AFTER_END_SEC
+    i = bisect.bisect_left(shots, lo)
+    return i < len(shots) and shots[i] <= hi
 
 
 def parse_signal_line(line):
@@ -338,6 +379,14 @@ def main():
         print("[ab_compare] ВНИМАНИЕ: ни одной даты в эталоне — прогон не имеет смысла.", flush=True)
         return
 
+    # Моменты скриншотов конкурента по датам (для классификации FP)
+    shots_by_date = build_shots_by_date(refs)
+    for day in dates:
+        print(
+            f"[ab_compare]   {day}: скриншотов={len(shots_by_date.get(day, []))}",
+            flush=True,
+        )
+
     # Прогон по датам с кэшем
     all_signals = []
     cached_count = 0
@@ -378,11 +427,21 @@ def main():
         else:
             fn_list.append(ref)
 
-    # FP: наши сигналы без пары
+    # FP (реальные) vs UNVERIFIED: наши сигналы без пары в эталоне.
+    # Реальный FP = в окне жизни серии ЕСТЬ момент скриншота конкурента
+    # (конкурент смотрел на тикер и не увидел наш робот / увидел другого).
+    # UNVERIFIED = скриншотов в окне нет, сравнивать не с чем.
     matched_signals = set()
     for ref, sig in tp_list:
         matched_signals.add(id(sig))
-    fp_list = [sig for sig in all_signals if id(sig) not in matched_signals]
+    fp_list, unverified_list = [], []
+    for sig in all_signals:
+        if id(sig) in matched_signals:
+            continue
+        if has_screenshot_in_window(sig, shots_by_date):
+            fp_list.append(sig)
+        else:
+            unverified_list.append(sig)
 
     print(flush=True)
     print("=" * 70)
@@ -391,7 +450,8 @@ def main():
     print(f"Эталон: {len(refs)} записей")
     print(f"TP (нашли):      {len(tp_list)}")
     print(f"FN (пропустили): {len(fn_list)}")
-    print(f"FP? (наши без пары): {len(fp_list)}")
+    print(f"FP (реальные, скриншот в окне): {len(fp_list)}")
+    print(f"UNVERIFIED (скриншота в окне нет): {len(unverified_list)}")
     print(flush=True)
 
     print("--- TP (эталон найден) ---")
@@ -421,7 +481,7 @@ def main():
             print(f"  {line}")
     print(flush=True)
 
-    print("--- FP? (наши сигналы без пары в эталоне, первые 30) ---")
+    print("--- FP (реальные, первые 30) ---")
     fp_sorted = sorted(fp_list, key=lambda s: -s["repeats"])
     for sig in fp_sorted[:30]:
         print(
