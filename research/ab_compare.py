@@ -32,6 +32,10 @@
 UTF-8 FIX (2026-08-26): принудительный UTF-8 для stdout — иначе
 PowerShell при перенаправлении ">" использует cp1251 и символы
 прогресс-бара (█░) падают с UnicodeEncodeError.
+
+ПРОГРЕСС-БАР v2 (2026-08-26): авто-определение режима — терминал или
+перенаправление в файл. В терминале \r обновляет строку на месте.
+В файле каждая строка на новой линии с временной меткой [HH:MM:SS].
 """
 import bisect
 import json
@@ -57,6 +61,9 @@ CACHE_DIR = BASE / "output"
 # Допуск: момент скриншота может быть до этого числа секунд ПОСЛЕ
 # последнего удара серии (серия ещё считается активной у конкурента).
 REF_AFTER_END_SEC = 600
+
+# Авто-определение режима вывода: терминал vs перенаправление в файл
+_IS_TTY = sys.stdout.isatty()
 
 SIG_RE = re.compile(
     r"^\[робот-интервал\]\s+(\S+)\s+(buy|sell)\s+qty=(\S+)\s+повторов=(\d+)\s+"
@@ -85,17 +92,25 @@ def _progress_bar(current, total, width=30):
 
 
 def _print_progress(prefix, current, total, start_time, extra=""):
-    """Печатает строку прогресса с процентами, скоростью и ETA."""
+    """Печатает строку прогресса с процентами, скоростью и ETA.
+    В терминале — обновляет строку на месте (\r).
+    В файле — каждая строка на новой линии с временной меткой [HH:MM:SS]."""
     elapsed = time.time() - start_time
     speed = current / max(elapsed, 0.001)
     remaining = (total - current) / max(speed, 1) if total > 0 else 0
     bar = _progress_bar(current, total)
     speed_str = f"{speed/1000:.0f}K/с" if speed > 1000 else f"{speed:.0f}/с"
-    print(
-        f"\r{prefix} {bar} {current:,}/{total:,} | {speed_str} | "
-        f"ETA {_format_eta(remaining)}{extra}",
-        end="", flush=True
+    line = (
+        f"{prefix} {bar} {current:,}/{total:,} | {speed_str} | "
+        f"ETA {_format_eta(remaining)}{extra}"
     )
+    if _IS_TTY:
+        # Терминал: обновить строку на месте
+        print(f"\r{line}", end="", flush=True)
+    else:
+        # Файл: каждая строка на новой линии с временной меткой
+        now_str = datetime.now(MSK).strftime("%H:%M:%S")
+        print(f"[{now_str}] {line}", flush=True)
 
 
 def count_lines(path):
@@ -244,14 +259,17 @@ def run_detectors_on_day(day_str, settings, total_lines):
     print(f"[ab_compare]   читаю ленту за {day_str}...", flush=True)
     start_time = time.time()
     last_print_time = start_time
+    # В режиме файла — печатаем реже (каждые 5с), чтобы не засорять файл
+    print_interval = 5.0 if not _IS_TTY else 0.5
+    print_step = 500_000 if not _IS_TTY else 100_000
     
     with open(TAPE_PATH, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             lines_total += 1
 
-            # ПРОГРЕСС-БАР каждые 100K строк или каждые 0.5с
+            # ПРОГРЕСС-БАР с учётом режима вывода
             current_time = time.time()
-            if lines_total % 100_000 == 0 or current_time - last_print_time >= 0.5:
+            if lines_total % print_step == 0 or current_time - last_print_time >= print_interval:
                 _print_progress(
                     f"[ab_compare] {day_str}",
                     lines_total, total_lines, start_time,
@@ -311,7 +329,8 @@ def run_detectors_on_day(day_str, settings, total_lines):
             fed += 1
 
     # Финальная строка прогресса
-    print()
+    if _IS_TTY:
+        print()  # перевод строки в терминале
     print(
         f"[ab_compare]   {day_str} ГОТОВО: строк={lines_total:,}, "
         f"скормлено={fed:,}, сигналов={len(signals)}",
@@ -405,6 +424,12 @@ def main():
     if hasattr(sys.stderr, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
 
+    # Сообщение о режиме (терминал vs файл)
+    if _IS_TTY:
+        print("[ab_compare] Режим: терминал (прогресс обновляется на месте)", flush=True)
+    else:
+        print("[ab_compare] Режим: перенаправление в файл (прогресс построчно)", flush=True)
+
     recalc_all = "--recalc" in sys.argv
 
     settings = load_settings()
@@ -413,7 +438,7 @@ def main():
     print(
         f"[ab_compare] Активных тикеров в настройках: {len(settings)}", flush=True
     )
-    print(f"[ab_compare] Режим: {'полный пересчёт' if recalc_all else 'кэш+новые даты'}", flush=True)
+    print(f"[ab_compare] Режим пересчёта: {'полный пересчёт' if recalc_all else 'кэш+новые даты'}", flush=True)
     print(flush=True)
 
     # Уникальные даты эталона
@@ -478,9 +503,11 @@ def main():
     print(f"[ab_compare] Матчинг {len(refs)} эталонных записей...", flush=True)
     start_time = time.time()
     last_print_time = start_time
+    # В режиме файла — печатаем реже (каждую секунду), чтобы не засорять
+    print_interval = 1.0 if not _IS_TTY else 0.5
     for i, ref in enumerate(refs, 1):
         current_time = time.time()
-        if i % 10 == 0 or current_time - last_print_time >= 0.5:
+        if i % 10 == 0 or current_time - last_print_time >= print_interval:
             _print_progress("[ab_compare] Матчинг", i, len(refs), start_time)
             last_print_time = current_time
         sig = match_signal_to_ref(ref, all_signals)
@@ -488,7 +515,8 @@ def main():
             tp_list.append((ref, sig))
         else:
             fn_list.append(ref)
-    print()  # перевод строки после прогресс-бара
+    if _IS_TTY:
+        print()  # перевод строки в терминале
 
     # FP (реальные) vs UNVERIFIED: наши сигналы без пары в эталоне.
     # Реальный FP = в окне жизни серии ЕСТЬ момент скриншота конкурента
