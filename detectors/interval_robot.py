@@ -16,6 +16,10 @@ v9: GRID LOCK — после подтверждения серия защёлк�
 любого тика k*база (k до max_interval/base). Пропуски не рвут серию.
 До подтверждения поведение как в v7/v8 (тесты и быстрые серии не тронуты).
 v9.1: время в _write_history явно в МСК (было голый datetime.now()).
+v10: ФИЛЬТР ДВОЙНЫХ УДАРОВ — если интервал между текущей сделкой и
+последним ударом найденной серии < min_double_hit_gap_sec (2.0с),
+считать это тем же ударом (шум, burst-sell), не обновлять серию.
+Корень проблемы CNRU: тройные удары с gap=0 ломают базу серии.
 """
 import json
 import logging
@@ -96,6 +100,8 @@ class IntervalRobotDetector(Detector):
         # v9: grid lock после подтверждения.
         self.grid_lock = settings.get("grid_lock", True)
         self.grid_tolerance_ms = settings.get("grid_tolerance_ms", 700)
+        # v10: фильтр двойных ударов (burst-sell, шум с gap<2с).
+        self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 2.0)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -109,7 +115,8 @@ class IntervalRobotDetector(Detector):
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
                   f"mult_max={self.interval_mult_max}, stable_qty={self.stable_qty_required}, "
                   f"min_display={self.min_display_repeats}, jitter_max={self.jitter_ratio_max}, "
-                  f"grid_lock={self.grid_lock}, grid_tol_ms={self.grid_tolerance_ms}")
+                  f"grid_lock={self.grid_lock}, grid_tol_ms={self.grid_tolerance_ms}, "
+                  f"min_double_hit_gap={self.min_double_hit_gap_sec}s")
 
     def drain_confirms(self):
         out = self._confirms
@@ -339,6 +346,11 @@ class IntervalRobotDetector(Detector):
         match = self._find_match(side, qty, ts)
         if match is not None:
             iv = ts - match.last_ts
+            # v10: фильтр двойных ударов (burst-sell, шум с gap<2с)
+            if iv < self.min_double_hit_gap_sec:
+                _log.info(f"[{self.symbol}] DOUBLE_HIT_SKIP: side={side}, qty={qty}, "
+                          f"interval={iv:.2f}s < {self.min_double_hit_gap_sec}s (noise)")
+                return signals
             ok, base = self._interval_fits(match, iv)
             if ok and base is not None:
                 match.base_interval = base
