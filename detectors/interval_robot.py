@@ -17,9 +17,10 @@ v9: GRID LOCK — после подтверждения серия защёлк�
 До подтверждения поведение как в v7/v8 (тесты и быстрые серии не тронуты).
 v9.1: время в _write_history явно в МСК (было голый datetime.now()).
 v10: ФИЛЬТР ДВОЙНЫХ УДАРОВ — если интервал между текущей сделкой и
-последним ударом найденной серии < min_double_hit_gap_sec (2.0с),
+последним ударом найденной серии < min_double_hit_gap_sec (1.0с),
 считать это тем же ударом (шум, burst-sell), не обновлять серию.
 Корень проблемы CNRU: тройные удары с gap=0 ломают базу серии.
+v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно, TP упал).
 """
 import json
 import logging
@@ -100,8 +101,9 @@ class IntervalRobotDetector(Detector):
         # v9: grid lock после подтверждения.
         self.grid_lock = settings.get("grid_lock", True)
         self.grid_tolerance_ms = settings.get("grid_tolerance_ms", 700)
-        # v10: фильтр двойных ударов (burst-sell, шум с gap<2с).
-        self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 2.0)
+        # v10: фильтр двойных ударов (burst-sell, шум с gap<1с).
+        # v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно).
+        self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 1.0)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -346,7 +348,8 @@ class IntervalRobotDetector(Detector):
         match = self._find_match(side, qty, ts)
         if match is not None:
             iv = ts - match.last_ts
-            # v10: фильтр двойных ударов (burst-sell, шум с gap<2с)
+            # v10: фильтр двойных ударов (burst-sell, шум с gap<1с)
+            # v10.1: порог 1.0с (было 2.0с, но TP упал)
             if iv < self.min_double_hit_gap_sec:
                 _log.info(f"[{self.symbol}] DOUBLE_HIT_SKIP: side={side}, qty={qty}, "
                           f"interval={iv:.2f}s < {self.min_double_hit_gap_sec}s (noise)")
