@@ -1,5 +1,4 @@
 .env
-ticker_settings.json
 data/
 output/
 dumps/
