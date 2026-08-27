@@ -7,41 +7,35 @@
     python research/ab_compare.py              # использует кэш для старых дат
     python research/ab_compare.py --recalc     # полный пересчёт всех дат
 
-ЗАПУСКАТЬ БЕЗ ПЕРЕНАПРАВЛЕНИЯ ("> file"). Прогресс-бар виден в терминале,
-а полный лог скрипт САМ пишет в output/ab_compare_log_<время>.txt (UTF-8).
-
 Кэш по датам (output/ab_compare_cache_<дата>.json):
 - результат прогона по дате сохраняется и переиспользуется
 - старые даты (20.08, 21.08) берутся из кэша мгновенно
 - прогоняется заново только новая дата (например 24.08)
 - --recalc — игнорировать кэш, пересчитать всё
 
+ИСПРАВЛЕНО (2026-08-26): FP раньше считал ВСЕ несматченные сигналы за все
+дни по всем тикерам как "ложные" — но эталон это разрозненные скриншоты
+конкурента, не сплошное покрытие дня. Подавляющее большинство "FP" были
+просто моментами/тикерами, которые никто не заскринил, а не настоящими
+ошибками детектора. Теперь FP делится на:
+  - "спорные" — тикер+сторона ЕСТЬ в эталоне за эти даты (конкурента по
+    этому тикеру/стороне точно смотрели), но именно эта серия не
+    совпала — это единственная категория, которую стоит разбирать как
+    потенциальный настоящий ложный сигнал.
+  - "тикер без стороны" — тикер в эталоне есть, но с другой стороной.
+  - "нет данных" — тикера вообще нет в эталоне ни разу за эти даты,
+    сравнивать не с чем, в счёт "ошибок" не идёт.
+
 Читает:
     data/competitor_history.jsonl  — эталон конкурента
     data/quik_trades.csv           — лента Quik
     ticker_settings.json           — настройки тикеров
 
-Печатает таблицу TP/FN/FP и ДИАГНОСТИКУ первых 5 FN.
-
-ФИКС МЕТРИКИ FP (2026-08-25, по ревью): FP считается ТОЛЬКО если в окне
-жизни серии есть момент скриншота конкурента (конкурент смотрел на этот
-тикер и не увидел наш робот / увидел другого). Если скриншотов в окне
-нет — сигнал UNVERIFIED (не с чем сравнивать) и в FP не попадает.
-Без этого FP был мусором: считал ВСЕ наши сигналы без пары за все дни.
-
-ПРОГРЕСС-БАР (2026-08-26): визуальная шкала с процентами, скоростью
-и ETA для всех длинных операций (прогон по ленте, матчинг).
-Только ASCII-символы (# и .) — не ломаются ни в какой кодировке.
-
-ЛОГ-ФАЙЛ (2026-08-26): скрипт сам дублирует весь вывод в
-output/ab_compare_log_<время>.txt в UTF-8 (класс _TeeStream), минуя
-перекодировку PowerShell. Перенаправление ">" больше не нужно.
+Печатает таблицу TP/FN/FP (с разбивкой) и ДИАГНОСТИКУ первых 5 FN.
 """
-import bisect
 import json
 import re
 import sys
-import time
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -62,90 +56,10 @@ CACHE_DIR = BASE / "output"
 # последнего удара серии (серия ещё считается активной у конкурента).
 REF_AFTER_END_SEC = 600
 
-# Авто-определение режима вывода: терминал vs перенаправление в файл
-_IS_TTY = sys.stdout.isatty()
-
 SIG_RE = re.compile(
     r"^\[робот-интервал\]\s+(\S+)\s+(buy|sell)\s+qty=(\S+)\s+повторов=(\d+)\s+"
     r"интервал~([\d.]+)с\s+джиттер=([\d.]+)мс\s+с\s+(\d{2}:\d{2}:\d{2})\s+по\s+(\d{2}:\d{2}:\d{2})"
 )
-
-
-# ---------- ЛОГ-ФАЙЛ (2026-08-26) ----------
-class _TeeStream:
-    """Дублирует вывод: терминал + лог-файл (UTF-8)."""
-
-    def __init__(self, terminal, logfile):
-        self._terminal = terminal
-        self._logfile = logfile
-
-    def write(self, s):
-        try:
-            self._terminal.write(s)
-        except Exception:
-            pass
-        self._logfile.write(s)
-
-    def flush(self):
-        try:
-            self._terminal.flush()
-        except Exception:
-            pass
-        self._logfile.flush()
-
-    def isatty(self):
-        return False
-
-    def reconfigure(self, **kwargs):
-        pass
-
-
-# ---------- ПРОГРЕСС-БАР (2026-08-26) ----------
-def _format_eta(seconds):
-    """Форматирует секунды в человекочитаемый вид."""
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        return f"{seconds/60:.1f}min"
-    return f"{seconds/3600:.1f}h"
-
-
-def _progress_bar(current, total, width=30):
-    """ASCII прогресс-бар: [######......] 60.0% (только ASCII)."""
-    if total <= 0:
-        return f"[{'?' * width}]"
-    pct = current / total
-    filled = int(width * pct)
-    bar = "#" * filled + "." * (width - filled)
-    return f"[{bar}] {pct*100:5.1f}%"
-
-
-def _print_progress(prefix, current, total, start_time, extra=""):
-    """Печатает строку прогресса с процентами, скоростью и ETA.
-    В терминале — обновляет строку на месте (\\r).
-    В файле — каждая строка на новой линии с временной меткой [HH:MM:SS]."""
-    elapsed = time.time() - start_time
-    speed = current / max(elapsed, 0.001)
-    remaining = (total - current) / max(speed, 1) if total > 0 else 0
-    bar = _progress_bar(current, total)
-    speed_str = f"{speed/1000:.0f}K/s" if speed > 1000 else f"{speed:.0f}/s"
-    line = (
-        f"{prefix} {bar} {current:,}/{total:,} | {speed_str} | "
-        f"ETA {_format_eta(remaining)}{extra}"
-    )
-    if _IS_TTY:
-        # Терминал: обновить строку на месте
-        print(f"\r{line}", end="", flush=True)
-    else:
-        # Файл: каждая строка на новой линии с временной меткой
-        now_str = datetime.now(MSK).strftime("%H:%M:%S")
-        print(f"[{now_str}] {line}", flush=True)
-
-
-def count_lines(path):
-    """Подсчёт строк в файле (один проход)."""
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        return sum(1 for _ in f)
 
 
 # ---------- КЭШ ПО ДАТАМ ----------
@@ -196,40 +110,6 @@ def load_ref():
     return refs
 
 
-def build_shots_by_date(refs):
-    """Моменты скриншотов конкурента по датам (timestamp эталона = момент
-    скриншота). Несколько записей с одним timestamp = один скриншот."""
-    shots = {}
-    for r in refs:
-        ts_str = r.get("timestamp", "")
-        try:
-            ts = datetime.fromisoformat(ts_str).timestamp()
-        except (ValueError, TypeError):
-            continue
-        day = datetime.fromtimestamp(ts, tz=MSK).date().isoformat()
-        shots.setdefault(day, set()).add(ts)
-    return {day: sorted(s) for day, s in shots.items()}
-
-
-def has_screenshot_in_window(sig, shots_by_date):
-    """Есть ли момент скриншота конкурента ВНУТРИ жизни нашей серии
-    [start, end + REF_AFTER_END_SEC]. Если да — конкурент смотрел на этот
-    тикер и не увидел наш робот (или увидел другого) => настоящий FP.
-    Если скриншотов в окне нет — сигнал UNVERIFIED (не с чем сравнивать)."""
-    start = sig.get("start_ts")
-    end = sig.get("end_ts")
-    if start is None or end is None:
-        return False
-    day = datetime.fromtimestamp(start, tz=MSK).date().isoformat()
-    shots = shots_by_date.get(day)
-    if not shots:
-        return False
-    lo = start
-    hi = end + REF_AFTER_END_SEC
-    i = bisect.bisect_left(shots, lo)
-    return i < len(shots) and shots[i] <= hi
-
-
 def parse_signal_line(line):
     m = SIG_RE.match(line.strip())
     if not m:
@@ -273,7 +153,7 @@ def signal_to_dict(sig):
 
 
 # ---------- ПРОГОН ПО ДНЮ (С ПРОГРЕСС-БАРОМ) ----------
-def run_detectors_on_day(day_str, settings, total_lines):
+def run_detectors_on_day(day_str, settings):
     """Гонит детекторы по ленте за один день. Возвращает список dict."""
     signals = []
     day_dt = datetime.strptime(day_str, "%Y-%m-%d").date()
@@ -285,26 +165,21 @@ def run_detectors_on_day(day_str, settings, total_lines):
     skipped_sym = 0
     skipped_qty = 0
 
-    print(f"[ab_compare]   читаю ленту за {day_str}...", flush=True)
-    start_time = time.time()
-    last_print_time = start_time
-    # В режиме файла — печатаем реже (каждые 5с), чтобы не засорять файл
-    print_interval = 5.0 if not _IS_TTY else 0.5
-    print_step = 500_000 if not _IS_TTY else 100_000
-
+    print(
+        f"[ab_compare]   читаю ленту за {day_str}...", flush=True
+    )
     with open(TAPE_PATH, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
             lines_total += 1
 
-            # ПРОГРЕСС-БАР с учётом режима вывода
-            current_time = time.time()
-            if lines_total % print_step == 0 or current_time - last_print_time >= print_interval:
-                _print_progress(
-                    f"[ab_compare] {day_str}",
-                    lines_total, total_lines, start_time,
-                    f" | fed={fed:,} sigs={len(signals)}"
+            # ПРОГРЕСС-БАР каждые 100K строк
+            if lines_total % 100_000 == 0:
+                print(
+                    f"[ab_compare]   {day_str}: {lines_total:,} строк, "
+                    f"скормлено={fed:,}, сигналов={len(signals)} "
+                    f"(пропущено: sym={skipped_sym}, дата={skipped_date}, qty={skipped_qty})",
+                    flush=True,
                 )
-                last_print_time = current_time
 
             parts = line.strip().split(";")
             if len(parts) < 5:
@@ -357,9 +232,13 @@ def run_detectors_on_day(day_str, settings, total_lines):
                     signals.append(signal_to_dict(sig))
             fed += 1
 
-    # Финальная строка прогресса
-    if _IS_TTY:
-        print()  # перевод строки в терминале
+    # Дожимаем оставшиеся серии
+    if day_detectors is not None:
+        for dets in day_detectors.values():
+            for det in dets:
+                for sig in det.flush():
+                    signals.append(signal_to_dict(sig))
+
     print(
         f"[ab_compare]   {day_str} ГОТОВО: строк={lines_total:,}, "
         f"скормлено={fed:,}, сигналов={len(signals)}",
@@ -443,8 +322,22 @@ def diagnose_fn(ref, signals, top_n=5):
     return lines
 
 
-# ---------- ОСНОВНАЯ ЛОГИКА ----------
-def _run():
+def classify_fp(sig, ref_symbols_side, ref_symbols_all):
+    """Раскладывает несматченный сигнал по достоверности как "ошибка":
+    - "спорный"       — тикер+сторона точно встречались в эталоне
+    - "тикер_без_стороны" — тикер в эталоне есть, но с другой стороной
+    - "нет_данных"    — тикера в эталоне нет вообще, сравнивать не с чем
+    """
+    key = (sig["symbol"], sig["side"])
+    if key in ref_symbols_side:
+        return "спорный"
+    if sig["symbol"] in ref_symbols_all:
+        return "тикер_без_стороны"
+    return "нет_данных"
+
+
+# ---------- MAIN ----------
+def main():
     recalc_all = "--recalc" in sys.argv
 
     settings = load_settings()
@@ -453,7 +346,7 @@ def _run():
     print(
         f"[ab_compare] Активных тикеров в настройках: {len(settings)}", flush=True
     )
-    print(f"[ab_compare] Режим пересчёта: {'полный пересчёт' if recalc_all else 'кэш+новые даты'}", flush=True)
+    print(f"[ab_compare] Режим: {'полный пересчёт' if recalc_all else 'кэш+новые даты'}", flush=True)
     print(flush=True)
 
     # Уникальные даты эталона
@@ -472,19 +365,6 @@ def _run():
         print("[ab_compare] ВНИМАНИЕ: ни одной даты в эталоне — прогон не имеет смысла.", flush=True)
         return
 
-    # Моменты скриншотов конкурента по датам (для классификации FP)
-    shots_by_date = build_shots_by_date(refs)
-    for day in dates:
-        print(
-            f"[ab_compare]   {day}: скриншотов={len(shots_by_date.get(day, []))}",
-            flush=True,
-        )
-
-    # Подсчёт общего количества строк в ленте (для прогресс-бара)
-    print("[ab_compare] Подсчёт строк в ленте...", flush=True)
-    total_lines = count_lines(TAPE_PATH)
-    print(f"[ab_compare] Всего строк в ленте: {total_lines:,}", flush=True)
-
     # Прогон по датам с кэшем
     all_signals = []
     cached_count = 0
@@ -499,7 +379,7 @@ def _run():
             cached_count += 1
         else:
             print(f"[ab_compare] === ПРОГОН за {day} ===", flush=True)
-            day_signals = run_detectors_on_day(day, settings, total_lines)
+            day_signals = run_detectors_on_day(day, settings)
             all_signals.extend(day_signals)
             save_cache(day, day_signals)
             print(
@@ -513,41 +393,36 @@ def _run():
         flush=True,
     )
 
-    # Матчинг с прогресс-баром
+    # Матчинг
     tp_list, fn_list = [], []
     print(f"[ab_compare] Матчинг {len(refs)} эталонных записей...", flush=True)
-    start_time = time.time()
-    last_print_time = start_time
-    # В режиме файла — печатаем реже (каждую секунду), чтобы не засорять
-    print_interval = 1.0 if not _IS_TTY else 0.5
     for i, ref in enumerate(refs, 1):
-        current_time = time.time()
-        if i % 10 == 0 or current_time - last_print_time >= print_interval:
-            _print_progress("[ab_compare] Матчинг", i, len(refs), start_time)
-            last_print_time = current_time
+        if i % 50 == 0:
+            print(f"  матчинг: {i}/{len(refs)}", flush=True)
         sig = match_signal_to_ref(ref, all_signals)
         if sig:
             tp_list.append((ref, sig))
         else:
             fn_list.append(ref)
-    if _IS_TTY:
-        print()  # перевод строки в терминале
 
-    # FP (реальные) vs UNVERIFIED: наши сигналы без пары в эталоне.
-    # Реальный FP = в окне жизни серии ЕСТЬ момент скриншота конкурента
-    # (конкурент смотрел на тикер и не увидел наш робот / увидел другого).
-    # UNVERIFIED = скриншотов в окне нет, сравнивать не с чем.
+    # FP: наши сигналы без пары
     matched_signals = set()
     for ref, sig in tp_list:
         matched_signals.add(id(sig))
-    fp_list, unverified_list = [], []
-    for sig in all_signals:
-        if id(sig) in matched_signals:
-            continue
-        if has_screenshot_in_window(sig, shots_by_date):
-            fp_list.append(sig)
+    fp_list = [sig for sig in all_signals if id(sig) not in matched_signals]
+
+    # Разбивка FP по достоверности (см. classify_fp)
+    ref_symbols_side = {(r.get("symbol"), r.get("side")) for r in refs}
+    ref_symbols_all = {r.get("symbol") for r in refs}
+    fp_disputed, fp_wrong_side, fp_no_data = [], [], []
+    for sig in fp_list:
+        cat = classify_fp(sig, ref_symbols_side, ref_symbols_all)
+        if cat == "спорный":
+            fp_disputed.append(sig)
+        elif cat == "тикер_без_стороны":
+            fp_wrong_side.append(sig)
         else:
-            unverified_list.append(sig)
+            fp_no_data.append(sig)
 
     print(flush=True)
     print("=" * 70)
@@ -556,8 +431,10 @@ def _run():
     print(f"Эталон: {len(refs)} записей")
     print(f"TP (нашли):      {len(tp_list)}")
     print(f"FN (пропустили): {len(fn_list)}")
-    print(f"FP (реальные, скриншот в окне): {len(fp_list)}")
-    print(f"UNVERIFIED (скриншота в окне нет): {len(unverified_list)}")
+    print(f"FP всего (наши без пары): {len(fp_list)}")
+    print(f"  из них СПОРНЫЕ (тикер+сторона были в эталоне — разбирать в первую очередь): {len(fp_disputed)}")
+    print(f"  из них тикер в эталоне, но другая сторона: {len(fp_wrong_side)}")
+    print(f"  из них НЕТ ДАННЫХ (тикера в эталоне нет вообще — не в счёт): {len(fp_no_data)}")
     print(flush=True)
 
     print("--- TP (эталон найден) ---")
@@ -587,9 +464,9 @@ def _run():
             print(f"  {line}")
     print(flush=True)
 
-    print("--- FP (реальные, первые 30) ---")
-    fp_sorted = sorted(fp_list, key=lambda s: -s["repeats"])
-    for sig in fp_sorted[:30]:
+    print("--- FP СПОРНЫЕ (тикер+сторона были в эталоне, но не эта серия — разбирать в первую очередь) ---")
+    fp_disputed_sorted = sorted(fp_disputed, key=lambda s: -s["repeats"])
+    for sig in fp_disputed_sorted[:30]:
         print(
             f"  {sig['symbol']:6} {sig['side']:4} qty={sig['qty_min']}-{sig['qty_max']} "
             f"повт={sig['repeats']:>3} int={sig['interval']:.1f} jit={sig['jitter']:.0f}мс"
@@ -597,31 +474,6 @@ def _run():
     print(flush=True)
 
     print("[ab_compare] Готово.", flush=True)
-
-
-# ---------- MAIN ----------
-def main():
-    orig_stdout = sys.stdout
-    # UTF-8 для терминала (VSCode корректно показывает)
-    if hasattr(orig_stdout, "reconfigure"):
-        orig_stdout.reconfigure(encoding="utf-8")
-    if hasattr(sys.stderr, "reconfigure"):
-        sys.stderr.reconfigure(encoding="utf-8")
-
-    # Лог-файл в UTF-8 (скрипт пишет сам, минуя перекодировку PowerShell)
-    log_path = CACHE_DIR / f"ab_compare_log_{datetime.now(MSK).strftime('%Y-%m-%d_%H-%M-%S')}.txt"
-    CACHE_DIR.mkdir(exist_ok=True)
-    log_file = open(log_path, "w", encoding="utf-8")
-    sys.stdout = _TeeStream(orig_stdout, log_file)
-
-    try:
-        _run()
-    finally:
-        sys.stdout = orig_stdout
-        log_file.close()
-
-    orig_stdout.write(f"[ab_compare] Полный лог сохранён: {log_path}\n")
-    orig_stdout.flush()
 
 
 if __name__ == "__main__":
