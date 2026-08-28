@@ -67,7 +67,7 @@
   },
   "BANE": {
     "active": true,
-    "min_qty": 20,
+    "min_qty": 4,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -89,7 +89,7 @@
   },
   "BSPB": {
     "active": true,
-    "min_qty": 10,
+    "min_qty": 1,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -144,7 +144,7 @@
   },
   "DOMRF": {
     "active": true,
-    "min_qty": 20,
+    "min_qty": 9,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -254,7 +254,7 @@
   },
   "HEAD": {
     "active": true,
-    "min_qty": 17,
+    "min_qty": 2,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -309,7 +309,7 @@
   },
   "LENT": {
     "active": true,
-    "min_qty": 20,
+    "min_qty": 7,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -364,7 +364,7 @@
   },
   "MGNT": {
     "active": true,
-    "min_qty": 42,
+    "min_qty": 4,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -496,7 +496,7 @@
   },
   "PHOR": {
     "active": true,
-    "min_qty": 8,
+    "min_qty": 1,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -507,7 +507,7 @@
   },
   "PIKK": {
     "active": true,
-    "min_qty": 36,
+    "min_qty": 25,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -530,7 +530,7 @@
   },
   "POSI": {
     "active": true,
-    "min_qty": 44,
+    "min_qty": 7,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -707,7 +707,7 @@
   },
   "TATNP": {
     "active": true,
-    "min_qty": 45,
+    "min_qty": 12,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -773,7 +773,7 @@
   },
   "UGLD": {
     "active": true,
-    "min_qty": 43,
+    "min_qty": 17,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -828,7 +828,7 @@
   },
   "X5": {
     "active": true,
-    "min_qty": 25,
+    "min_qty": 8,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
