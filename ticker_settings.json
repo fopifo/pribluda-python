@@ -67,7 +67,7 @@
   },
   "BANE": {
     "active": true,
-    "min_qty": 4,
+    "min_qty": 20,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -496,7 +496,7 @@
   },
   "PHOR": {
     "active": true,
-    "min_qty": 1,
+    "min_qty": 8,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
