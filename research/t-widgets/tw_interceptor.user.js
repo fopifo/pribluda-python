@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         T-Widgets Robots Interceptor
 // @namespace    pribluda
-// @version      1.0
-// @description  Перехватывает SignalR-событие OnRobots2 расширения T-Widgets и шлёт на локальный сервер приблуды
+// @version      1.1
+// @description  Перехватывает SignalR-событие OnRobots2 и шлёт на локальный сервер
 // @match        https://www.tbank.ru/terminal/*
 // @match        https://www.tbank.ru/terminal-beta/*
+// @match        https://www.tinkoff.ru/terminal/*
+// @match        https://www.tinkoff.ru/terminal-beta/*
 // @run-at       document-start
 // @grant        none
 // ==/UserScript==
@@ -13,20 +15,24 @@
     'use strict';
 
     const SERVER = 'http://127.0.0.1:8765/robots';
-    const RS = '\u001e'; // разделитель кадров SignalR
+    const RS = '\u001e'; // RecordSeparator SignalR
 
     const OrigWS = window.WebSocket;
     if (!OrigWS) return;
 
     function send(payload) {
-        const body = JSON.stringify({ robots: payload.robots });
-        fetch(SERVER, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: body,
-            keepalive: true
-        }).catch(function () { /* сервер не поднят — молча пропускаем */ });
-        console.debug('[tw-intercept] OnRobots2:', (payload.robots || []).length, 'robots');
+        try {
+            const body = JSON.stringify({ robots: payload.robots || [], wc: payload.wc });
+            fetch(SERVER, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: body,
+                keepalive: true
+            }).catch(function () { /* сервер не поднят — молча пропускаем */ });
+            console.debug('[tw-intercept] OnRobots2:', (payload.robots || []).length, 'robots');
+        } catch (e) {
+            console.error('[tw-intercept] send error', e);
+        }
     }
 
     function handleFrame(text) {
@@ -40,9 +46,10 @@
             const target = String(msg.target || '').toLowerCase();
             if (target !== 'onrobots2') continue;
             const args = msg.arguments || [];
+            // args[0] = subscription info, args[1] = data payload
             const payload = args.length > 1 ? args[1] : args[0];
             if (!payload || !Array.isArray(payload.robots)) continue;
-            try { send(payload); } catch (e) { /* никогда не ломаем страницу */ }
+            send(payload);
         }
     }
 
@@ -55,7 +62,8 @@
         });
         return ws;
     };
-    // наследуем прототип и статику, чтобы SignalR-клиент работал как с родным классом
+    
+    // Наследуем прототип и статику, чтобы SignalR-клиент работал как с родным классом
     window.WebSocket.prototype = OrigWS.prototype;
     Object.setPrototypeOf(window.WebSocket, OrigWS);
     ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'].forEach(function (k) {
