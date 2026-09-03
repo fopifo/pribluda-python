@@ -199,7 +199,7 @@
   },
   "FLOT": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 14,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -696,7 +696,7 @@
   },
   "SVCB": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 11,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -740,7 +740,7 @@
   },
   "TRMK": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 15,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -795,7 +795,7 @@
   },
   "VKCO": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 11,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -828,7 +828,7 @@
   },
   "X5": {
     "active": true,
-    "min_qty": 8,
+    "min_qty": 5,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
