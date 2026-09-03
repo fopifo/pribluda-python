@@ -4,7 +4,7 @@
     window.__pribluda_tw_intercept = true;
 
     var SERVER = 'http://127.0.0.1:8765/robots';
-    var RS = '\u001e';
+    var RS = '\u001e'; // разделитель кадров SignalR
     var OrigWS = window.WebSocket;
     if (!OrigWS) return;
 
@@ -15,23 +15,24 @@
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ robots: payload.robots || [], wc: payload.wc }),
                 keepalive: true
-            }).catch(function () {});
-        } catch (e) {}
+            }).catch(function () { /* сервер не поднят — молча пропускаем */ });
+        } catch (e) { /* игнор */ }
     }
 
-    function handle(text) {
+    function handleFrame(text) {
         var frames = text.split(RS);
         for (var i = 0; i < frames.length; i++) {
-            var f = frames[i];
-            if (!f) continue;
+            var frame = frames[i];
+            if (!frame) continue;
             var msg;
-            try { msg = JSON.parse(f); } catch (e) { continue; }
-            if (!msg || msg.type !== 1) continue;
-            if (String(msg.target || '').toLowerCase() !== 'onrobots2') continue;
+            try { msg = JSON.parse(frame); } catch (e) { continue; }
+            if (!msg || msg.type !== 1) continue; // 1 = Invocation
+            var target = String(msg.target || '').toLowerCase();
+            if (target !== 'onrobots2') continue;
             var args = msg.arguments || [];
+            // args[0] = subscription info, args[1] = data payload
             var payload = args.length > 1 ? args[1] : args[0];
             if (!payload || !Array.isArray(payload.robots)) continue;
-            console.log('[pribluda] OnRobots2:', payload.robots.length, 'robots');
             send(payload);
         }
     }
@@ -39,16 +40,15 @@
     window.WebSocket = function (url, protocols) {
         var ws = (protocols !== undefined) ? new OrigWS(url, protocols) : new OrigWS(url);
         ws.addEventListener('message', function (ev) {
-            try { if (typeof ev.data === 'string') handle(ev.data); } catch (e) {}
+            try { if (typeof ev.data === 'string') handleFrame(ev.data); } catch (e) { /* игнор */ }
         });
         return ws;
     };
     window.WebSocket.prototype = OrigWS.prototype;
     Object.setPrototypeOf(window.WebSocket, OrigWS);
-    window.WebSocket.CONNECTING = OrigWS.CONNECTING;
-    window.WebSocket.OPEN = OrigWS.OPEN;
-    window.WebSocket.CLOSING = OrigWS.CLOSING;
-    window.WebSocket.CLOSED = OrigWS.CLOSED;
+    // КОНСТАНТЫ CONNECTING/OPEN/CLOSING/CLOSED НЕ присваиваем:
+    // они читаются по наследству от OrigWS через setPrototypeOf.
+    // Присвоение бросало TypeError (read only property) в strict mode.
 
     console.log('[pribluda] WebSocket patched, жду OnRobots2 ->', SERVER);
 })();
