@@ -21,6 +21,11 @@ v10: ФИЛЬТР ДВОЙНЫХ УДАРОВ — если интервал ме
 считать это тем же ударом (шум, burst-sell), не обновлять серию.
 Корень проблемы CNRU: тройные удары с gap=0 ломают базу серии.
 v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно, TP упал).
+v10.2: ИСТОРИЯ В НАТУРАЛЬНЫХ МС — в robots_history.jsonl дополнительно
+пишутся start_ms/end_ms/interval_ms (epoch ms, напрямую из ленты QUIK,
+без конверсий на стороне потребителей). Секундные поля (start_ts/end_ts/
+interval_avg) оставлены для старой статистики и GUI. Критерии детекции
+НЕ изменены.
 """
 import json
 import logging
@@ -47,13 +52,15 @@ class Candidate:
     __slots__ = ("qty_variants", "count", "start_ts", "last_ts",
                  "last_interval", "base_interval", "intervals", "warned",
                  "first_price", "last_price", "price_counts", "priced_hits",
-                 "sum_qty", "qty_counts")
+                 "sum_qty", "qty_counts", "start_ms", "last_ms")
 
-    def __init__(self, qty, ts, price=None):
+    def __init__(self, qty, ts, price=None, ts_ms=None):
         self.qty_variants = {qty}
         self.count = 1
         self.start_ts = ts
         self.last_ts = ts
+        self.start_ms = ts_ms
+        self.last_ms = ts_ms
         self.last_interval = None
         self.base_interval = None
         self.intervals = []
@@ -134,6 +141,9 @@ class IntervalRobotDetector(Detector):
                 "interval_avg": round((candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1), 2),
                 "repeats": candidate.count,
                 "start_ts": candidate.start_ts, "end_ts": candidate.last_ts,
+                # v10.2: натуральные мс, напрямую из ленты QUIK (без конверсий у потребителей)
+                "interval_ms": round((candidate.last_ms - candidate.start_ms) / max(candidate.count - 1, 1), 1),
+                "start_ms": candidate.start_ms, "end_ms": candidate.last_ms,
                 "jitter_ms": round(statistics.pstdev(candidate.intervals) * 1000, 1) if len(candidate.intervals) >= 2 else None,
                 "price_first": candidate.first_price, "price_last": candidate.last_price,
                 "preset": self.preset_name,
@@ -343,6 +353,7 @@ class IntervalRobotDetector(Detector):
             return []
         side = trade["side"]
         ts = trade["timestamp"] / 1000.0
+        ts_ms = trade["timestamp"]  # v10.2: натуральные мс из ленты
         price = trade.get("price")
         signals = self._prune_dead(side, ts)
         match = self._find_match(side, qty, ts)
@@ -364,6 +375,7 @@ class IntervalRobotDetector(Detector):
                 self._index_new_variant(side, match, qty)
             match.count += 1
             match.last_ts = ts
+            match.last_ms = ts_ms  # v10.2
             match.warned = False
             self._apply_price(match, qty, price)
             al = self.active.get(side, [])
@@ -386,7 +398,7 @@ class IntervalRobotDetector(Detector):
                     signals.append(sig)
                 self._unregister(side, match)
         else:
-            new_c = Candidate(qty, ts, price)
+            new_c = Candidate(qty, ts, price, ts_ms)
             self._register(side, new_c)
             _log.info(f"[{self.symbol}] NEW: side={side}, qty={qty}, price={price}")
             signals.extend(self._enforce_cap(side))
