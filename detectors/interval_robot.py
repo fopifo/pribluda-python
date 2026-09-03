@@ -114,6 +114,8 @@ class IntervalRobotDetector(Detector):
         # v10: фильтр двойных ударов (burst-sell, шум с gap<1с).
         # v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно).
         self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 1.0)
+        # v10.4: лог всех сделок только по флагу log_all_trades (иначе detector.log растёт лавинообразно)
+        self.log_all_trades = settings.get("log_all_trades", False)
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -359,7 +361,8 @@ class IntervalRobotDetector(Detector):
         
         # v10.3: логирование всех сделок (и ниже min_qty) для анализа FN
         passed_min_qty = qty >= self.min_qty
-        _log.info(f"[{self.symbol}] TRADE: qty={qty}, side={side}, ts={ts:.3f}, price={price}, passed_min_qty={passed_min_qty}, min_qty={self.min_qty}")
+        if self.log_all_trades:
+            _log.info(f"[{self.symbol}] TRADE: qty={qty}, side={side}, ts={ts:.3f}, price={price}, passed_min_qty={passed_min_qty}, min_qty={self.min_qty}")
         
         if not passed_min_qty:
             return []
