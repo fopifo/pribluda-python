@@ -2,7 +2,7 @@
 Приблуда на python — компаратор: наши роботы против роботов T-Widgets.
 
 Сравнивает:
-  - наш поток:      data/robots_history.jsonl (строки со start_ms/end_ms/interval_ms)
+  - наш поток:      data/robots_history.jsonl (или файл, указанный --ours)
   - эталон T-Widgets: data/tw_robots_YYYY-MM-DD.jsonl (перехватчик OnRobots2)
 
 !!! ЕДИНИЦЫ: ВСЁ ВНУТРИ — МИЛЛИСЕКУНДЫ (epoch ms) !!!
@@ -10,11 +10,9 @@
              Строки старого формата (без мс) пропускаются.
   T-Widgets: interval — уже мс; start/end — ISO-строки (Z) -> epoch ms.
 
-v2 (2026-09-03): FN разделены на "реальные" и "bursts":
-  - bursts: TW-роботы с interval < 2 с или count < 4 — всплески открытия/шум;
-    наш детектор их не видит по дизайну (min_interval=2.0, min_repeats=4),
-    в FN не идут, печатаются отдельной корзиной.
-  - FN печатаются с сортировкой по интервалу вниз (устойчивые роботы сверху).
+v2 (2026-09-03): bursts (int<2с или count<4) вне сравнения; FN по интервалу вниз.
+v2.1 (2026-09-03): --ours PATH — сравнивать с указанным файлом нашей истории
+             (для A/B на истории реплея data/replay_history.jsonl).
 
 Метрики:
   TP — робот есть и у нас, и у T-Widgets (совпали по критерию)
@@ -31,6 +29,7 @@ v2 (2026-09-03): FN разделены на "реальные" и "bursts":
 Использование (из корня проекта):
     python research/tw_compare.py             # последний tw_robots_*.jsonl
     python research/tw_compare.py 2026-09-03  # конкретная дата
+    python research/tw_compare.py --ours data/replay_history.jsonl
 
 Ничего не меняет — только читает и печатает.
 """
@@ -48,9 +47,9 @@ MSK = ZoneInfo("Europe/Moscow")
 TIME_TOL_MS = 120_000      # допуск по пересечению окон (2 мин), мс
 INT_LO, INT_HI = 0.7, 1.3  # допуск по отношению интервалов
 QTY_TOL = 0.5              # расширение диапазона лотов, 50%
-DETAIL_LIMIT = 30          # сколько строк деталей печатать на категорию
-MIN_INTERVAL_MS = 2000.0   # v2: TW-роботы быстрее этого — bursts (открытие/шум)
-MIN_COUNT = 4              # v2: минимум сделок у TW-робота
+DETAIL_LIMIT = 30          # строк деталей на категорию
+MIN_INTERVAL_MS = 2000.0   # TW-роботы быстрее этого — bursts (вне анализа)
+MIN_COUNT = 4              # минимум сделок у TW-робота
 
 
 def iso_to_ms(s):
@@ -142,7 +141,7 @@ def load_tw(path):
 
 
 def load_ours(path, date_str):
-    """robots_history.jsonl за дату (МСК) -> список записей в мс.
+    """наша история за дату (МСК) -> список записей в мс.
     Строки старого формата (без start_ms) пропускаются."""
     out = []
     legacy = 0
@@ -211,35 +210,43 @@ def fmt_ms(ms):
 
 
 def main():
-    arg = sys.argv[1] if len(sys.argv) > 1 else None
+    args = sys.argv[1:]
+    date_arg = None
+    ours_path = DATA / "robots_history.jsonl"
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a == "--ours":
+            i += 1
+            ours_path = Path(args[i])
+            if not ours_path.is_absolute():
+                ours_path = BASE / ours_path
+        elif not a.startswith("--"):
+            date_arg = a
+        i += 1
+
     files = sorted(DATA.glob("tw_robots_*.jsonl"))
-    if arg:
-        files = [f for f in files if arg in f.name]
+    if date_arg:
+        files = [f for f in files if date_arg in f.name]
     if not files:
         print("[tw_compare] Нет файлов data/tw_robots_*.jsonl")
         sys.exit(1)
     tw_file = files[-1]
     date_str = tw_file.name.replace("tw_robots_", "").replace(".jsonl", "")
     print(f"[tw_compare] эталон T-Widgets: {tw_file.name} (дата {date_str})")
+    print(f"[tw_compare] наша история: {ours_path}")
 
     tw = load_tw(tw_file)
-    print(f"[tw_compare] роботов T-Widgets (уник. ticker+side+id): {len(tw)}")
-
-    # v2: bursts — быстрее MIN_INTERVAL_MS или меньше MIN_COUNT сделок.
-    bursts = [
-        w for w in tw
-        if (w["interval_ms"] or 0) < MIN_INTERVAL_MS or (w["count"] or 0) < MIN_COUNT
-    ]
-    tw_real = [
+    real = [
         w for w in tw
         if (w["interval_ms"] or 0) >= MIN_INTERVAL_MS and (w["count"] or 0) >= MIN_COUNT
     ]
-    print(f"[tw_compare] из них bursts (int<2с или count<4, вне сравнения): {len(bursts)}")
-    print(f"[tw_compare] реальных TW-роботов для сравнения: {len(tw_real)}")
+    print(f"[tw_compare] роботов T-Widgets (уник. ticker+side+id): {len(tw)}")
+    print(f"[tw_compare] из них bursts (int<2с или count<4, вне сравнения): {len(tw) - len(real)}")
+    print(f"[tw_compare] реальных TW-роботов для сравнения: {len(real)}")
 
-    ours_path = DATA / "robots_history.jsonl"
     if not ours_path.exists():
-        print("[tw_compare] Нет data/robots_history.jsonl")
+        print(f"[tw_compare] Нет файла нашей истории: {ours_path}")
         sys.exit(1)
     ours = load_ours(ours_path, date_str)
     print(f"[tw_compare] наших роботов (в мс) за {date_str}: {len(ours)}")
@@ -248,7 +255,7 @@ def main():
     tp, fp, fn = [], [], []
     for r in sorted(ours, key=lambda x: x["start_ms"]):
         hit = None
-        for i, w in enumerate(tw_real):
+        for i, w in enumerate(real):
             if i in used:
                 continue
             if match(r, w):
@@ -256,10 +263,10 @@ def main():
                 break
         if hit is not None:
             used.add(hit)
-            tp.append((r, tw_real[hit]))
+            tp.append((r, real[hit]))
         else:
             fp.append(r)
-    for i, w in enumerate(tw_real):
+    for i, w in enumerate(real):
         if i not in used:
             fn.append(w)
 
@@ -270,7 +277,7 @@ def main():
     print("=" * 70)
     print("СРАВНЕНИЕ: наша приблуда против T-Widgets (все времена в мс)")
     print("=" * 70)
-    print(f"TP: {len(tp)}   FP: {len(fp)}   FN(реальные): {len(fn)}   bursts(вне): {len(bursts)}")
+    print(f"TP: {len(tp)}   FP: {len(fp)}   FN(реальные): {len(fn)}   bursts(вне): {len(tw) - len(real)}")
     print(f"Precision: {prec:.1%}   Recall: {rec:.1%}")
 
     if tp:
