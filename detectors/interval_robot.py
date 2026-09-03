@@ -26,6 +26,9 @@ v10.2: ИСТОРИЯ В НАТУРАЛЬНЫХ МС — в robots_history.jsonl
 без конверсий на стороне потребителей). Секундные поля (start_ts/end_ts/
 interval_avg) оставлены для старой статистики и GUI. Критерии детекции
 НЕ изменены.
+v10.3: ЛОГИРОВАНИЕ ВСЕХ СДЕЛОК — в detector.log пишутся ВСЕ сделки
+(и те, что ниже min_qty) с флагом passed_min_qty. Для анализа FN:
+видим, что происходит в зоне реза (SVCB 13 лотов, FLOT 16 лотов и т.д.).
 """
 import json
 import logging
@@ -349,12 +352,18 @@ class IntervalRobotDetector(Detector):
 
     def on_trade(self, trade):
         qty = trade["qty"]
-        if qty < self.min_qty:
-            return []
         side = trade["side"]
         ts = trade["timestamp"] / 1000.0
         ts_ms = trade["timestamp"]  # v10.2: натуральные мс из ленты
         price = trade.get("price")
+        
+        # v10.3: логирование всех сделок (и ниже min_qty) для анализа FN
+        passed_min_qty = qty >= self.min_qty
+        _log.info(f"[{self.symbol}] TRADE: qty={qty}, side={side}, ts={ts:.3f}, price={price}, passed_min_qty={passed_min_qty}, min_qty={self.min_qty}")
+        
+        if not passed_min_qty:
+            return []
+        
         signals = self._prune_dead(side, ts)
         match = self._find_match(side, qty, ts)
         if match is not None:

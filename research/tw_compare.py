@@ -2,22 +2,27 @@
 Приблуда на python — компаратор: наши роботы против роботов T-Widgets.
 
 Сравнивает:
-  - наш поток:        data/robots_history.jsonl
+  - наш поток:      data/robots_history.jsonl (строки со start_ms/end_ms/interval_ms)
   - эталон T-Widgets: data/tw_robots_YYYY-MM-DD.jsonl (перехватчик OnRobots2)
 
-!!! ВСЕ ВРЕМЕНА — МИЛЛИСЕКУНДЫ (epoch ms), БЕЗ КОНВЕРСИЙ !!!
-  Наши:      детектор пишет start_ms/end_ms/interval_ms напрямую из ленты
-             QUIK (в ленте время уже в мс). Строки старого формата без
-             start_ms пропускаются.
+!!! ЕДИНИЦЫ: ВСЁ ВНУТРИ — МИЛЛИСЕКУНДЫ (epoch ms) !!!
+  Наши:      start_ms/end_ms/interval_ms — детектор пишет напрямую из ленты QUIK.
+             Строки старого формата (без мс) пропускаются.
   T-Widgets: interval — уже мс; start/end — ISO-строки (Z) -> epoch ms.
+
+v2 (2026-09-03): FN разделены на "реальные" и "bursts":
+  - bursts: TW-роботы с interval < 2 с или count < 4 — всплески открытия/шум;
+    наш детектор их не видит по дизайну (min_interval=2.0, min_repeats=4),
+    в FN не идут, печатаются отдельной корзиной.
+  - FN печатаются с сортировкой по интервалу вниз (устойчивые роботы сверху).
 
 Метрики:
   TP — робот есть и у нас, и у T-Widgets (совпали по критерию)
   FP — наш робот, которого T-Widgets не видит
-  FN — робот T-Widgets, которого мы не видим
+  FN — реальный робот T-Widgets, которого мы не видим
   Precision = TP/(TP+FP), Recall = TP/(TP+FN)
 
-Критерий совпадения (наш r и tw-робот w):
+Критерий совпадения (наш r и TW w):
   1) ticker и side равны;
   2) окна пересекаются с допуском TIME_TOL_MS;
   3) INT_LO <= r.interval_ms / w.interval_ms <= INT_HI;
@@ -44,6 +49,8 @@ TIME_TOL_MS = 120_000      # допуск по пересечению окон (
 INT_LO, INT_HI = 0.7, 1.3  # допуск по отношению интервалов
 QTY_TOL = 0.5              # расширение диапазона лотов, 50%
 DETAIL_LIMIT = 30          # сколько строк деталей печатать на категорию
+MIN_INTERVAL_MS = 2000.0   # v2: TW-роботы быстрее этого — bursts (открытие/шум)
+MIN_COUNT = 4              # v2: минимум сделок у TW-робота
 
 
 def iso_to_ms(s):
@@ -94,7 +101,6 @@ class Progress:
 def load_tw(path):
     """tw_robots_*.jsonl -> список записей в мс (active+completed, дедуп по id)."""
     out = {}
-    skipped = 0
     p = Progress(path.stat().st_size, "tw ")
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
@@ -105,7 +111,6 @@ def load_tw(path):
             try:
                 rec = json.loads(line)
             except Exception:
-                skipped += 1
                 continue
             payload = rec.get("payload") or {}
             for rob in payload.get("robots") or []:
@@ -133,8 +138,6 @@ def load_tw(path):
                             "state": state,
                         }
     p.close()
-    if skipped:
-        print(f"[tw_compare] tw: пропущено битых строк: {skipped}")
     return list(out.values())
 
 
@@ -222,6 +225,18 @@ def main():
     tw = load_tw(tw_file)
     print(f"[tw_compare] роботов T-Widgets (уник. ticker+side+id): {len(tw)}")
 
+    # v2: bursts — быстрее MIN_INTERVAL_MS или меньше MIN_COUNT сделок.
+    bursts = [
+        w for w in tw
+        if (w["interval_ms"] or 0) < MIN_INTERVAL_MS or (w["count"] or 0) < MIN_COUNT
+    ]
+    tw_real = [
+        w for w in tw
+        if (w["interval_ms"] or 0) >= MIN_INTERVAL_MS and (w["count"] or 0) >= MIN_COUNT
+    ]
+    print(f"[tw_compare] из них bursts (int<2с или count<4, вне сравнения): {len(bursts)}")
+    print(f"[tw_compare] реальных TW-роботов для сравнения: {len(tw_real)}")
+
     ours_path = DATA / "robots_history.jsonl"
     if not ours_path.exists():
         print("[tw_compare] Нет data/robots_history.jsonl")
@@ -229,12 +244,11 @@ def main():
     ours = load_ours(ours_path, date_str)
     print(f"[tw_compare] наших роботов (в мс) за {date_str}: {len(ours)}")
 
-    tw_list = tw
     used = set()
     tp, fp, fn = [], [], []
     for r in sorted(ours, key=lambda x: x["start_ms"]):
         hit = None
-        for i, w in enumerate(tw_list):
+        for i, w in enumerate(tw_real):
             if i in used:
                 continue
             if match(r, w):
@@ -242,10 +256,10 @@ def main():
                 break
         if hit is not None:
             used.add(hit)
-            tp.append((r, tw_list[hit]))
+            tp.append((r, tw_real[hit]))
         else:
             fp.append(r)
-    for i, w in enumerate(tw_list):
+    for i, w in enumerate(tw_real):
         if i not in used:
             fn.append(w)
 
@@ -256,7 +270,7 @@ def main():
     print("=" * 70)
     print("СРАВНЕНИЕ: наша приблуда против T-Widgets (все времена в мс)")
     print("=" * 70)
-    print(f"TP: {len(tp)}   FP: {len(fp)}   FN: {len(fn)}")
+    print(f"TP: {len(tp)}   FP: {len(fp)}   FN(реальные): {len(fn)}   bursts(вне): {len(bursts)}")
     print(f"Precision: {prec:.1%}   Recall: {rec:.1%}")
 
     if tp:
@@ -279,8 +293,8 @@ def main():
             )
 
     if fn:
-        print(f"\n--- FN (T-Widgets видит, мы нет, первые {DETAIL_LIMIT}) ---")
-        for w in fn[:DETAIL_LIMIT]:
+        print(f"\n--- FN (T-Widgets видит, мы нет; сортировка по интервалу вниз, первые {DETAIL_LIMIT}) ---")
+        for w in sorted(fn, key=lambda x: -x["interval_ms"])[:DETAIL_LIMIT]:
             print(
                 f"  {w['ticker']:6} {w['side']:4} "
                 f"int={w['interval_ms'] / 1000:.1f}s qty=[{w['qty_min']},{w['qty_max']}] "
