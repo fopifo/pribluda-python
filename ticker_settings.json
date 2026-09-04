@@ -320,7 +320,7 @@
   },
   "LKOH": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 2,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -386,7 +386,7 @@
   },
   "MSNG": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 2,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -419,7 +419,7 @@
   },
   "MTSS": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 6,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -485,7 +485,7 @@
   },
   "OZON": {
     "active": true,
-    "min_qty": 45,
+    "min_qty": 5,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
@@ -518,7 +518,7 @@
   },
   "PLZL": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 9,
     "min_repeats": 4,
     "min_interval": 2.0,
     "max_interval": 600.0,
