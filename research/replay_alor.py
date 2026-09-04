@@ -8,6 +8,7 @@ tools/alor_download_day.py), кормит детекторы в хронолог
 Использование:
     python research/replay_alor.py 2026-09-03                  # baseline
     python research/replay_alor.py 2026-09-03 --double-hit 1.0 # A/B фильтр двойных ударов
+    python research/replay_alor.py 2026-09-03 --no-min-qty     # без порога min_qty (потолок Recall)
 
 Дальше: python research/tw_compare.py 2026-09-03 --ours data/replay_alor_history.jsonl
 """
@@ -62,9 +63,12 @@ def main():
         sys.exit(1)
     date_str = args[0]
     double_hit = None
+    no_min_qty = False
     if "--double-hit" in args:
         i = args.index("--double-hit")
         double_hit = float(args[i + 1])
+    if "--no-min-qty" in args:
+        no_min_qty = True
 
     files = sorted(DATA.glob(f"*_{date_str}.json"))
     if not files:
@@ -74,6 +78,8 @@ def main():
     print(f"[replay_alor] файлов Алора: {len(files)}")
     if double_hit is not None:
         print(f"[replay_alor] РЕЖИМ A/B: min_double_hit_gap_sec={double_hit}")
+    if no_min_qty:
+        print("[replay_alor] РЕЖИМ A/B: без порога min_qty")
 
     trades = []
     for f in files:
@@ -95,6 +101,8 @@ def main():
             ov = dict(settings.get(sym, {}))
             if double_hit is not None:
                 ov["min_double_hit_gap_sec"] = double_hit
+            if no_min_qty:
+                ov["min_qty"] = 1
             dets[sym] = [IntervalRobotDetector(sym, c)
                          for c in get_detector_configs(sym, ov.get("min_qty", 1), ov)]
             for d in dets[sym]:
@@ -122,7 +130,7 @@ def main():
         except (TypeError, ValueError):
             continue
         ov = settings.get(sym, {})
-        if qty < ov.get("min_qty", 10):
+        if not no_min_qty and qty < ov.get("min_qty", 10):
             skip_qty += 1
             continue
         for d in det_for(sym):
