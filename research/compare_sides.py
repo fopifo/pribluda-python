@@ -5,6 +5,7 @@
 """
 import json
 import sys
+import time
 from pathlib import Path
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -14,6 +15,35 @@ DATA_DIR = BASE_DIR / "data"
 QUIK_CSV = DATA_DIR / "quik_trades.csv"
 
 TIME_TOLERANCE_MS = 500  # допуск по времени для сопоставления
+
+
+class Progress:
+    """Прогресс-бар по байтам файла. ASCII, % / скорость / ETA."""
+
+    def __init__(self, total, label):
+        self.total = max(total, 1)
+        self.label = label
+        self.done = 0
+        self.t0 = time.time()
+        self.last = 0.0
+
+    def update(self, n):
+        self.done += n
+        now = time.time()
+        if now - self.last < 0.25 and self.done < self.total:
+            return
+        self.last = now
+        pct = min(self.done * 100 // self.total, 100)
+        dt = max(now - self.t0, 1e-9)
+        speed = self.done / dt
+        eta = (self.total - self.done) / max(speed, 1.0)
+        bar = "#" * (pct // 5) + "." * (20 - pct // 5)
+        print(f"\r[compare_sides] {self.label} [{bar}] {pct:3d}% | "
+              f"{self.done // 1048576}/{self.total // 1048576}MB | "
+              f"{speed / 1048576:.0f}MB/s | ETA {eta:.0f}s", end="", flush=True)
+
+    def close(self):
+        print()
 
 
 def load_alor_data(date_str):
@@ -96,8 +126,10 @@ def compare(date_str):
     side_mismatch = 0
     stats = defaultdict(lambda: {"matched": 0, "match": 0, "mismatch": 0})
 
+    p = Progress(QUIK_CSV.stat().st_size, "csv")
     with open(QUIK_CSV, "r", encoding="utf-8", errors="ignore") as f:
         for line in f:
+            p.update(len(line))
             tr = parse_quik_line(line)
             if not tr:
                 continue
@@ -129,6 +161,7 @@ def compare(date_str):
             else:
                 side_mismatch += 1
                 stats[ticker]["mismatch"] += 1
+    p.close()
 
     print()
     print("=" * 60)
@@ -146,8 +179,8 @@ def compare(date_str):
         for tk, s in top:
             if s["matched"] == 0:
                 continue
-            p = s["match"] / s["matched"] * 100
-            print(f"  {tk}: {s['matched']} сделок, {s['match']} совпало ({p:.1f}%)")
+            p2 = s["match"] / s["matched"] * 100
+            print(f"  {tk}: {s['matched']} сделок, {s['match']} совпало ({p2:.1f}%)")
     else:
         print("Не сопоставлено ни одной сделки.")
         print("Проверьте дату и наличие данных в обоих источниках.")
