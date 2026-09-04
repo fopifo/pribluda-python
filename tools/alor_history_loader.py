@@ -27,7 +27,7 @@ ENV_PATH = BASE_DIR / ".env"
 load_dotenv(ENV_PATH)
 
 REFRESH_TOKEN = os.getenv("ALOR_REFRESH_TOKEN")
-TOKEN_URL = "https://api.alor.ru/v2/auth/token"
+TOKEN_URL = "https://oauth.alor.ru/refresh"
 API_URL = "https://api.alor.ru"
 
 EXCHANGE = "MOEX"
@@ -67,9 +67,9 @@ class AlorTokenManager:
 
     def _refresh_access_token(self) -> None:
         """Обменивает refresh-токен на access-токен."""
-        response = self.session.get(
+        response = self.session.post(
             TOKEN_URL,
-            params={"refreshToken": self.refresh_token},
+            params={"token": self.refresh_token},
         )
         response.raise_for_status()
         data = response.json()
@@ -146,7 +146,7 @@ def day_range_unix(day: datetime) -> tuple[int, int]:
     """Возвращает Unix-timestamp начала и конца дня в UTC."""
     start = datetime(day.year, day.month, day.day, 0, 0, 0, tzinfo=timezone.utc)
     end = start + timedelta(days=1)
-    return int(start.timestamp()), int(end.timestamp())
+    return int(start.timestamp()), int(end.timestamp()) - 1  # to < сегодня
 
 
 def previous_trading_day(reference: datetime) -> datetime:
