@@ -241,17 +241,6 @@
     "min_display_repeats": 3,
     "min_double_hit_gap_sec": 0.0
   },
-  "GMON": {
-    "active": true,
-    "min_qty": 20,
-    "min_repeats": 4,
-    "min_interval": 2.0,
-    "max_interval": 600.0,
-    "interval_tolerance": 0.05,
-    "max_qty_ratio": 1.1,
-    "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
-  },
   "HEAD": {
     "active": true,
     "min_qty": 2,
