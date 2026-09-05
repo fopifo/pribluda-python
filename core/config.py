@@ -45,6 +45,10 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
         "jitter_ratio_max": overrides.get("jitter_ratio_max", 0.3),
         "grid_lock": overrides.get("grid_lock", True),
         "grid_tolerance_ms": overrides.get("grid_tolerance_ms", 700),
+        "min_qty_auto": overrides.get("min_qty_auto", False),
+        "min_qty_median_pct": overrides.get("min_qty_median_pct", 0.5),
+        "interval_mult_max": overrides.get("interval_mult_max", 4),
+        "min_double_hit_gap_sec": overrides.get("min_double_hit_gap_sec", 1.0),
     }
     configs.append(base_config)
     return configs
