@@ -46,10 +46,10 @@ class Progress:
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
         print(f"\r[compare] {self.label} [{bar}] {pct:3d}% | "
               f"{self.done // 1024}/{self.total // 1024}KB | "
-              f"{speed / 1024:.0f}KB/s | ETA {eta:.0f}s", end="", flush=True)
+              f"{speed / 1024:.0f}KB/s | ETA {eta:.0f}s", end="", flush=True, file=sys.stderr)
 
     def close(self):
-        print()
+        print(file=sys.stderr)
 
 
 def iso_to_ms(s):

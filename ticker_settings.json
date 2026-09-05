@@ -316,7 +316,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.5
   },
   "MAGN": {
     "active": true,
@@ -382,7 +384,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.5
   },
   "MTLRP": {
     "active": true,
@@ -481,7 +485,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.5
   },
   "PHOR": {
     "active": true,
@@ -515,7 +521,9 @@
     "stable_qty_required": true,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.5
   },
   "POSI": {
     "active": true,
@@ -625,7 +633,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.5
   },
   "SGZH": {
     "active": true,

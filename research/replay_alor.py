@@ -50,10 +50,10 @@ class Progress:
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
         print(f"\r[replay_alor] {self.label} [{bar}] {pct:3d}% | "
               f"{self.done}/{self.total} сделок | {speed:.0f}/s | ETA {eta:.0f}s",
-              end="", flush=True)
+              end="", flush=True, file=sys.stderr)
 
     def close(self):
-        print()
+        print(file=sys.stderr)
 
 
 def main():

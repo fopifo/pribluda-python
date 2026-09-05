@@ -88,7 +88,7 @@ def main():
             eta = el * (100 - pct) / max(pct, 1)
             bar = "#" * (pct // 5) + "." * (20 - pct // 5)
             print(f"\r[aniscan] [{bar}] {pct:3d}% | стр={page} зап={len(records)} | "
-                  f"{speed:.0f}/с | ETA {eta:.0f}с", end="", flush=True)
+                  f"{speed:.0f}/с | ETA {eta:.0f}с", end="", flush=True, file=sys.stderr)
         time.sleep(0.15)
 
     print()
