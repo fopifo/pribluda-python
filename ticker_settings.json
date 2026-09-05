@@ -836,5 +836,21 @@
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
     "min_double_hit_gap_sec": 0.0
+  },
+  "FESH": {
+    "active": true,
+    "min_qty": 1
+  },
+  "SRU6SRZ6": {
+    "active": true,
+    "min_qty": 1
+  },
+  "SPZ6": {
+    "active": true,
+    "min_qty": 1
+  },
+  "SiU6": {
+    "active": true,
+    "min_qty": 1
   }
 }
