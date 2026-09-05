@@ -377,6 +377,29 @@ class IntervalRobotDetector(Detector):
         candidate.priced_hits += 1
         candidate.price_counts[price] = candidate.price_counts.get(price, 0) + 1
 
+    def _refine_base(self, candidate):
+        base = candidate.base_interval or candidate.last_interval
+        if base is None or len(candidate.intervals) < 4:
+            return
+        if base < self.short_interval_threshold:
+            return
+        for k in (2, 3, 4):
+            d = base / k
+            if d < 2.0 or d > self.max_interval:
+                continue
+            tol = self.short_interval_tolerance if d < self.short_interval_threshold else (self.interval_tolerance or 0.1)
+            gtol = max(d * tol, self.grid_tolerance_ms / 1000.0)
+            good = 0; single = False
+            for iv in candidate.intervals:
+                m = round(iv / d)
+                if m >= 1 and abs(iv - m * d) <= max(m * d * tol, self.grid_tolerance_ms / 1000.0):
+                    good += 1
+                    if m == 1 and abs(iv - d) <= gtol:
+                        single = True
+            if single and good >= 0.8 * len(candidate.intervals):
+                candidate.base_interval = d
+                return
+
     def _metro(self, candidate):
         if not candidate.intervals:
             return []
@@ -425,6 +448,7 @@ class IntervalRobotDetector(Detector):
             if ok and base is not None:
                 match.base_interval = base
             match.intervals.append(iv)
+            self._refine_base(match)
             match.last_interval = iv
             if qty not in match.qty_variants:
                 match.qty_variants.add(qty)
