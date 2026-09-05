@@ -29,6 +29,10 @@ interval_avg) оставлены для старой статистики и GUI
 v10.3: ЛОГИРОВАНИЕ ВСЕХ СДЕЛОК — в detector.log пишутся ВСЕ сделки
 (и те, что ниже min_qty) с флагом passed_min_qty. Для анализа FN:
 видим, что происходит в зоне реза (SVCB 13 лотов, FLOT 16 лотов и т.д.).
+v11: АДАПТИВНЫЙ MIN_QTY — при первой сделке (если min_qty_auto=True)
+считает медианный объём сделок тикера из data/{symbol}_{date}.json,
+устанавливает min_qty = медиана × min_qty_median_pct (дефолт 0.5).
+Решает проблему MSNG (qty=3 уже сигнал) vs SBER (qty=300 шум).
 """
 import json
 import logging
@@ -116,6 +120,10 @@ class IntervalRobotDetector(Detector):
         self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 1.0)
         # v10.4: лог всех сделок только по флагу log_all_trades (иначе detector.log растёт лавинообразно)
         self.log_all_trades = settings.get("log_all_trades", False)
+        # v11: адаптивный min_qty (процент от медианы объёма сделок тикера)
+        self.min_qty_auto = settings.get("min_qty_auto", False)
+        self.min_qty_median_pct = settings.get("min_qty_median_pct", 0.5)
+        self._adaptive_qty_computed = False
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -125,12 +133,41 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
+        _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_qty_auto={self.min_qty_auto}, "
+                  f"min_qty_median_pct={self.min_qty_median_pct}, min_repeats={self.min_repeats}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
                   f"mult_max={self.interval_mult_max}, stable_qty={self.stable_qty_required}, "
                   f"min_display={self.min_display_repeats}, jitter_max={self.jitter_ratio_max}, "
                   f"grid_lock={self.grid_lock}, grid_tol_ms={self.grid_tolerance_ms}, "
                   f"min_double_hit_gap={self.min_double_hit_gap_sec}s")
+
+    def _compute_adaptive_min_qty(self, ts_ms):
+        """v11: считает медианный объём сделок тикера из data/{symbol}_{date}.json,
+        возвращает int(median * min_qty_median_pct). Если файл не найден — дефолт 1."""
+        try:
+            date_str = datetime.fromtimestamp(ts_ms / 1000, tz=MSK).strftime("%Y-%m-%d")
+            data_dir = Path(__file__).resolve().parent.parent / "data"
+            alor_file = data_dir / f"{self.symbol}_{date_str}.json"
+            if not alor_file.exists():
+                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: файл {alor_file.name} не найден, дефолт=1")
+                return 1
+            with open(alor_file, encoding="utf-8") as f:
+                trades = json.load(f)
+            if not trades:
+                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: файл пуст, дефолт=1")
+                return 1
+            qtys = [float(t.get("qty", 0)) for t in trades if t.get("qty")]
+            if not qtys:
+                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: нет объёмов, дефолт=1")
+                return 1
+            median_qty = statistics.median(qtys)
+            adaptive_qty = int(median_qty * self.min_qty_median_pct)
+            _log.info(f"[{self.symbol}] ADAPTIVE_QTY: медиана={median_qty:.1f}, "
+                      f"pct={self.min_qty_median_pct}, min_qty={adaptive_qty}")
+            return adaptive_qty
+        except Exception as e:
+            _log.warning(f"[{self.symbol}] ADAPTIVE_QTY failed: {e}, дефолт=1")
+            return 1
 
     def drain_confirms(self):
         out = self._confirms
@@ -358,6 +395,13 @@ class IntervalRobotDetector(Detector):
         ts = trade["timestamp"] / 1000.0
         ts_ms = trade["timestamp"]  # v10.2: натуральные мс из ленты
         price = trade.get("price")
+        
+        # v11: адаптивный min_qty (один раз при первой сделке)
+        if self.min_qty_auto and not self._adaptive_qty_computed:
+            adaptive_qty = self._compute_adaptive_min_qty(ts_ms)
+            self.min_qty = max(adaptive_qty, 1)  # минимум 1
+            self._adaptive_qty_computed = True
+            _log.info(f"[{self.symbol}] ADAPTIVE_QTY_APPLIED: min_qty={self.min_qty}")
         
         # v10.3: логирование всех сделок (и ниже min_qty) для анализа FN
         passed_min_qty = qty >= self.min_qty
