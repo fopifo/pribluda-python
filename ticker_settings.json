@@ -85,7 +85,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.3
   },
   "BSPB": {
     "active": true,
@@ -118,7 +120,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.3
   },
   "CNRU": {
     "active": true,
@@ -206,7 +210,9 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.3
   },
   "GAZP": {
     "active": true,
@@ -845,11 +851,15 @@
     "interval_tolerance": 0.05,
     "max_qty_ratio": 1.1,
     "min_display_repeats": 3,
-    "min_double_hit_gap_sec": 0.0
+    "min_double_hit_gap_sec": 0.0,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.3
   },
   "FESH": {
     "active": true,
-    "min_qty": 1
+    "min_qty": 1,
+    "min_qty_auto": true,
+    "min_qty_median_pct": 0.3
   },
   "SRU6SRZ6": {
     "active": true,
