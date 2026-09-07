@@ -106,35 +106,31 @@ def main():
         except Exception as e:
             check("Interval robot", False, "", f"ошибка: {e}")
 
-    # [4] Backend log — нет свежих IMOEX fetch failed (за 60 сек)
+    # [4] Backend log — возраст последней ошибки IMOEX fetch
     log_path = OUT / "quik_noconsole.log"
     if not log_path.exists():
         check("Backend log", False, "", "Файл НЕ СУЩЕСТВУЕТ")
     else:
-        try:
-            recent_imf_fails = 0
-            with open(log_path, encoding="utf-8", errors="ignore") as f:
-                for line in f:
-                    if "IMOEX fetch failed" in line:
-                        t = line[:8]
-                        try:
-                            lt = datetime.strptime(t, "%H:%M:%S").replace(
-                                year=now.year, month=now.month, day=now.day,
-                                tzinfo=MSK
-                            )
-                            delta = (now - lt).total_seconds()
-                            if 0 < delta < 60:
-                                recent_imf_fails += 1
-                        except Exception:
-                            pass
-            check(
-                "IMOEX fetch (60 сек)",
-                recent_imf_fails == 0,
-                f"нет ошибок за последнюю минуту",
-                f"{recent_imf_fails} ошибок за последнюю минуту — проверь сеть или модуль spring_monitor",
-            )
-        except Exception as e:
-            check("IMOEX fetch", False, "", f"ошибка чтения лога: {e}")
+        last_fail = None
+        with open(log_path, encoding="utf-8", errors="ignore") as f:
+            for line in f:
+                if "IMOEX fetch failed" in line:
+                    last_fail = line[:8]
+        if last_fail is None:
+            check("IMOEX fetch", True, "ошибок в логе нет", "")
+        else:
+            try:
+                lt = datetime.strptime(last_fail, "%H:%M:%S").replace(
+                    year=now.year, month=now.month, day=now.day, tzinfo=MSK)
+                age = (now - lt).total_seconds()
+                check(
+                    "IMOEX fetch",
+                    age > 300,
+                    f"последняя ошибка {last_fail} ({age:.0f}с назад) — не свежая",
+                    f"последняя ошибка {last_fail} ({age:.0f}с назад) — СВЕЖАЯ, сеть/ISS нестабильны",
+                )
+            except Exception as e:
+                check("IMOEX fetch", False, "", f"ошибка парсинга: {e}")
 
     # [5] IMOEX цена
     try:
