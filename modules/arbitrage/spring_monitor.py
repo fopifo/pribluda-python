@@ -223,7 +223,14 @@ def fetch_imoex_price() -> Optional[float]:
     Возвращает float или None при ошибке.
     """
     try:
-        r = requests.get(IMOEX_URL, timeout=10)
+        for attempt in range(3):
+            try:
+                r = requests.get(IMOEX_URL, timeout=15)
+                break
+            except requests.exceptions.Timeout:
+                if attempt == 2:
+                    raise
+                time.sleep(2)
         r.raise_for_status()
         data = r.json()
         marketdata = data.get("marketdata", {})
