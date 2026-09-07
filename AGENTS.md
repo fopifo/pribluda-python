@@ -316,3 +316,38 @@ Telegram-бот, start_all.py (не существует).
 - Если контекст утерян или есть сомнения — честно сказать и попросить уточнение, а не угадывать.
 
 Нарушение этого правила ведёт к потере времени владельца и ошибкам в коде.
+
+## Находки 2026-09-05 (обязательно к знанию)
+
+**Aniscan.ru — второй эталон:**
+- tools/aniscan_download_day.py — загрузка истории роботов
+- Режим APPEND + дедуп по (robot.id, createDttm) — повторный прогон
+  не затирает историю
+- ПРАВИЛО: перед запуском tools/aniscan_* СПРАШИВАТЬ владельца:
+  "Включён ли браузер, залогинен ли aniscan.ru?" Cookies живут недолго;
+  401 = сессия мертва, обновлять через F12 Network в .env.
+
+**StreamGrid v2.1 — стриминг-детектор сеток:**
+- Ключ буфера (sym, side), кластеризация объёмов внутри
+- Параметры: min_repeats=6, tol=0.08 (зафиксированы)
+- Интегрирован в backend: shared.grid_signals, логи [stream_grid] SIGNAL
+- Отключение: USE_STREAM_GRID=False в core/config.py
+- НЕ ТРОГАТЬ interval_robot.py при правках вокруг StreamGrid
+
+**Метрики (чистая сетка):**
+- 09-04: Recall 49.5%, Precision 5.7%
+- 09-03: Recall 17.6%, Precision 17.1%
+- Burst-тикеры (SBER/X5/OZON) — НЕ тюнить, другой класс паттерна
+
+**Правила работы с файлами (2026-09-05):**
+1. VS Code иногда сохраняет с BOM (U+FEFF). Лечение:
+   python -c "p='path/to/file.py';s=open(p,encoding='utf-8-sig').read();open(p,'w',encoding='utf-8').write(s)"
+2. Проверка: python -c "import ast;ast.parse(open('path/to/file.py',encoding='utf-8').read());print('OK')"
+3. Записывать ТОЛЬКО через python с encoding='utf-8'.
+4. PowerShell here-string @"..."@ ПОРИТ русские заглавные буквы.
+5. В python -c "..." ЗАПРЕЩЕНЫ f-string с экранированными кавычками \".
+
+**Исследовательские скрипты (можно удалять после использования):**
+- research/grid_detect.py — прототип, заменён на replay_grid.py
+- tools/make_supplement_*.py — одноразовые
+- Все fix*.py в корне — временные патчи

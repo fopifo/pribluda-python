@@ -2,8 +2,9 @@
 Скринер торговых роботов на Московской бирже (MOEX) для трейдера-скальпера.
 Ищет серии сделок с устойчивым интервалом (признак алгоритма), следит за
 арбитражными связками, планками, аукционами, фандингом; живые графики;
-статистика "наш детектор vs эталон (конкурент)".
+статистика "наш детектор vs эталон (конкурент + aniscan)".
 Сделки — из QUIK (lua), котировки — из MOEX ISS.
+
 ## Быстрый старт
 1. `pip install -r requirements.txt`
 2. В QUIK:
@@ -15,6 +16,7 @@
 `connectors/quik/limits_sweep.lua` (планки).
 3. Консоль 1: `python tools/iss_quotes_sync.py` (оставить работать).
 4. Консоль 2: `python main.py --source quik` (или `Приблуда_Quik.bat`).
+
 ## Вкладки
 - Роботы: 4 блока (buy/sell × подтверждённые/2-3 повтора). Только рабочие
 серии (CD >= 0). Колонки: CD (отсчёт до удара), NEXT (время удара МИН:СЕК),
@@ -35,22 +37,52 @@ LPP (цена, 2 знака), VPM (объём/мин), LEN (повторы). М�
 - Графики: живая цена тикера (ввод с клавиатуры) или спред двух
 (T1 − T2 руб., T1 / T2); ось цен справа.
 - Статистика: агрегат истории роботов по тикеру/стороне/дню/часу,
-колонка ИСТОЧНИК (наш / конкурент).
+колонка ИСТОЧНИК (наш / конкурент / aniscan).
+
 ## Мини-окна
 Кнопка "📊 Мини": два оверлея поверх терминала, до 10 ячеек с тикерами;
 только рабочие серии; геометрия сохраняется (mini_window_config.json).
+
 ## Данные (data/)
 - quik_trades.csv — лента сделок (lua, OnAllTrade, мс).
 - quik_limits.csv — планки (lua limits_sweep, обход ~8 мин).
 - quik_quotes.csv — котировки (ISS, раз в 5 c).
 - robots_history.jsonl — наш детектор (пишет в момент подтверждения).
 - competitor_history.jsonl — эталон конкурента (копится).
+- aniscan_history.jsonl — второй эталон (aniscan.ru, режим APPEND + дедуп).
+- <TICKER>_<ДАТА>.json — лента Алора (для исследований).
+
+## Детекторы
+- **interval_robot.py v12** — основной (адаптивный min_qty, фильтр
+  двойных ударов, уточнение базы интервала вниз)
+- **stream_grid.py v2.1** — стриминг-детектор сеток (живые сигналы
+  за 60с, ключ (sym, side), кластеризация объёмов). Интегрирован в
+  backend, отключение: USE_STREAM_GRID=False в core/config.py
+
 ## Эталон (рабочий цикл)
-Новые скрины конкурента → чат отдаёт research/competitor_supplement_<дата>.jsonl
-→ `python tools/import_competitor_csv.py` (сливает базу CSV + дополнения,
-идемпотентно, ничего не теряет) → вкладка "Статистика" показывает оба потока.
+**Конкурент:** новые скрины → research/competitor_supplement_<дата>.jsonl
+→ `python tools/import_competitor_csv.py` → data/competitor_history.jsonl
+
+**Aniscan.ru:** `python tools/aniscan_download_day.py <ДАТА>` (нужны
+свежие cookies в .env) → data/aniscan_history.jsonl (APPEND + дедуп)
+
+## Исследования (research/)
+- `compare_aniscan_grid.py` — метрики против aniscan (Recall/Precision),
+  разделение чистая сетка / burst
+- `replay_grid.py` — стриминг-валидация на исторических данных
+- `compare_aniscan_ours.py` — сравнение наших сигналов с aniscan
+- `compare_aniscan_tw.py` — сравнение TW с aniscan
+- `replay_alor.py` — реплей ленты Алора
+- `ab_compare.py` — A/B сравнение с конкурентом (TP/FN/FP)
+
+## Метрики (2026-09-05, StreamGrid mr=6 tol=0.08)
+- Чистая сетка: Recall 49.5%, Precision 5.7% (09-04)
+- Чистая сетка: Recall 17.6%, Precision 17.1% (09-03)
+- Interval_robot: Recall 11.1%, Precision 0.6% (replay_alor 09-03)
+
 ## Тесты
-`python -m pytest tests/ -v` — 10/10 (детектор роботов).
+`python -m pytest tests/ -v` — 32/32 (робот + индикаторы).
+
 ## Помощнику
 `python tools/make_dump.py` → project_dump.txt (включает .lua и jsonl
 статистики без ограничения размера) — передать файл.
