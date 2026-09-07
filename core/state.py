@@ -9,4 +9,5 @@ class SharedState:
     rows: List[Dict[str, Any]] = field(default_factory=list)
     batch_flash: Dict[str, float] = field(default_factory=dict)
     spring_rows: List[Dict[str, Any]] = field(default_factory=list)  # NEW: спреды тикеров
+    grid_signals: List[Dict[str, Any]] = field(default_factory=list)  # StreamGrid живые сигналы
     # Здесь можно добавить другие общие поля по мере необходимости
