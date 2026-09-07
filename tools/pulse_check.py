@@ -122,7 +122,8 @@ def main():
                                 year=now.year, month=now.month, day=now.day,
                                 tzinfo=MSK
                             )
-                            if (now - lt).total_seconds() < 60:
+                            delta = (now - lt).total_seconds()
+                            if 0 < delta < 60:
                                 recent_imf_fails += 1
                         except Exception:
                             pass
