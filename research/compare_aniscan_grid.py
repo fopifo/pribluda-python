@@ -5,9 +5,7 @@
 (совпало/наших сигналов). По ревью п.3-5.
 v2.1: min_repeats и tol из командной строки (свип порогов, ревью п.6);
 FN-список (aniscan видит, мы нет) для чек-листа классов (CHMF-тип / SBER-тип).
-
-Использование:
-    python research/compare_aniscan_grid.py 2026-09-04 [min_repeats] [tol]
+v2.2 (2026-09-05): разделение метрик на "чистая сетка" и "burst" (ревью п.5).
 """
 import json
 import sys
@@ -20,6 +18,12 @@ sys.path.insert(0, str(BASE))
 from modules.stream_grid import StreamGrid
 
 MSK = timezone(timedelta(hours=3))
+
+# Тикеры с burst-агрегацией (НЕ чистая сетка, из диагностики 2026-09-05)
+# SBER: зазоры 13-828с, burst-агрегация
+# X5: загрязнённая сетка (случайные сделки того же объёма)
+# OZON: стабильной сетки нет (скринеры агрегируют burst-ы)
+BURST_TICKERS = {'SBER', 'X5', 'OZON'}
 
 
 class Progress:
@@ -106,22 +110,7 @@ def fmt_ms(ms):
     return datetime.fromtimestamp(ms / 1000, tz=MSK).strftime("%H:%M")
 
 
-def main():
-    date_str = sys.argv[1] if len(sys.argv) > 1 else "2026-09-04"
-    mr = int(sys.argv[2]) if len(sys.argv) > 2 else 4
-    tol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.12
-    an = load_aniscan(date_str)
-    trades = load_trades(date_str)
-    sg = StreamGrid(min_repeats=mr, tol=tol)
-    dets = []
-    pb = Progress(len(trades), date_str)
-    for ts, sym, side, qty in trades:
-        d = sg.on_trade(sym, side, qty, ts)
-        if d:
-            dets.append(d)
-        pb.update()
-    pb.close()
-
+def compute_metrics(an, dets, label):
     used, matched, ex, fn_ex = set(), 0, [], []
     for g in an:
         hit = None
@@ -151,12 +140,62 @@ def main():
                              f"{fmt_ms(g['ins'])}-{fmt_ms(g['del'] or g['ins'])}")
     rec = matched / len(an) if an else 0.0
     prec = matched / len(dets) if dets else 0.0
-    print(f"[{date_str}] mr={mr} tol={tol} aniscan={len(an)} наших={len(dets)} совпало={matched}")
-    print(f"Recall_strict={rec:.1%}  Precision_strict={prec:.1%}")
+    return {
+        "label": label,
+        "aniscan": len(an),
+        "ours": len(dets),
+        "matched": matched,
+        "recall": rec,
+        "precision": prec,
+        "examples": ex,
+        "fn_examples": fn_ex,
+    }
+
+
+def main():
+    date_str = sys.argv[1] if len(sys.argv) > 1 else "2026-09-04"
+    mr = int(sys.argv[2]) if len(sys.argv) > 2 else 4
+    tol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.12
+    an = load_aniscan(date_str)
+    trades = load_trades(date_str)
+    sg = StreamGrid(min_repeats=mr, tol=tol)
+    dets = []
+    pb = Progress(len(trades), date_str)
+    for ts, sym, side, qty in trades:
+        d = sg.on_trade(sym, side, qty, ts)
+        if d:
+            dets.append(d)
+        pb.update()
+    pb.close()
+
+    # Разделение: чистая сетка (CHMF-тип) vs burst (SBER-тип)
+    an_clean = [g for g in an if g["ticker"] not in BURST_TICKERS]
+    an_burst = [g for g in an if g["ticker"] in BURST_TICKERS]
+    dets_clean = [d for d in dets if d["ticker"] not in BURST_TICKERS]
+    dets_burst = [d for d in dets if d["ticker"] in BURST_TICKERS]
+
+    m_all = compute_metrics(an, dets, "ВСЕ")
+    m_clean = compute_metrics(an_clean, dets_clean, "ЧИСТАЯ СЕТКА (без burst)")
+    m_burst = compute_metrics(an_burst, dets_burst, "BURST (SBER/X5/OZON)")
+
+    print(f"[{date_str}] mr={mr} tol={tol}")
+    print(f"\n=== {m_all['label']} ===")
+    print(f"aniscan={m_all['aniscan']} наших={m_all['ours']} совпало={m_all['matched']}")
+    print(f"Recall_strict={m_all['recall']:.1%}  Precision_strict={m_all['precision']:.1%}")
     print("--- совпали (первые 12) ---")
-    print("\n".join(ex))
+    print("\n".join(m_all["examples"]))
     print("--- aniscan видит, мы нет (первые 12) ---")
-    print("\n".join(fn_ex))
+    print("\n".join(m_all["fn_examples"]))
+
+    print(f"\n=== {m_clean['label']} ===")
+    print(f"aniscan={m_clean['aniscan']} наших={m_clean['ours']} совпало={m_clean['matched']}")
+    print(f"Recall_strict={m_clean['recall']:.1%}  Precision_strict={m_clean['precision']:.1%}")
+    print("--- совпали (первые 12) ---")
+    print("\n".join(m_clean["examples"]))
+
+    print(f"\n=== {m_burst['label']} ===")
+    print(f"aniscan={m_burst['aniscan']} наших={m_burst['ours']} совпало={m_burst['matched']}")
+    print(f"Recall_strict={m_burst['recall']:.1%}  Precision_strict={m_burst['precision']:.1%}")
 
 
 if __name__ == "__main__":
