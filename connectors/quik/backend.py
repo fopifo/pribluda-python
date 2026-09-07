@@ -6,6 +6,8 @@ v3: batch_flash — мигание "пачки" роботов: >=4 тикеро
 v4: интеграция SpringMonitor (спред тикера относительно IMOEXF).
 v5 (2026-09-05): интеграция StreamGrid (живая детекция сеток, mr=6, tol=0.08).
    Отключение: USE_STREAM_GRID=False в core/config.py (одна строка).
+v6 (2026-09-07): фильтр живых сигналов StreamGrid по объёму
+   (STREAM_MIN_QTY=2): кластеры с qty=1 алерт не дают (шум).
 """
 import sys
 import time
@@ -45,6 +47,10 @@ BATCH_WINDOW_SEC = 15.0
 
 # IMOEXF: период обновления индекса
 IMOEX_PERIOD = 5.0
+
+# StreamGrid: минимальный объём кластера для живого алерта (2026-09-07).
+# qty=1 — шум (мелкие случайные сделки), алерт по нему не нужен.
+STREAM_MIN_QTY = 2
 
 
 class QuikBackend:
@@ -100,7 +106,7 @@ class QuikBackend:
             sig = self.stream_grid.on_trade(
                 sym, trade["side"], trade["qty"], trade["timestamp"]
             )
-            if sig:
+            if sig and sig["qty_max"] >= STREAM_MIN_QTY:
                 with self._grid_lock:
                     self.shared.grid_signals.append(sig)
                 _log.info(
