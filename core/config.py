@@ -52,3 +52,7 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
     }
     configs.append(base_config)
     return configs
+# StreamGrid (живая детекция сеток, 2026-09-05)
+USE_STREAM_GRID = True
+STREAM_MIN_REPEATS = 6
+STREAM_TOL = 0.08
