@@ -18,6 +18,8 @@ from core.state import SharedState
 from core.config import get_detector_configs
 from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
+from modules.stream_grid import StreamGrid
+from core.config import USE_STREAM_GRID, STREAM_MIN_REPEATS, STREAM_TOL
 from modules.arbitrage.spring_monitor import SpringMonitor, load_spring_settings, fetch_imoex_price
 
 CSV = BASE / "data" / "quik_trades.csv"
