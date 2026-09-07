@@ -4,6 +4,9 @@
 события с createDttm >= ГРАНИЦА в data/aniscan_history.jsonl
 (одна строка JSON на событие).
 
+v2 (2026-09-05, п.9 ревью): APPEND режим + дедупликация по (robot.id, createDttm).
+Повторный прогон за ту же дату не затирает историю, а пропускает дубликаты.
+
 Использование:
     python tools/aniscan_download_day.py             # граница 2026-09-03
     python tools/aniscan_download_day.py 2026-09-04  # своя граница
@@ -13,13 +16,12 @@
 import os
 import sys
 import time
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import requests
 from dotenv import load_dotenv
-
-import json  #
 
 BASE = Path(__file__).resolve().parent.parent
 load_dotenv(BASE / ".env")
@@ -91,13 +93,47 @@ def main():
                   f"{speed:.0f}/с | ETA {eta:.0f}с", end="", flush=True, file=sys.stderr)
         time.sleep(0.15)
 
+    # ---- ДЕДУПЛИКАЦИЯ (п.9 ревью 2026-09-05) ----
+    # Читаем существующие события для дедупликации
+    existing_keys = set()
+    if OUT.exists():
+        try:
+            for line in open(OUT, encoding="utf-8"):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    rid = (r.get("robot") or {}).get("id")
+                    dttm = r.get("createDttm")
+                    if rid is not None and dttm is not None:
+                        existing_keys.add((rid, dttm))
+                except Exception:
+                    pass
+            print(f"\n[aniscan] загружено существующих ключей: {len(existing_keys)}")
+        except Exception as e:
+            print(f"\n[aniscan] warning: не удалось прочитать {OUT}: {e}")
+
+    # Фильтруем дубликаты
+    new_records = []
+    skipped = 0
+    for rec in records:
+        rid = (rec.get("robot") or {}).get("id")
+        dttm = rec.get("createDttm")
+        key = (rid, dttm) if rid is not None and dttm is not None else None
+        if key is None or key in existing_keys:
+            skipped += 1
+            continue
+        new_records.append(rec)
+        existing_keys.add(key)
+
     print()
-    with open(OUT, "w", encoding="utf-8") as f:
-        for rec in records:
+    # APPEND режим (не перезапись, п.9 ревью)
+    with open(OUT, "a", encoding="utf-8") as f:
+        for rec in new_records:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    print(f"[aniscan] готово: {len(records)} событий -> {OUT}")
-
-
+    print(f"[aniscan] готово: получено={len(records)} новых={len(new_records)} "
+          f"пропущено_дубликатов={skipped} -> {OUT}")
 
 
 if __name__ == "__main__":
