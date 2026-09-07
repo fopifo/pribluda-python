@@ -232,7 +232,7 @@ def fetch_imoex_price() -> Optional[float]:
         if not rows:
             return None
         idx = {c: i for i, c in enumerate(cols)}
-        last_idx = idx.get("LAST")
+        last_idx = idx.get("LASTVALUE")
         if last_idx is None or last_idx >= len(rows[0]):
             return None
         val = rows[0][last_idx]
