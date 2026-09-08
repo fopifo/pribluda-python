@@ -24,7 +24,7 @@ import requests
 from dotenv import load_dotenv
 
 BASE = Path(__file__).resolve().parent.parent
-load_dotenv(BASE / ".env")
+load_dotenv(BASE / ".env", override=True)
 OUT = BASE / "data" / "aniscan_history.jsonl"
 MSK = timezone(timedelta(hours=3))
 PAGE = 100

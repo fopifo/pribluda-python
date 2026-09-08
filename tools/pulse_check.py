@@ -163,7 +163,6 @@ def main():
                 signals_today > 0,
                 f"{signals_today} сигналов, последний: {last_short}",
                 "сигналов StreamGrid пока нет",
-                warn=True,
             )
         except Exception as e:
             check("StreamGrid", False, "", f"ошибка: {e}")
