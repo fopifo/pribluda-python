@@ -1,6 +1,12 @@
 -- export_trades.lua
 -- Экспорт ЛЕНТЫ СДЕЛОК из Quik в CSV.
--- ВЕРСИЯ 3.20 (2026-08-23, ветка Qwen_coder).
+-- ВЕРСИЯ 3.21 (2026-09-08, ветка Qwen_coder).
+--
+-- v3.21: Миллисекунды из datetime-таблицы сделки: поле мс берётся как
+-- dt.ms or dt.msec or 0 (в разных версиях Quik поле называется по-разному;
+-- раньше читался только dt.msec, из-за чего все метки были с 000).
+-- Одноразовый пробный лог полей datetime в export_debug.log (DATETIME PROBE)
+-- для проверки, какое поле реально присутствует.
 --
 -- СТОРОНА (v3.20): метод по флагам (чётность).
 -- Гипотеза: нечётный флаг = продажа, чётный = покупка.
@@ -33,6 +39,7 @@ buy_count = 0
 sell_count = 0
 last_flush_ms = 0
 last_counter_log_time = 0
+local dt_fields_logged = false
 
 local last_price = {}
 local last_side = {}
@@ -76,8 +83,17 @@ function trade_time_ms(alltrade)
             year = dt.year, month = dt.month, day = dt.day,
             hour = dt.hour, min = dt.min, sec = dt.sec,
         })
+        -- v3.21: одноразовый пробный лог полей datetime (какое поле мс есть)
+        if not dt_fields_logged then
+            dt_fields_logged = true
+            write_log("DATETIME PROBE: ms=" .. tostring(dt.ms)
+                .. " msec=" .. tostring(dt.msec)
+                .. " ok=" .. tostring(ok) .. " sec=" .. tostring(sec))
+        end
         if ok and sec then
-            return sec * 1000 + math.floor(dt.msec or 0)
+            -- v3.21: поле мс в разных Quik называется ms или msec
+            local ms = dt.ms or dt.msec or 0
+            return sec * 1000 + math.floor(ms)
         end
     end
     return os.time() * 1000
@@ -129,9 +145,9 @@ function get_side_tickrule(alltrade)
 end
 
 function OnInit()
-    write_log("=== QUIK EXPORT STARTED (v3.20: flags parity side) ===")
+    write_log("=== QUIK EXPORT STARTED (v3.21: ms from dt.ms or dt.msec) ===")
     open_trades()
-    message("Quik Export: Started (v3.20)")
+    message("Quik Export: Started (v3.21)")
 end
 
 function OnAllTrade(alltrade)
@@ -176,7 +192,7 @@ function OnStop()
 end
 
 function main()
-    write_log("main() loop started (v3.20)")
+    write_log("main() loop started (v3.21)")
     last_flush_ms = now_ms()
 
     while not stopped do

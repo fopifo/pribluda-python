@@ -29,10 +29,30 @@ interval_avg) оставлены для старой статистики и GUI
 v10.3: ЛОГИРОВАНИЕ ВСЕХ СДЕЛОК — в detector.log пишутся ВСЕ сделки
 (и те, что ниже min_qty) с флагом passed_min_qty. Для анализа FN:
 видим, что происходит в зоне реза (SVCB 13 лотов, FLOT 16 лотов и т.д.).
+v10.4: лог всех сделок только по флагу log_all_trades.
 v11: АДАПТИВНЫЙ MIN_QTY — при первой сделке (если min_qty_auto=True)
 считает медианный объём сделок тикера из data/{symbol}_{date}.json,
 устанавливает min_qty = медиана × min_qty_median_pct (дефолт 0.5).
 Решает проблему MSNG (qty=3 уже сигнал) vs SBER (qty=300 шум).
+v10.5 (2026-09-08): METRO И ДЖИТТЕР В НАТУРАЛЬНЫХ МС — intervals_ms
+копит разности ts_ms соседних ударов (натуральные мс ленты, без секунд
+и умножений). jitter_ms = pstdev интервалов в мс. Критерии детекции
+(v7-v11) НЕ изменены: они по-прежнему считаются по секундным интервалам.
+v10.6 (2026-09-08): _metro отдаёт ГОТОВЫЕ отклонения каждого интервала
+от БАЗЫ серии в мс (|iv_ms - round(iv_ms/base_ms)*base_ms|), а не длины
+интервалов. Отклонения независимы друг от друга (раньше GUI считал от
+медианы и при двух интервалах получал одинаковую пару). Статус:
+ok <=150мс, warn <=300мс, bad больше. GUI только выводит.
+v10.7 (2026-09-08): ПЕРЕЩЁЛКИВАНИЕ БАЗЫ ВВЕРХ (_relock_base): если >=80%
+интервалов лежат в ±150 мс от медианы intervals_ms и медиана отличается
+от базы больше чем на 150 мс — база = медиана. Стабильный робот с точным
+периодом (пусть и не совпавшим с первой защёлкой) становится зелёным;
+рваная серия не перещёлкивается и сохраняет цвет-сигнал.
+v10.8 (2026-09-08): ПЕРЕЩЁЛКИВАНИЕ LONG→SHORT (_relock_base): если база
+LONG (>long_interval_threshold=120с), а ≥80% интервалов SHORT (<20с) и
+стабильны (±150мс от медианы SHORT) — база = медиана SHORT. Кейс GMKN:
+база 157с при реальном периоде 10с давала красные 6605/3417/000; после
+перещёлкивания 000 004 000 зелёный.
 """
 import json
 import logging
@@ -54,12 +74,16 @@ if not _log.handlers:
     _log.addHandler(_handler)
     _log.setLevel(logging.INFO)
 
+# v10.7: порог перещёлкивания базы, совпадает с MS_JITTER_MAX (gui/ms)
+RELOCK_TOL_MS = 150.0
+
 
 class Candidate:
     __slots__ = ("qty_variants", "count", "start_ts", "last_ts",
                  "last_interval", "base_interval", "intervals", "warned",
                  "first_price", "last_price", "price_counts", "priced_hits",
-                 "sum_qty", "qty_counts", "start_ms", "last_ms")
+                 "sum_qty", "qty_counts", "start_ms", "last_ms",
+                 "intervals_ms")
 
     def __init__(self, qty, ts, price=None, ts_ms=None):
         self.qty_variants = {qty}
@@ -71,6 +95,7 @@ class Candidate:
         self.last_interval = None
         self.base_interval = None
         self.intervals = []
+        self.intervals_ms = []
         self.warned = False
         self.first_price = price
         self.last_price = price
@@ -174,8 +199,16 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         return out
 
+    def _jitter_ms(self, candidate):
+        """v10.5: джиттер в натуральных мс (pstdev по intervals_ms).
+        Никаких переводов секунд в мс."""
+        if len(candidate.intervals_ms) >= 2:
+            return statistics.pstdev(candidate.intervals_ms)
+        return None
+
     def _write_history(self, side, candidate):
         try:
+            jitter = self._jitter_ms(candidate)
             record = {
                 "timestamp": datetime.now(MSK).isoformat(timespec="seconds"),
                 "symbol": self.symbol, "side": side,
@@ -186,7 +219,7 @@ class IntervalRobotDetector(Detector):
                 # v10.2: натуральные мс, напрямую из ленты QUIK (без конверсий у потребителей)
                 "interval_ms": round((candidate.last_ms - candidate.start_ms) / max(candidate.count - 1, 1), 1),
                 "start_ms": candidate.start_ms, "end_ms": candidate.last_ms,
-                "jitter_ms": round(statistics.pstdev(candidate.intervals) * 1000, 1) if len(candidate.intervals) >= 2 else None,
+                "jitter_ms": round(jitter, 1) if jitter is not None else None,
                 "price_first": candidate.first_price, "price_last": candidate.last_price,
                 "preset": self.preset_name,
             }
@@ -197,7 +230,7 @@ class IntervalRobotDetector(Detector):
 
     def _finalize(self, side, candidate):
         avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
-        jitter_ms = statistics.pstdev(candidate.intervals) * 1000 if len(candidate.intervals) >= 2 else None
+        jitter_ms = self._jitter_ms(candidate)
         stability_ratio = None
         if len(candidate.intervals) >= 2 and self.time_window_sec > 0:
             med = statistics.median(candidate.intervals)
@@ -377,6 +410,43 @@ class IntervalRobotDetector(Detector):
         candidate.priced_hits += 1
         candidate.price_counts[price] = candidate.price_counts.get(price, 0) + 1
 
+    def _relock_base(self, candidate):
+        """v10.7 + v10.8: перещёлкивание базы на медиану интервалов в мс.
+        v10.7: >=3 интервала; медиана отличается от базы > RELOCK_TOL_MS;
+        >=80% интервалов в ±RELOCK_TOL_MS от медианы (стабильный кластер).
+        v10.8: база LONG (>long_interval_threshold), а >=80% интервалов
+        SHORT (<short_interval_threshold*1000мс) и стабильны — база = медиана.
+        Кейс: база 157с при реальном периоде 10с → перещёлкивание на 10с.
+        Рваная серия условию не удовлетворяет и цвет сохраняет."""
+        if len(candidate.intervals_ms) < 3:
+            return
+        base = candidate.base_interval or candidate.last_interval
+        if not base or base <= 0:
+            return
+        base_ms = base * 1000.0
+        med_ms = statistics.median(candidate.intervals_ms)
+        # v10.8: LONG→SHORT — база >120с, медиана <20с, стабильность
+        if base > self.long_interval_threshold and med_ms < self.short_interval_threshold * 1000:
+            short_threshold_ms = self.short_interval_threshold * 1000.0
+            short_count = sum(1 for iv in candidate.intervals_ms if iv < short_threshold_ms)
+            if short_count >= 0.8 * len(candidate.intervals_ms):
+                short_stable = sum(1 for iv in candidate.intervals_ms
+                                   if iv < short_threshold_ms and abs(iv - med_ms) <= RELOCK_TOL_MS)
+                if short_stable >= 0.8 * short_count:
+                    candidate.base_interval = med_ms / 1000.0
+                    _log.info(f"[{self.symbol}] RELOCK_LONG_TO_SHORT: {base_ms:.0f}ms -> {med_ms:.0f}ms "
+                              f"(short_stable={short_stable}/{short_count})")
+                    return
+        # v10.7: обычное перещёлкивание (база и медиана близки)
+        if abs(med_ms - base_ms) <= RELOCK_TOL_MS:
+            return
+        good = sum(1 for iv in candidate.intervals_ms
+                   if abs(iv - med_ms) <= RELOCK_TOL_MS)
+        if good >= 0.8 * len(candidate.intervals_ms):
+            candidate.base_interval = med_ms / 1000.0
+            _log.info(f"[{self.symbol}] RELOCK_BASE: {base_ms:.0f}ms -> {med_ms:.0f}ms "
+                      f"(intervals={len(candidate.intervals_ms)})")
+
     def _refine_base(self, candidate):
         base = candidate.base_interval or candidate.last_interval
         if base is None or len(candidate.intervals) < 4:
@@ -401,15 +471,23 @@ class IntervalRobotDetector(Detector):
                 return
 
     def _metro(self, candidate):
-        if not candidate.intervals:
+        """v10.6: готовые ОТКЛОНЕНИЯ каждого интервала от БАЗЫ серии в мс:
+        dev = |iv_ms - round(iv_ms / base_ms) * base_ms| (round ловит
+        кратные пропуски). Отклонения независимы друг от друга.
+        Статус: ok <=150мс, warn <=300мс, bad больше. GUI только выводит.
+        Порядок: от старого к новому (GUI разворачивает)."""
+        if not candidate.intervals_ms:
             return []
-        med = statistics.median(candidate.intervals)
-        tol = self.interval_tolerance or 0.1
+        base = candidate.base_interval or candidate.last_interval
+        if not base or base <= 0:
+            return []
+        base_ms = base * 1000.0
         out = []
-        for iv in candidate.intervals[-3:]:
-            dev = abs(iv - med) / med if med > 0 else 0
-            st = "ok" if dev <= tol else ("warn" if dev <= 2 * tol else "bad")
-            out.append((round(iv * 1000), st))
+        for iv_ms in candidate.intervals_ms[-3:]:
+            dev = abs(iv_ms - round(iv_ms / base_ms) * base_ms)
+            dev = int(round(dev))
+            st = "ok" if dev <= 150 else ("warn" if dev <= 300 else "bad")
+            out.append((dev, st))
         return out
 
     def on_trade(self, trade):
@@ -448,6 +526,11 @@ class IntervalRobotDetector(Detector):
             if ok and base is not None:
                 match.base_interval = base
             match.intervals.append(iv)
+            # v10.5: натуральный мс-интервал (разность ts_ms), до обновления last_ms
+            if ts_ms is not None and match.last_ms is not None:
+                match.intervals_ms.append(ts_ms - match.last_ms)
+            # v10.7 + v10.8: перещёлкивание базы вверх ДО уточнения вниз
+            self._relock_base(match)
             self._refine_base(match)
             match.last_interval = iv
             if qty not in match.qty_variants:
@@ -521,7 +604,7 @@ class IntervalRobotDetector(Detector):
                     continue
                 base = c.base_interval or c.last_interval
                 seconds_to_next = (c.last_ts + base - now_ts) if base is not None else None
-                jitter_ms = statistics.pstdev(c.intervals) * 1000 if len(c.intervals) >= 2 else None
+                jitter_ms = self._jitter_ms(c)
                 # v8: фильтр джиттера — мусорные серии не показываем в снапшоте
                 if self.jitter_ratio_max > 0 and jitter_ms is not None and base is not None:
                     if jitter_ms / (base * 1000) > self.jitter_ratio_max:

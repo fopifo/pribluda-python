@@ -19,6 +19,27 @@ v6.2 (2026-09-08): колонка MS — ЕДИНЫЙ показатель: от
 interval_robot — отклонения трёх мс из metro от их медианы; для строк
 StreamGrid — готовые sig["ms_hits"]. Строки StreamGrid добавляются в
 ту же таблицу роботов без пометок источника.
+v6.3 (2026-09-08): детектор "пачки" (modules/batch_detector.py) вызывается
+в GUI-цикле раз в секунду от shared.grid_signals (фильтр: сигналы не старше
+BATCH_TIME_WINDOW_MS=2000мс). Алерт-строка в верхней панели:
+"пачка: CHMF, PLZL — общая мс ~483" (жёлтая, мигает красным пока свежая).
+v6.3.1 (2026-09-08): фикс ValueError в _ms_parts — медиана и ms_hits могут
+быть float, формат 03d требует int; добавлено round()->int в обеих ветках.
+v6.4 (2026-09-08): окно при запуске по доступной геометрии основного экрана;
+MS три слота в порядке настоящий → предыдущий → пред-предыдущий (свежий
+слева), без будущего слота.
+v6.5 (2026-09-08): GUI больше НЕ вычисляет отклонения — metro из детектора
+v10.6 уже содержит готовые отклонения каждого интервала от базы серии в мс
+(независимые числа, без вырожденных пар от медианы). GUI только разворачивает
+порядок (свежий слева) и красит по худшему: ≤150 зелёный, ≤300 жёлтый,
+>300 красный. StreamGrid: ms_hits как есть.
+v6.5.1 (2026-09-08): фикс KeyError в _grid_signals_to_rows — у сигнала
+StreamGrid ключи period/qty_min/qty_max (нет interval/price); прогноз NEXT
+считается от end_ms + k*period (ближайший будущий тик), price_last=None,
+варианты объёма = {qty_min, qty_max}.
+v6.5.2 (2026-09-08): компактнее — ROW_H 16→14, узкие колонки CD/QTY/INT/
+NEXT/VPM/LEN, MS расширена до 80, паддинги ячеек и заголовков 0-1px,
+чтобы три мс-числа влезали без обрезки.
 """
 import sys
 import time
@@ -49,19 +70,20 @@ from gui.mini_window import MiniWindow
 from gui.tabs.limits.limits_tab import LimitsTab
 from core.sound_manager import SoundManager
 from modules.stream_grid import MS_JITTER_MAX
+from modules.batch_detector import find_batches, BATCH_TIME_WINDOW_MS
 
 CONFIRM_REPEATS = 4
-ROW_H = 16
+ROW_H = 14
 HEADERS = ["CD", "TICKER", "QTY", "INT", "NEXT", "MS", "LPP", "VPM", "LEN"]
-COL_W = [34, 55, 55, 38, 55, 65, 55, 45, 32]
+COL_W = [30, 50, 46, 34, 44, 80, 52, 40, 28]
 
 QSS = f"""
 QWidget {{ background:{theme.BG}; color:{theme.TEXT}; font-family: '{theme.FONT_FAMILY}'; }}
 QLabel {{ background:transparent; color:{theme.TEXT}; }}
 QTableWidget {{ background:{theme.BG}; border:none; font-size:10px; outline:none; }}
 QHeaderView::section {{ background:{theme.BG}; color:{theme.MUTED}; border:none;
-    border-bottom:1px solid {theme.BORDER}; padding:2px 4px; font-weight:bold; font-size:9px; }}
-QTableWidget::item {{ border:none; padding:1px 2px; }}
+    border-bottom:1px solid {theme.BORDER}; padding:1px 2px; font-weight:bold; font-size:9px; }}
+QTableWidget::item {{ border:none; padding:0px 1px; }}
 QTableWidget::item:selected {{ background:{theme.BORDER}; }}
 QTabWidget::pane {{ border: none; background: {theme.BG}; }}
 QTabBar::tab {{ background: {theme.PANEL}; color: {theme.MUTED}; border: none; 
@@ -86,25 +108,27 @@ def _sort_key(r):
     s = r["seconds_to_next"]; return s if s is not None else float("inf")
 
 def _ms_parts(row):
-    """Единый показатель MS: отклонение интервала от периода в мс (03d).
-    interval_robot: metro содержит мс (iv*1000), вычисляем отклонения от медианы.
-    StreamGrid: ms_hits уже содержит отклонения.
-    Цвет по худшему: зелёный <=150мс, жёлтый <=300мс, красный больше.
-    Возвращает (parts, fg): parts — список (текст, цвет), fg — цвет ячейки."""
+    """v6.5: колонка MS — готовые отклонения в мс из источника.
+    interval_robot: metro = [(dev_ms, status)] последних интервалов
+    (отклонения от базы серии, считает детектор v10.6).
+    StreamGrid: ms_hits = отклонения гэпов от кратного периода.
+    Порядок вывода: настоящий → предыдущий → пред-предыдущий (разворот).
+    Цвет ячейки по худшему числу: ≤150 мс зелёный (робот настоящий),
+    ≤300 жёлтый, >300 красный (обман/битый тайминг).
+    Чисел может быть меньше трёх: отклонение есть у каждого ИНТЕРВАЛА,
+    у серии из N ударов интервалов N-1 (три слота с 4-го удара)."""
     hits = row.get("ms_hits")
     if hits:
-        devs = [int(h) for h in hits]
+        devs = [int(round(h)) for h in hits][::-1]
     else:
         metro = row.get("metro") or []
-        vals = [int(ms) for ms, st in metro]
-        if not vals:
+        devs = [int(dev) for dev, st in metro][::-1]
+        if not devs:
             ms = row.get("jitter_ms")
             if isinstance(ms, (int, float)):
-                vals = [int(ms)]
+                devs = [int(round(ms))]
             else:
                 return [], theme.TEXT
-        med = statistics.median(vals)
-        devs = [abs(v - med) for v in vals]
     worst = max(devs) if devs else 0
     if worst <= MS_JITTER_MAX:
         fg = theme.GREEN
@@ -120,7 +144,15 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.shared_state = shared_state
         self.setWindowTitle("Приблуда")
-        self.resize(1600, 900)
+        # v6.4: окно по доступной геометрии основного экрана (экран ноутбука
+        # без панели задач), а не фиксированный 1600x900
+        screen = QApplication.primaryScreen()
+        if screen is not None:
+            geom = screen.availableGeometry()
+            self.resize(geom.size())
+            self.move(geom.topLeft())
+        else:
+            self.resize(1600, 900)
         self._prev_keys = set()
         self.mini_windows = {"top": None, "bottom": None}
         self.search_text = ""
@@ -146,6 +178,11 @@ class MainWindow(QMainWindow):
         self.limit_lbl = QLabel("")
         self.limit_lbl.setStyleSheet(f"color: {theme.YELLOW}; background: transparent;")
         top_bar.addWidget(self.limit_lbl)
+
+        # v6.3: алерт-строка детектора "пачки" (синхронные роботы)
+        self.batch_lbl = QLabel("")
+        self.batch_lbl.setStyleSheet(f"color: {theme.YELLOW}; background: transparent;")
+        top_bar.addWidget(self.batch_lbl)
 
         top_bar.addStretch(1)
         
@@ -341,7 +378,7 @@ class MainWindow(QMainWindow):
         t.setShowGrid(False)
         t.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         t.horizontalHeader().setSectionResizeMode(QHeaderView.Fixed)
-        t.horizontalHeader().setMinimumSectionSize(30)
+        t.horizontalHeader().setMinimumSectionSize(24)
         for i, w in enumerate(COL_W): t.setColumnWidth(i, w)
         
         if not show_headers:
@@ -435,7 +472,7 @@ class MainWindow(QMainWindow):
             ]
             
             for c, cell in enumerate(cells):
-                if c == 5:  # колонка MS: единый показатель (мс отклонения)
+                if c == 5:  # колонка MS: настоящий, предыдущий, пред-предыдущий
                     parts, fg = _ms_parts(row)
                     it = QTableWidgetItem(" ".join(p[0] for p in parts))
                     it.setForeground(QColor(fg))
@@ -520,23 +557,57 @@ class MainWindow(QMainWindow):
         layout.addWidget(limits_widget)
 
     def _grid_signals_to_rows(self, now_ts):
-        """Конвертирует shared.grid_signals в формат совместимый с interval_robot rows."""
+        """v6.5.1: конвертирует shared.grid_signals в формат строк таблицы.
+        Ключи сигнала StreamGrid: ticker, side, qty_min, qty_max, period,
+        start_ms, end_ms, repeats, ms_hits (interval/price НЕТ).
+        NEXT: ближайший будущий тик сетки end_ms + k*period."""
         rows = []
+        now_ms = now_ts * 1000.0
         for sig in self.shared_state.grid_signals:
+            period = sig.get("period") or 0
+            end_ms = sig.get("end_ms") or 0
+            sec = None
+            if period > 0 and end_ms > 0:
+                p_ms = period * 1000.0
+                if now_ms <= end_ms:
+                    next_ms = end_ms
+                else:
+                    k = int((now_ms - end_ms) // p_ms) + 1
+                    next_ms = end_ms + k * p_ms
+                sec = (next_ms - now_ms) / 1000.0
+            qmin = sig.get("qty_min", 0)
+            qmax = sig.get("qty_max", qmin)
             rows.append({
-                "symbol": sig["ticker"],
-                "side": sig["side"],
+                "symbol": sig.get("ticker", ""),
+                "side": sig.get("side", "buy"),
                 "preset": "grid",
-                "start_ts": sig["start_ms"] / 1000.0,
-                "seconds_to_next": 0,  # StreamGrid не даёт прогноз
-                "interval": sig["interval"],
-                "qty_variants": list(range(sig["qty_min"], sig["qty_max"] + 1)),
-                "repeats": sig["repeats"],
-                "price_last": sig["price"],
-                "sum_qty": sig["qty_min"],  # упрощение
-                "ms_hits": sig.get("ms_hits", []),
+                "start_ts": (sig.get("start_ms") or 0) / 1000.0,
+                "seconds_to_next": sec,
+                "interval": period,
+                "qty_variants": sorted({qmin, qmax}),
+                "repeats": sig.get("repeats", 0),
+                "price_last": None,
+                "sum_qty": None,
+                "ms_hits": sig.get("ms_hits") or [],
             })
         return rows
+
+    def _update_batch_label(self, batches, now_ts):
+        """v6.3: алерт-строка пачки в верхней панели."""
+        if not batches:
+            self.batch_lbl.setText("")
+            return
+        parts = []
+        for b in batches:
+            parts.append("пачка: " + ", ".join(b["tickers"]) +
+                         f" — общая мс ~{int(b['ms_bucket'])}")
+        self.batch_lbl.setText(" | ".join(parts))
+        if int(now_ts * 2) % 2 == 0:
+            self.batch_lbl.setStyleSheet(
+                "color: #ff4444; font-weight: bold; background: transparent;")
+        else:
+            self.batch_lbl.setStyleSheet(
+                f"color: {theme.YELLOW}; background: transparent;")
 
     def _refresh(self):
         self.setUpdatesEnabled(False)
@@ -561,6 +632,13 @@ class MainWindow(QMainWindow):
                     f"color: {theme.YELLOW}; background: transparent;")
         else:
             self.limit_lbl.setText("")
+
+        # v6.3: детектор "пачки" — сигналы StreamGrid не старше окна
+        now_ms = now_ts * 1000.0
+        grid_sigs = getattr(self.shared_state, "grid_signals", None) or []
+        recent = [s for s in grid_sigs
+                  if 0 <= now_ms - s.get("end_ms", 0) <= BATCH_TIME_WINDOW_MS]
+        self._update_batch_label(find_batches(recent), now_ts)
 
         bf = self.shared_state.batch_flash or {}
         rows = [r for r in self.shared_state.rows if not _is_futures(r["symbol"])]
