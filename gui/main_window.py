@@ -13,9 +13,16 @@ CD/NEXT — белые; LPP — 2 знака; MS — последние три �
 Новые вкладки подключаются через _add_safe_tab: падение вкладки не роняет
 приложение — вместо неё заглушка с текстом ошибки.
 v6.1 (2026-08-22): время часов и NEXT — явно в МСК (было локальное ОС).
+v6.2 (2026-09-08): колонка MS — ЕДИНЫЙ показатель: отклонение интервала
+от периода в миллисекундах (формат 03d), цвет по худшему числу (зелёный
+<= MS_JITTER_MAX 150мс, жёлтый <= 300мс, красный больше). Для строк
+interval_robot — отклонения трёх мс из metro от их медианы; для строк
+StreamGrid — готовые sig["ms_hits"]. Строки StreamGrid добавляются в
+ту же таблицу роботов без пометок источника.
 """
 import sys
 import time
+import statistics
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict
@@ -41,6 +48,7 @@ from gui.ticker_manager import TickerManagerDialog
 from gui.mini_window import MiniWindow
 from gui.tabs.limits.limits_tab import LimitsTab
 from core.sound_manager import SoundManager
+from modules.stream_grid import MS_JITTER_MAX
 
 CONFIRM_REPEATS = 4
 ROW_H = 16
@@ -77,17 +85,34 @@ def _is_futures(s): return "-" in s or s.endswith("F")
 def _sort_key(r):
     s = r["seconds_to_next"]; return s if s is not None else float("inf")
 
-def _metro_parts(row):
-    """MS: последние три интервала В СЕКУНДАХ (074 074 075) с цветом
-    стабильности. Lua v3.10 пишет мс, но GUI показывает секунды — это
-    осознанный дизайн v5 для читаемости."""
-    metro = row.get("metro")
-    if not metro:
-        ms = row.get("jitter_ms")
-        if isinstance(ms, (int, float)): return [(f"{ms:.0f}", theme.TEXT)]
-        return [("", theme.TEXT)]
-    color = {"ok": theme.GREEN, "warn": theme.YELLOW, "bad": theme.RED}
-    return [(f"{int(ms) // 1000:03d}", color[st]) for ms, st in metro]
+def _ms_parts(row):
+    """Единый показатель MS: отклонение интервала от периода в мс (03d).
+    interval_robot: metro содержит мс (iv*1000), вычисляем отклонения от медианы.
+    StreamGrid: ms_hits уже содержит отклонения.
+    Цвет по худшему: зелёный <=150мс, жёлтый <=300мс, красный больше.
+    Возвращает (parts, fg): parts — список (текст, цвет), fg — цвет ячейки."""
+    hits = row.get("ms_hits")
+    if hits:
+        devs = [int(h) for h in hits]
+    else:
+        metro = row.get("metro") or []
+        vals = [int(ms) for ms, st in metro]
+        if not vals:
+            ms = row.get("jitter_ms")
+            if isinstance(ms, (int, float)):
+                vals = [int(ms)]
+            else:
+                return [], theme.TEXT
+        med = statistics.median(vals)
+        devs = [abs(v - med) for v in vals]
+    worst = max(devs) if devs else 0
+    if worst <= MS_JITTER_MAX:
+        fg = theme.GREEN
+    elif worst <= 2 * MS_JITTER_MAX:
+        fg = theme.YELLOW
+    else:
+        fg = theme.RED
+    return [(f"{d:03d}", fg) for d in devs], fg
 
 
 class MainWindow(QMainWindow):
@@ -362,7 +387,7 @@ class MainWindow(QMainWindow):
             table.horizontalHeader().setVisible(True)
 
         for r, row in enumerate(rows):
-            key = (row["symbol"], row["side"], row["preset"], row["start_ts"])
+            key = (row["symbol"], row["side"], row.get("preset", "grid"), row.get("start_ts", 0))
             base_fg = theme.MUTED if key in dying_keys else (theme.GREEN if row["side"] == "buy" else theme.RED)
             bg = None
             det = batch_flash.get(row["symbol"])
@@ -374,14 +399,15 @@ class MainWindow(QMainWindow):
                 if tsf is not None and now_ts - tsf <= 60 and int(now_ts * 3) % 2 == 0:
                     bg = "#3a1a1a"
             
-            sec = row["seconds_to_next"]
-            interval = row["interval"]
+            sec = row.get("seconds_to_next")
+            interval = row.get("interval")
             lpp = row.get("price_last")
             sq = row.get("sum_qty")
             st = row.get("start_ts")
             vpm = f"{sq/max((now_ts-st)/60.0,0.1):.0f}" if isinstance(sq,(int,float)) and isinstance(st,(int,float)) else ""
             
-            variants = sorted(row["qty_variants"])
+            qty_variants = row.get("qty_variants", [0])
+            variants = sorted(qty_variants)
             qty_str = f"{variants[0]}-{variants[-1]}" if len(variants) > 1 else str(variants[0])
             
             # CD: только рабочие серии (минусовые скрыты фильтром в _refresh)
@@ -405,14 +431,14 @@ class MainWindow(QMainWindow):
                 (next_str, next_fg),
                 None,
                 (f"{lpp:.2f}" if isinstance(lpp,(int,float)) else "-", theme.TEXT),
-                (vpm, theme.TEXT), (str(row["repeats"]), base_fg)
+                (vpm, theme.TEXT), (str(row.get("repeats", 0)), base_fg)
             ]
             
             for c, cell in enumerate(cells):
-                if c == 5:  # колонка MS: интервалы в секундах с цветом
-                    parts = _metro_parts(row)
+                if c == 5:  # колонка MS: единый показатель (мс отклонения)
+                    parts, fg = _ms_parts(row)
                     it = QTableWidgetItem(" ".join(p[0] for p in parts))
-                    it.setForeground(QColor(parts[-1][1] if parts else theme.TEXT))
+                    it.setForeground(QColor(fg))
                 else:
                     txt, fg = cell
                     it = QTableWidgetItem(txt)
@@ -429,11 +455,11 @@ class MainWindow(QMainWindow):
         for r in rows:
             grouped[r["symbol"]].append(r)
         
-        sorted_tickers = sorted(grouped.keys(), key=lambda t: max(r["repeats"] for r in grouped[t]), reverse=True)
+        sorted_tickers = sorted(grouped.keys(), key=lambda t: max(r.get("repeats", 0) for r in grouped[t]), reverse=True)
         
         result = []
         for t in sorted_tickers:
-            sorted_rows = sorted(grouped[t], key=lambda x: x["repeats"], reverse=True)
+            sorted_rows = sorted(grouped[t], key=lambda x: x.get("repeats", 0), reverse=True)
             result.extend(sorted_rows)
         return result
 
@@ -493,6 +519,25 @@ class MainWindow(QMainWindow):
         limits_widget = LimitsTab(self.shared_state)
         layout.addWidget(limits_widget)
 
+    def _grid_signals_to_rows(self, now_ts):
+        """Конвертирует shared.grid_signals в формат совместимый с interval_robot rows."""
+        rows = []
+        for sig in self.shared_state.grid_signals:
+            rows.append({
+                "symbol": sig["ticker"],
+                "side": sig["side"],
+                "preset": "grid",
+                "start_ts": sig["start_ms"] / 1000.0,
+                "seconds_to_next": 0,  # StreamGrid не даёт прогноз
+                "interval": sig["interval"],
+                "qty_variants": list(range(sig["qty_min"], sig["qty_max"] + 1)),
+                "repeats": sig["repeats"],
+                "price_last": sig["price"],
+                "sum_qty": sig["qty_min"],  # упрощение
+                "ms_hits": sig.get("ms_hits", []),
+            })
+        return rows
+
     def _refresh(self):
         self.setUpdatesEnabled(False)
         # v6.1: время явно в МСК (было локальное ОС).
@@ -519,24 +564,28 @@ class MainWindow(QMainWindow):
 
         bf = self.shared_state.batch_flash or {}
         rows = [r for r in self.shared_state.rows if not _is_futures(r["symbol"])]
+        
+        # v6.2: добавляем строки StreamGrid
+        grid_rows = self._grid_signals_to_rows(now_ts)
+        rows.extend(grid_rows)
 
         if self.search_text:
             rows = [r for r in rows if self.search_text in r["symbol"]]
 
         # v5: ТОЛЬКО рабочие серии — CD >= 0, минусовые не показываются вообще
         rows = [r for r in rows
-                if r["seconds_to_next"] is None or r["seconds_to_next"] >= 0]
+                if r.get("seconds_to_next") is None or r.get("seconds_to_next") >= 0]
 
-        cur = {(r["symbol"], r["side"], r["preset"], r["start_ts"]) for r in rows}
+        cur = {(r["symbol"], r["side"], r.get("preset", "grid"), r.get("start_ts", 0)) for r in rows}
         dk = self._prev_keys - cur
         
-        grp_buy = self._group_by_ticker([r for r in rows if r["side"]=="buy" and r["repeats"] >= 2])
-        grp_sell = self._group_by_ticker([r for r in rows if r["side"]=="sell" and r["repeats"] >= 2])
+        grp_buy = self._group_by_ticker([r for r in rows if r["side"]=="buy" and r.get("repeats", 0) >= 2])
+        grp_sell = self._group_by_ticker([r for r in rows if r["side"]=="sell" and r.get("repeats", 0) >= 2])
         
-        long1 = [r for r in grp_buy if r["repeats"] >= CONFIRM_REPEATS]
-        long2 = [r for r in grp_buy if 2 <= r["repeats"] < CONFIRM_REPEATS]
-        short1 = [r for r in grp_sell if r["repeats"] >= CONFIRM_REPEATS]
-        short2 = [r for r in grp_sell if 2 <= r["repeats"] < CONFIRM_REPEATS]
+        long1 = [r for r in grp_buy if r.get("repeats", 0) >= CONFIRM_REPEATS]
+        long2 = [r for r in grp_buy if 2 <= r.get("repeats", 0) < CONFIRM_REPEATS]
+        short1 = [r for r in grp_sell if r.get("repeats", 0) >= CONFIRM_REPEATS]
+        short2 = [r for r in grp_sell if 2 <= r.get("repeats", 0) < CONFIRM_REPEATS]
         
         self._fill_table(self.blocks[0][0], long1, now_ts, bf, dk, True, limit_flash)
         self._fill_table(self.blocks[0][1], [], now_ts, bf, dk, False, limit_flash)
