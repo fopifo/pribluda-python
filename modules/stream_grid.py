@@ -1,5 +1,5 @@
 """
-Приблуда на python — StreamGrid v2.2: стриминг-детектор сеток роботов.
+Приблуда на python — StreamGrid v2.3: стриминг-детектор сеток роботов.
 Управлено по ревью 2026-09-05: ключ буфера — (symbol, side), НЕ (…, qty).
 Объёмы группируются в кластеры (<=2 вариантов, ratio<=1.10) ВНУТРИ стороны,
 поэтому чередующий робот (45/46) остаётся ОДНОЙ серией с верным периодом p,
@@ -12,6 +12,14 @@ v2.2 (2026-09-07): миллисекундный гейт устойчивост�
     случайные серии — разброс мс-остатков велик. Оба гейта вместе.
     Побочный эффект: ms_hits в сигнале — для GUI .MS и обнаружения
     "пачек" (несколько тикеров бьют в одну миллисекунду одновременно).
+v2.3 (2026-09-08): ФИЛЬТР NOISY QTY — если qty серии в списке шумовых
+    (обычный рыночный размер, не редкость), grid_lock отключается:
+    разрешено только точное совпадение интервала (k=1), без "прощения"
+    пропущенных ударов (k>1). Блокирует SBER-паттерн: случайные сделки
+    qty=10 у ликвидного тикера клеятся в фальшивую "серию".
+    noisy_qty передаётся в конструктор как dict[str, set[int]] (по
+    тикерам), проверяется через .get(sym, set()), считается заранее
+    на старте дня, не на лету.
 interval_robot.py НЕ трогает (чистое A/B по ревью п.10).
 """
 from collections import deque, defaultdict
@@ -64,10 +72,11 @@ class _Cluster:
 
 
 class StreamGrid:
-    def __init__(self, min_repeats=4, check_every=4, tol=0.12):
+    def __init__(self, min_repeats=4, check_every=4, tol=0.12, noisy_qty=None):
         self.min_repeats = min_repeats
         self.check_every = check_every
         self.tol = tol
+        self.noisy_qty = noisy_qty or {}
         self.sides = defaultdict(list)
         self.emitted = {}
         self._n = defaultdict(int)
@@ -117,6 +126,11 @@ class StreamGrid:
         for g in tail:
             k = round(g / p)
             if k < 1 or abs(g - k * p) > max(k * p * self.tol, 0.7):
+                return None
+            # v2.3: ФИЛЬТР NOISY QTY — если qty серии в шумовых (обычный
+            # рыночный размер), grid_lock отключается: только k=1 (точное
+            # совпадение), без "прощения" пропущенных ударов (k>1).
+            if k > 1 and self.noisy_qty and any(q in self.noisy_qty.get(sym, set()) for q in c.qs):
                 return None
             if k == 1:
                 single += 1

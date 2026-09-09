@@ -6,12 +6,14 @@
 v2.1: min_repeats и tol из командной строки (свип порогов, ревью п.6);
 FN-список (aniscan видит, мы нет) для чек-листа классов (CHMF-тип / SBER-тип).
 v2.2 (2026-09-05): разделение метрик на "чистая сетка" и "burst" (ревью п.5).
+v2.3 (2026-09-08): флаг --noisy для теста фильтра шумовых qty (SBER-паттерн).
 """
 import json
 import sys
 import time
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from collections import Counter, defaultdict
 
 BASE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(BASE))
@@ -24,6 +26,25 @@ MSK = timezone(timedelta(hours=3))
 # X5: загрязнённая сетка (случайные сделки того же объёма)
 # OZON: стабильной сетки нет (скринеры агрегируют burst-ы)
 BURST_TICKERS = {'SBER', 'X5', 'OZON'}
+
+NOISY_QTY_SHARE = 0.03  # 3% всех сделок дня одним и тем же qty — шумовой
+
+
+def compute_noisy_qty(trades):
+    """trades: [(ts, sym, side, qty), ...] — все сделки за день.
+    Возвращает {sym: set(qty)} — объёмы, которые считаются шумовыми."""
+    by_sym = defaultdict(list)
+    for ts, sym, side, qty in trades:
+        by_sym[sym].append(qty)
+    result = {}
+    for sym, qtys in by_sym.items():
+        if not qtys:
+            continue
+        total = len(qtys)
+        counts = Counter(qtys)
+        noisy = {q for q, c in counts.items() if c / total >= NOISY_QTY_SHARE}
+        result[sym] = noisy
+    return result
 
 
 class Progress:
@@ -156,9 +177,16 @@ def main():
     date_str = sys.argv[1] if len(sys.argv) > 1 else "2026-09-04"
     mr = int(sys.argv[2]) if len(sys.argv) > 2 else 4
     tol = float(sys.argv[3]) if len(sys.argv) > 3 else 0.12
+    noisy = "--noisy" in sys.argv
     an = load_aniscan(date_str)
     trades = load_trades(date_str)
-    sg = StreamGrid(min_repeats=mr, tol=tol)
+    noisy_by_sym = compute_noisy_qty(trades) if noisy else {}
+    if noisy:
+        print(f"[noisy] включён фильтр шумовых qty (доля >={NOISY_QTY_SHARE})")
+        for sym, qs in sorted(noisy_by_sym.items()):
+            if qs:
+                print(f"  {sym}: {sorted(qs)[:10]}...")
+    sg = StreamGrid(min_repeats=mr, tol=tol, noisy_qty=noisy_by_sym)
     dets = []
     pb = Progress(len(trades), date_str)
     for ts, sym, side, qty in trades:
@@ -178,7 +206,7 @@ def main():
     m_clean = compute_metrics(an_clean, dets_clean, "ЧИСТАЯ СЕТКА (без burst)")
     m_burst = compute_metrics(an_burst, dets_burst, "BURST (SBER/X5/OZON)")
 
-    print(f"[{date_str}] mr={mr} tol={tol}")
+    print(f"[{date_str}] mr={mr} tol={tol} noisy={noisy}")
     print(f"\n=== {m_all['label']} ===")
     print(f"aniscan={m_all['aniscan']} наших={m_all['ours']} совпало={m_all['matched']}")
     print(f"Recall_strict={m_all['recall']:.1%}  Precision_strict={m_all['precision']:.1%}")
