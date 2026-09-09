@@ -214,7 +214,7 @@ class QuikBackend:
             with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
                 f.seek(0, 2)
                 file_size = f.tell()
-                read_size = min(500000, file_size)
+                read_size = min(5000000, file_size)
                 f.seek(file_size - read_size)
                 f.readline()  # пропускаем неполную строку
                 for line in f:

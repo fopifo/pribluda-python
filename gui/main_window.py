@@ -40,6 +40,18 @@ StreamGrid ключи period/qty_min/qty_max (нет interval/price); прогн
 v6.5.2 (2026-09-08): компактнее — ROW_H 16→14, узкие колонки CD/QTY/INT/
 NEXT/VPM/LEN, MS расширена до 80, паддинги ячеек и заголовков 0-1px,
 чтобы три мс-числа влезали без обрезки.
+v6.6 (2026-09-09):
+  1) MS: числа > 999 отображаются как "999+" вместо сырых тысяч
+     (16967 → "999+"). Цвет ячейки всё равно по реальному значению
+     (красный). Защищает от мусорных чисел в поддельных grid_lock-сериях.
+  2) Кандидаты repeats < 4 НЕ ПОКАЗЫВАЮТСЯ вообще — только после
+     подтверждения 4-м ударом. Блоки long2/short2 пусты.
+     (Детектор по-прежнему собирает их внутри — только отображение.)
+v6.7 (2026-09-09): длинные серии (база интервала > LONG_INTERVAL_SUSPECT
+120с) — отдельный визуальный статус "требует проверки" (SBER-класс):
+тикера/QTY/INT/LEN серые вместо зелёный/красный + тултип на тикере.
+MS остаётся честным (свой цвет). Не наравне с обычными роботами, пока
+не решён вопрос с noisy-qty фильтром.
 """
 import sys
 import time
@@ -73,6 +85,9 @@ from modules.stream_grid import MS_JITTER_MAX
 from modules.batch_detector import find_batches, BATCH_TIME_WINDOW_MS
 
 CONFIRM_REPEATS = 4
+# v6.7: база интервала выше этого порога (сек) — серия "требует проверки"
+# (SBER-класс длинных склеек), серый статус вместо зелёный/красный.
+LONG_INTERVAL_SUSPECT = 120.0
 ROW_H = 14
 HEADERS = ["CD", "TICKER", "QTY", "INT", "NEXT", "MS", "LPP", "VPM", "LEN"]
 COL_W = [30, 50, 46, 34, 44, 80, 52, 40, 28]
@@ -108,13 +123,15 @@ def _sort_key(r):
     s = r["seconds_to_next"]; return s if s is not None else float("inf")
 
 def _ms_parts(row):
-    """v6.5: колонка MS — готовые отклонения в мс из источника.
+    """v6.6: колонка MS — готовые отклонения в мс из источника.
     interval_robot: metro = [(dev_ms, status)] последних интервалов
     (отклонения от базы серии, считает детектор v10.6).
     StreamGrid: ms_hits = отклонения гэпов от кратного периода.
     Порядок вывода: настоящий → предыдущий → пред-предыдущий (разворот).
     Цвет ячейки по худшему числу: ≤150 мс зелёный (робот настоящий),
     ≤300 жёлтый, >300 красный (обман/битый тайминг).
+    Числа > 999 отображаются как "999+" (защита от мусора в поддельных
+    grid_lock-сериях типа SBER-кейса). Цвет по РЕАЛЬНОМУ значению.
     Чисел может быть меньше трёх: отклонение есть у каждого ИНТЕРВАЛА,
     у серии из N ударов интервалов N-1 (три слота с 4-го удара)."""
     hits = row.get("ms_hits")
@@ -136,7 +153,8 @@ def _ms_parts(row):
         fg = theme.YELLOW
     else:
         fg = theme.RED
-    return [(f"{d:03d}", fg) for d in devs], fg
+    # v6.6: кэп — числа >999 как "999+", цвет от реального значения
+    return [((f"{d:03d}" if d <= 999 else "999+"), fg) for d in devs], fg
 
 
 class MainWindow(QMainWindow):
@@ -438,6 +456,11 @@ class MainWindow(QMainWindow):
             
             sec = row.get("seconds_to_next")
             interval = row.get("interval")
+            # v6.7: длинная серия (база >120с) — статус "требует проверки":
+            # серый вместо зелёный/красный (SBER-класс склеек).
+            suspect = isinstance(interval, (int, float)) and interval > LONG_INTERVAL_SUSPECT
+            if suspect and key not in dying_keys:
+                base_fg = theme.MUTED
             lpp = row.get("price_last")
             sq = row.get("sum_qty")
             st = row.get("start_ts")
@@ -483,6 +506,9 @@ class MainWindow(QMainWindow):
                 
                 if bg: it.setBackground(QColor(bg))
                 it.setTextAlignment(Qt.AlignCenter)
+                # v6.7: тултип-пояснение на тикере подозрительной серии
+                if c == 1 and suspect:
+                    it.setToolTip("интервал >120с — требует проверки (не торговать вслепую)")
                 table.setItem(r, c, it)
                 
         table.setUpdatesEnabled(True)
@@ -660,20 +686,21 @@ class MainWindow(QMainWindow):
         grp_buy = self._group_by_ticker([r for r in rows if r["side"]=="buy" and r.get("repeats", 0) >= 2])
         grp_sell = self._group_by_ticker([r for r in rows if r["side"]=="sell" and r.get("repeats", 0) >= 2])
         
+        # v6.6: показываем ТОЛЬКО подтверждённые серии (repeats >= 4).
+        # long2/short2 (кандидаты с 2-3 повторами) оставлены пустыми —
+        # детектор их по-прежнему собирает внутри, просто не отображаем.
         long1 = [r for r in grp_buy if r.get("repeats", 0) >= CONFIRM_REPEATS]
-        long2 = [r for r in grp_buy if 2 <= r.get("repeats", 0) < CONFIRM_REPEATS]
         short1 = [r for r in grp_sell if r.get("repeats", 0) >= CONFIRM_REPEATS]
-        short2 = [r for r in grp_sell if 2 <= r.get("repeats", 0) < CONFIRM_REPEATS]
         
         self._fill_table(self.blocks[0][0], long1, now_ts, bf, dk, True, limit_flash)
         self._fill_table(self.blocks[0][1], [], now_ts, bf, dk, False, limit_flash)
-        self._fill_table(self.blocks[1][0], long2, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[1][0], [], now_ts, bf, dk, True, limit_flash)   # long2 скрыт
         self._fill_table(self.blocks[1][1], [], now_ts, bf, dk, False, limit_flash)
         
         self._fill_table(self.blocks[2][0], short1, now_ts, bf, dk, True, limit_flash)
         self._fill_table(self.blocks[2][1], [], now_ts, bf, dk, False, limit_flash)
         
-        self._fill_table(self.blocks[3][0], short2, now_ts, bf, dk, True, limit_flash)
+        self._fill_table(self.blocks[3][0], [], now_ts, bf, dk, True, limit_flash)   # short2 скрыт
         self._fill_table(self.blocks[3][1], [], now_ts, bf, dk, False, limit_flash)
         
         self._prev_keys = cur
