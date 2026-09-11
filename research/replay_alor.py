@@ -69,6 +69,9 @@ def main():
         double_hit = float(args[i + 1])
     if "--no-min-qty" in args:
         no_min_qty = True
+    noisy_qty = False
+    if "--noisy-qty" in args:
+        noisy_qty = True
 
     files = sorted(DATA.glob(f"*_{date_str}.json"))
     if not files:
@@ -80,6 +83,8 @@ def main():
         print(f"[replay_alor] РЕЖИМ A/B: min_double_hit_gap_sec={double_hit}")
     if no_min_qty:
         print("[replay_alor] РЕЖИМ A/B: без порога min_qty")
+    if noisy_qty:
+        print("[replay_alor] РЕЖИМ A/B: фильтр noisy qty v12 C+B")
 
     trades = []
     for f in files:
@@ -103,6 +108,8 @@ def main():
                 ov["min_double_hit_gap_sec"] = double_hit
             if no_min_qty:
                 ov["min_qty"] = 1
+            if noisy_qty:
+                ov["noisy_qty_filter"] = True
             dets[sym] = [IntervalRobotDetector(sym, c)
                          for c in get_detector_configs(sym, ov.get("min_qty", 1), ov)]
             for d in dets[sym]:

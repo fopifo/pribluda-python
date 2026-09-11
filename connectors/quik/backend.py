@@ -62,6 +62,9 @@ class QuikBackend:
         self.lines_read = 0
         self.trades_fed = 0
         self.confirm_times = {}   # symbol -> ts последнего подтверждения
+        self._reader_t0 = None
+        self._reader_count = 0
+        self._feed_times = []
 
         # SpringMonitor для спредов тикеров относительно IMOEXF
         self.spring_settings = load_spring_settings()
@@ -91,17 +94,26 @@ class QuikBackend:
         return self.dets[sym]
 
     def feed(self, trade):
+        _t0 = time.time()
+        _lag_ms = time.time() * 1000.0 - float(trade.get("timestamp") or 0)
+        if _lag_ms > 2000:
+            _log.warning(f"[LAG] {trade.get('symbol')} lag_ms={_lag_ms:.0f}")
         sym = trade["symbol"]
         if sym not in self.allowed:
             return
 
         # Interval robot detector (рабочий код, не трогать)
+        _t1 = time.time()
         for d in self._dets_for(sym):
             d.on_trade(trade)
             for ts_sec in d.drain_confirms():
                 self.confirm_times[sym] = ts_sec
+        _dt_robot = (time.time() - _t1) * 1000.0
+        if _dt_robot > 10.0:
+            _log.warning(f"[SLOW_ROBOT] {sym} robot_ms={_dt_robot:.1f}")
 
         # StreamGrid: живая детекция сеток (отключается USE_STREAM_GRID=False)
+        _t2 = time.time()
         if self.use_stream_grid:
             sig = self.stream_grid.on_trade(
                 sym, trade["side"], trade["qty"], trade["timestamp"]
@@ -114,15 +126,25 @@ class QuikBackend:
                     f"qty=[{sig['qty_min']},{sig['qty_max']}] "
                     f"int={sig['period']:.1f}s"
                 )
+        _dt_grid = (time.time() - _t2) * 1000.0
+        if _dt_grid > 10.0:
+            _log.warning(f"[SLOW_GRID] {sym} grid_ms={_dt_grid:.1f}")
 
         # Spring monitor (спред тикера относительно IMOEXF)
+        _t3 = time.time()
         if sym in self.spring_monitors:
             price = trade.get("price")
             ts_sec = trade["timestamp"] / 1000.0
             if price is not None:
                 self.spring_monitors[sym].on_trade(sym, price, ts_sec)
+        _dt_spring = (time.time() - _t3) * 1000.0
+        if _dt_spring > 10.0:
+            _log.warning(f"[SLOW_SPRING] {sym} spring_ms={_dt_spring:.1f}")
 
         self.trades_fed += 1
+        _dt = (time.time() - _t0) * 1000.0
+        if _dt > 50.0:
+            _log.warning(f"[SLOW_FEED] {sym} feed_ms={_dt:.1f}")
 
     def parse(self, line):
         line = line.strip()
@@ -232,6 +254,8 @@ class QuikBackend:
 
         # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
         _log.info("Switching to live tail mode (CSV ms, no overwrite)")
+        self._reader_t0 = time.time()
+        self._reader_count = 0
         while True:
             try:
                 with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
@@ -244,6 +268,17 @@ class QuikBackend:
                         t = self.parse(line)
                         if t and t["timestamp"] >= day0_ms:
                             self.feed(t)
+                        self._reader_count += 1
+                        if self._reader_count % 1000 == 0:
+                            elapsed = time.time() - self._reader_t0
+                            rate = self._reader_count / max(elapsed, 0.001)
+                            pos = f.tell()
+                            f.seek(0, 2)
+                            end = f.tell()
+                            f.seek(pos)
+                            backlog = end - pos
+                            _log.info(f"[READER] count={self._reader_count} "
+                                      f"rate={rate:.0f}/s backlog_bytes={backlog}")
             except FileNotFoundError:
                 time.sleep(1)
 
