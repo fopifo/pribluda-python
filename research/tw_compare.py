@@ -279,6 +279,7 @@ def main():
     print("=" * 70)
     print(f"TP: {len(tp)}   FP: {len(fp)}   FN(реальные): {len(fn)}   bursts(вне): {len(tw) - len(real)}")
     print(f"Precision: {prec:.1%}   Recall: {rec:.1%}")
+    print(f"METRICS: TP={len(tp)} FP={len(fp)} FN={len(fn)}")
 
     if tp:
         print(f"\n--- TP (совпали, первые {DETAIL_LIMIT}) ---")
