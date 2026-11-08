@@ -18,6 +18,10 @@ v11 (2026-08-25, финализация):
 - Итог финальной конфигурации: threshold=20.0, grid=700, jitter=0.3.
 - interval_tolerance 0.05->0.08 (эксперимент 4a через ticker_settings.json)
   эффекта не дал (TP/FN/FP идентичны 49/681/36254) — ВЕРНУТЬ 0.05.
+v12 (2026-11-08): Alor WebSocket стрим (замена QUIK CSV).
+- USE_ALOR_STREAM=False (дефолт ВЫКЛ, тестирование в понедельник).
+- ALOR_STREAM_TICKERS=None (все из ticker_settings.json) или список.
+- ALOR_STREAM_DEPTH=50 (backfill последних N сделок при подключении).
 """
 from typing import List, Dict, Any
 
@@ -54,7 +58,13 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
     }
     configs.append(base_config)
     return configs
+
 # StreamGrid (живая детекция сеток, 2026-09-05)
 USE_STREAM_GRID = True
 STREAM_MIN_REPEATS = 6
 STREAM_TOL = 0.08
+
+# Alor WebSocket стрим (замена QUIK CSV, 2026-11-08)
+USE_ALOR_STREAM = False  # дефолт ВЫКЛ, тестирование в понедельник
+ALOR_STREAM_TICKERS = None  # None = все из ticker_settings.json, или список ["SBER", "GAZP", ...]
+ALOR_STREAM_DEPTH = 50  # backfill последних N сделок при подключении (0 = без backfill)
