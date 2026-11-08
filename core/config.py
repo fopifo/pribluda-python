@@ -65,6 +65,6 @@ STREAM_MIN_REPEATS = 6
 STREAM_TOL = 0.08
 
 # Alor WebSocket стрим (замена QUIK CSV, 2026-11-08)
-USE_ALOR_STREAM = False  # дефолт ВЫКЛ, тестирование в понедельник
+USE_ALOR_STREAM = True  # дефолт ВЫКЛ, тестирование в понедельник
 ALOR_STREAM_TICKERS = None  # None = все из ticker_settings.json, или список ["SBER", "GAZP", ...]
 ALOR_STREAM_DEPTH = 50  # backfill последних N сделок при подключении (0 = без backfill)
