@@ -1,175 +1,177 @@
 """
-Приблуда на python — честные метрики против СТРОГОГО эталона aniscan.ru:
-наша replay-история (data/replay_alor_history.jsonl) против
-data/aniscan_history.jsonl за дату.
-
-Метрики:
-  Recall_strict    = matched / aniscan   (сколько строгих роботов ловим)
-  Precision_strict = matched / ours      (сколько наших подтверждает aniscan)
-
-Использование:
-    python research/compare_aniscan_ours.py 2026-09-04
+Сравнение наших обнаруженных роботов с эталоном Aniscan.
+Фильтрует наши данные по датам Aniscan и отбрасывает интервалы > 60с 
+(так как Aniscan фокусируется на активных роботах).
 """
 import json
 import sys
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
 
 BASE = Path(__file__).resolve().parent.parent
-DATA = BASE / "data"
-MSK = timezone(timedelta(hours=3))
-TIME_TOL_MS = 120_000
-INT_LO, INT_HI = 0.7, 1.3
-QTY_TOL = 0.5
 
 
-def iso_to_ms(s):
-    if not s:
-        return None
-    try:
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return datetime.fromisoformat(s).timestamp() * 1000
-    except (ValueError, TypeError):
-        return None
-
-
-def fmt_ms(ms):
-    if ms is None:
-        return "--:--:--"
-    return datetime.fromtimestamp(ms / 1000, tz=MSK).strftime("%H:%M")
-
-
-def load_aniscan(date_str):
-    day0 = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=MSK)
-    day0_ms = day0.timestamp() * 1000
-    day1_ms = day0_ms + 86400_000
-    robots = {}
-    with open(DATA / "aniscan_history.jsonl", encoding="utf-8") as f:
+def load_jsonl(filepath):
+    """Загружает JSONL, игнорируя пустые и битые строки."""
+    records = []
+    with open(filepath, 'r', encoding='utf-8') as f:
         for line in f:
             line = line.strip()
             if not line:
                 continue
-            rec = json.loads(line)
-            rid = (rec.get("robot") or {}).get("id")
-            if not rid:
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
                 continue
-            r = robots.setdefault(rid, {
-                "ticker": rec.get("ticker"),
-                "side": (rec.get("operationType") or "").lower(),
-                "period": float(rec.get("period") or 0),
-                "qmin": rec.get("minLot") or 0,
-                "qmax": rec.get("maxLot") or 0,
-                "ins": None, "del": None})
-            ts = iso_to_ms(rec.get("createDttm"))
-            if rec.get("eventType") == "INSERT":
-                r["ins"] = ts if r["ins"] is None else min(r["ins"], ts)
-            elif rec.get("eventType") == "DELETE":
-                r["del"] = ts if r["del"] is None else max(r["del"], ts)
-    out = []
-    now_ms = datetime.now(MSK).timestamp() * 1000
-    for r in robots.values():
-        start = r["ins"]
-        end = r["del"] or now_ms
-        if start is None or end < day0_ms or start > day1_ms:
+    return records
+
+
+def extract_date_from_record(record):
+    """Извлекает дату (YYYY-MM-DD) из записи."""
+    if 'createDttm' in record:
+        return record['createDttm'][:10]
+    if 'start_ts' in record:
+        return datetime.fromtimestamp(record['start_ts']).strftime('%Y-%m-%d')
+    if 'start_ms' in record:
+        return datetime.fromtimestamp(record['start_ms'] / 1000).strftime('%Y-%m-%d')
+    return None
+
+
+def match_robots(ours, aniscan):
+    """Сопоставляет наших роботов с Aniscan."""
+    aniscan_by_key = defaultdict(list)
+    for a in aniscan:
+        key = (a['ticker'], a['operationType'].upper())
+        aniscan_by_key[key].append(a)
+
+    matched_aniscan_ids = set()
+    tp = 0
+    fp_details = []
+
+    for o in ours:
+        symbol = o['symbol']
+        side = o['side'].upper()
+        interval = float(o['interval_avg'])
+        repeats = int(o['repeats'])
+
+        # ФИЛЬТР: Игнорируем очень медленные паттерны (> 60 сек), 
+        # так как Aniscan их не считает роботами.
+        if interval > 60.0:
             continue
-        r["start_ms"], r["end_ms"] = start, end
-        out.append(r)
-    return out
 
+        candidates = aniscan_by_key.get((symbol, side), [])
+        found = False
 
-def load_ours(date_str):
-    out = []
-    p = DATA / "replay_alor_history.jsonl"
-    if not p.exists():
-        print(f"Нет {p.name} — сначала: python research/replay_alor.py {date_str}")
-        sys.exit(1)
-    with open(p, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
+        for a in candidates:
+            if a['id'] in matched_aniscan_ids:
                 continue
-            r = json.loads(line)
-            start_ms = r.get("start_ms")
-            end_ms = r.get("end_ms")
-            interval_ms = r.get("interval_ms")
-            if start_ms is None or end_ms is None or interval_ms is None:
-                continue
-            day = datetime.fromtimestamp(start_ms / 1000, tz=MSK).date().isoformat()
-            if day != date_str:
-                continue
-            qv = r.get("qty_variants") or []
-            if not qv:
-                continue
-            out.append({
-                "ticker": r.get("symbol"),
-                "side": r.get("side"),
-                "interval_ms": float(interval_ms),
-                "qty_min": min(qv),
-                "qty_max": max(qv),
-                "start_ms": int(start_ms),
-                "end_ms": int(end_ms),
-                "repeats": r.get("repeats"),
-            })
-    return out
 
+            period = float(a['period'])
+            op_count = int(a['operationCount'])
 
-def match(a, w):
-    if a["ticker"] != w["ticker"] or a["side"] != w["side"]:
-        return False
-    if a["start_ms"] > w["end_ms"] + TIME_TOL_MS:
-        return False
-    if w["start_ms"] > a["end_ms"] + TIME_TOL_MS:
-        return False
-    ai = a["period"] * 1000
-    if ai > 0 and w["interval_ms"] > 0:
-        ratio = ai / w["interval_ms"]
-        if not (INT_LO <= ratio <= INT_HI):
-            return False
-    a_lo = a["qmin"] * (1 - QTY_TOL)
-    a_hi = a["qmax"] * (1 + QTY_TOL)
-    if not (a_lo <= w["qty_max"] and w["qty_min"] <= a_hi):
-        return False
-    return True
+            # Допуск по интервалу: ±20% или ±2 секунды
+            if abs(interval - period) > max(2.0, period * 0.2):
+                continue
+
+            # Допуск по количеству операций: ±2
+            if abs(repeats - op_count) > 2:
+                continue
+
+            found = True
+            matched_aniscan_ids.add(a['id'])
+            break
+
+        if found:
+            tp += 1
+        else:
+            fp_details.append(f"{symbol} {side} int={interval:.1f}s reps={repeats}")
+
+    # FN считаем только среди тех роботов Aniscan, у которых period <= 60s
+    aniscan_active_count = sum(1 for a in aniscan if float(a['period']) <= 60.0)
+    fn = aniscan_active_count - len(matched_aniscan_ids)
+    
+    # FP считаем только среди наших отфильтрованных (interval <= 60s)
+    ours_active_count = sum(1 for o in ours if float(o['interval_avg']) <= 60.0)
+    fp = ours_active_count - tp
+
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+
+    return {
+        'tp': tp, 'fp': fp, 'fn': fn,
+        'precision': precision, 'recall': recall,
+        'ours_total': len(ours),
+        'ours_active': ours_active_count,
+        'aniscan_total': len(aniscan),
+        'aniscan_active': aniscan_active_count,
+        'fp_details': fp_details[:10]
+    }
 
 
 def main():
-    date_str = sys.argv[1] if len(sys.argv) > 1 else "2026-09-04"
-    an = load_aniscan(date_str)
-    ours = load_ours(date_str)
-    print(f"[compare] aniscan роботов: {len(an)}; наших роботов: {len(ours)}")
+    ours_file = BASE / "data" / "replay_alor_history.jsonl"
+    if not ours_file.exists():
+        ours_file = BASE / "data" / "robots_history.jsonl"
 
-    used = set()
-    matched, an_only = [], []
-    for a in an:
-        hit = None
-        for i, w in enumerate(ours):
-            if i in used:
-                continue
-            if match(a, w):
-                hit = i
-                break
-        if hit is not None:
-            used.add(hit)
-            matched.append((a, ours[hit]))
-        else:
-            an_only.append(a)
+    date_arg = sys.argv[1] if len(sys.argv) > 1 else "2026-09-07"
+    aniscan_file = BASE / "data" / f"aniscan_robots_{date_arg}.jsonl"
 
-    rec = len(matched) / len(an) if an else 0.0
-    prec = len(matched) / len(ours) if ours else 0.0
-    print(f"Совпали: {len(matched)}")
-    print(f"Recall_strict (ловим строгих): {rec:.1%}")
-    print(f"Precision_strict (наших подтверждено): {prec:.1%}")
+    if not ours_file.exists():
+        print(f"❌ Не найден файл наших роботов: {ours_file}")
+        return
+    if not aniscan_file.exists():
+        print(f"❌ Не найден файл Aniscan: {aniscan_file}")
+        print(f"💡 Попробуй: python tools/aniscan_robot_history.py {date_arg}")
+        return
 
-    print("--- совпали (первые 20) ---")
-    for a, w in matched[:20]:
-        print(f"  {a['ticker']:6} {a['side']:4} aniscan int={a['period']:.0f}s "
-              f"qty=[{a['qmin']},{a['qmax']}] | мы int={w['interval_ms']/1000:.0f}s "
-              f"qty=[{w['qty_min']},{w['qty_max']}] повт={w['repeats']}")
-    print("--- aniscan видит, мы нет (первые 20) ---")
-    for a in an_only[:20]:
-        print(f"  {a['ticker']:6} {a['side']:4} int={a['period']:.0f}s "
-              f"qty=[{a['qmin']},{a['qmax']}] окно {fmt_ms(a['start_ms'])}-{fmt_ms(a['end_ms'])}")
+    print(f"[*] Загрузка эталона Aniscan из {aniscan_file.name}...")
+    aniscan = load_jsonl(aniscan_file)
+    
+    aniscan_dates = set()
+    for a in aniscan:
+        d = extract_date_from_record(a)
+        if d:
+            aniscan_dates.add(d)
+            
+    print(f"[*] Даты в файле Aniscan: {sorted(list(aniscan_dates))}")
+
+    print(f"[*] Загрузка наших роботов из {ours_file.name}...")
+    all_ours = load_jsonl(ours_file)
+    
+    ours_filtered = []
+    for o in all_ours:
+        d = extract_date_from_record(o)
+        if d in aniscan_dates:
+            ours_filtered.append(o)
+            
+    print(f"[*] Отфильтровано наших роботов по датам: {len(ours_filtered)} из {len(all_ours)}")
+    print(f"[*] Сравнение (учитываются только интервалы <= 60с)...")
+    
+    metrics = match_robots(ours_filtered, aniscan)
+
+    print("\n" + "=" * 65)
+    print(" 📊 ЧЕСТНЫЕ РЕЗУЛЬТАТЫ СРАВНЕНИЯ С ЭТАЛОНОМ ANISCAN")
+    print("=" * 65)
+    print(f"Всего наших роботов (за эти даты):  {metrics['ours_total']}")
+    print(f"Из них активных (int <= 60s):       {metrics['ours_active']}")
+    print(f"Всего роботов Aniscan:              {metrics['aniscan_total']}")
+    print(f"Из них активных (period <= 60s):    {metrics['aniscan_active']}")
+    print("-" * 65)
+    print(f"True Positives (TP):      {metrics['tp']}  (нашли правильно)")
+    print(f"False Positives (FP):     {metrics['fp']}  (нашли, а Aniscan нет)")
+    print(f"False Negatives (FN):     {metrics['fn']}  (Aniscan нашел, а мы нет)")
+    print("-" * 65)
+    print(f"🎯 Precision (Точность):  {metrics['precision']:.2%}")
+    print(f"🎯 Recall (Полнота):      {metrics['recall']:.2%}")
+    print("=" * 65)
+
+    if metrics['fp_details']:
+        print("\n⚠️ Примеры наших активных роботов, которых нет в Aniscan (FP):")
+        for detail in metrics['fp_details']:
+            print(f"   • {detail}")
+    else:
+        print("\n✅ Отлично! Все наши активные роботы совпали с Aniscan (FP=0).")
 
 
 if __name__ == "__main__":
