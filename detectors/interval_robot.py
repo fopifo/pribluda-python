@@ -64,6 +64,18 @@ v12 (2026-09-10): ФИЛЬТР NOISY QTY (перенос C+B из StreamGrid v2.
 (условие m > s); один пропуск терпим (m=1 при нескольких s не блокирует).
 Дефолт noisy_qty_filter=False (live-поведение не меняется до решения
 включить); A/B-прогоны включают флаг явно через settings.
+v12.1 (2026-09-12): ЧЕСТНЫЙ «ОСНОВНОЙ» QTY В ФИЛЬТРЕ NOISY.
+В v12 фильтр блокировал серию, если ЛЮБОЙ qty из qty_variants попал
+в шумовую долю — это было неправильно: серия с основным qty=50 и
+случайным вторичным qty=5 (из-за кривого удара) блокировалась
+целиком, хотя основной qty не шумовой. В v12.1 «основной» qty =
+самый частый объём ВНУТРИ САМОЙ серии (max по qty_counts), а не
+qty_variants[0] и не весь qty_variants. Серия шумовая ТОЛЬКО если
+основной qty попал в шумовую долю. Кратные пропуски (k>1) со
+случайным вторичным qty больше не рушат серию. Прямые потери
+(OZON sell 58.4s qty=[5,5], LKOH buy 173s qty=[10,11]) остаются
+заблокированными (правило работает). Косвенные потери (OZON buy
+50.8s qty=[50,51], SBER buy 218.5s qty=[196,200]) возвращаются в TP.
 """
 import json
 import logging
@@ -179,7 +191,7 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT: min_qty={self.min_qty}, min_qty_auto={self.min_qty_auto}, "
+        _log.info(f"[{symbol}] INIT (v12.1): min_qty={self.min_qty}, min_qty_auto={self.min_qty_auto}, "
                   f"min_qty_median_pct={self.min_qty_median_pct}, min_repeats={self.min_repeats}, "
                   f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
                   f"mult_max={self.interval_mult_max}, stable_qty={self.stable_qty_required}, "
@@ -232,11 +244,13 @@ class IntervalRobotDetector(Detector):
                 if n / self._qty_total >= self.noisy_qty_share}
 
     def _cb_update(self, candidate, iv, base):
-        """v12 C+B: классифицирует принятый гэп (k=1 одиночный, k>1 пропуск),
+        """v12.1 C+B: классифицирует принятый гэп (k=1 одиночный, k>1 пропуск),
         обновляет счётчики и пересчитывает cb_block.
         Блок: пропусков БОЛЬШЕ одиночных (m > s, вариант C — чистые серии
-        не трогаются) И qty шумовой И доля одиночных < 0.8 (вариант B —
-        один пропуск терпим: m=1 при нескольких s не блокирует)."""
+        не трогаются) И ОСНОВНОЙ qty (самый частый внутри серии по
+        qty_counts, вариант Б 2026-09-12) шумовой И доля одиночных < 0.8
+        (вариант B — один пропуск терпим: m=1 при нескольких s не блокирует).
+        """
         k = round(iv / base) if base > 0 else 1
         if k <= 1:
             candidate.grid_single += 1
@@ -248,14 +262,22 @@ class IntervalRobotDetector(Detector):
         blocked = False
         if total > 0 and m > s:
             noisy = self._noisy_qtys()
-            if noisy and (candidate.qty_variants & noisy):
-                blocked = (s / total) < 0.8
+            if noisy:
+                # v12.1: основной qty = самый частый внутри серии (qty_counts)
+                if candidate.qty_counts:
+                    primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get)
+                else:
+                    primary_qty = next(iter(candidate.qty_variants), None)
+                if primary_qty is not None and primary_qty in noisy:
+                    blocked = (s / total) < 0.8
         if blocked and not candidate.cb_block:
+            primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get) if candidate.qty_counts else None
             _log.info(f"[{self.symbol}] CB_BLOCK: single={s} multi={m} "
-                      f"qty={sorted(candidate.qty_variants)}")
+                      f"primary_qty={primary_qty} qty_counts={candidate.qty_counts}")
         if not blocked and candidate.cb_block:
+            primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get) if candidate.qty_counts else None
             _log.info(f"[{self.symbol}] CB_UNBLOCK: single={s} multi={m} "
-                      f"qty={sorted(candidate.qty_variants)}")
+                      f"primary_qty={primary_qty} qty_counts={candidate.qty_counts}")
         candidate.cb_block = blocked
 
     def _jitter_ms(self, candidate):
