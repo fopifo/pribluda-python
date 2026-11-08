@@ -1,5 +1,5 @@
 """
-Приблуда на python — бэкенд для Quik (чтение CSV ленты).
+Приблуда на python — бэкенд для Quik (чтение CSV ленты) + Alor WebSocket стрим.
 Оптимизировано: быстрый старт (последние 500KB) + миллисекундная точность.
 v2: live-ветка НЕ перезаписывает timestamp (настоящие мс из CSV).
 v3: batch_flash — мигание "пачки" роботов: >=4 тикеров подтвердились за 15с.
@@ -8,11 +8,16 @@ v5 (2026-09-05): интеграция StreamGrid (живая детекция с
    Отключение: USE_STREAM_GRID=False в core/config.py (одна строка).
 v6 (2026-09-07): фильтр живых сигналов StreamGrid по объёму
    (STREAM_MIN_QTY=2): кластеры с qty=1 алерт не дают (шум).
+v7 (2026-11-08): интеграция Alor WebSocket стрим (замена QUIK CSV).
+   Включение: USE_ALOR_STREAM=True в core/config.py.
+   Архитектура: AlorStreamClient → queue.Queue → feed() → детекторы.
+   Backfill из data/live_trades_YYYY-MM-DD.jsonl (TradeAccumulator).
 """
 import sys
 import time
 import threading
 import logging
+import queue
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -24,6 +29,7 @@ if str(BASE) not in sys.path:
 from core.state import SharedState
 from core.config import get_detector_configs
 from core.config import USE_STREAM_GRID, STREAM_MIN_REPEATS, STREAM_TOL
+from core.config import USE_ALOR_STREAM, ALOR_STREAM_TICKERS, ALOR_STREAM_DEPTH
 from core.ticker_settings import load_settings
 from detectors.interval_robot import IntervalRobotDetector
 from modules.stream_grid import StreamGrid
@@ -81,8 +87,32 @@ class QuikBackend:
         self._grid_lock = threading.Lock()
         _log.info(f"[stream_grid] enabled={self.use_stream_grid} mr={STREAM_MIN_REPEATS} tol={STREAM_TOL}")
 
+        # Alor WebSocket стрим (замена QUIK CSV, включается USE_ALOR_STREAM=True)
+        self.use_alor_stream = USE_ALOR_STREAM
+        self._trade_queue = queue.Queue(maxsize=10000)  # поток-безопасная очередь
+        self._alor_client = None
+        self._alor_accumulator = None
+        if self.use_alor_stream:
+            from connectors.alor.stream_client import AlorStreamClient, load_env_value
+            from connectors.alor.trade_accumulator import TradeAccumulator
+            try:
+                refresh_token = load_env_value("ALOR_REFRESH_TOKEN")
+                self._alor_accumulator = TradeAccumulator()
+                tickers = ALOR_STREAM_TICKERS or list(self.allowed)
+                self._alor_client = AlorStreamClient(
+                    refresh_token=refresh_token,
+                    tickers=tickers,
+                    depth=ALOR_STREAM_DEPTH,
+                    on_trade=lambda trade: self._trade_queue.put(trade)
+                )
+                _log.info(f"[alor_stream] enabled, tickers={len(tickers)}, depth={ALOR_STREAM_DEPTH}")
+            except Exception as e:
+                _log.error(f"[alor_stream] init failed: {e}")
+                self.use_alor_stream = False
+
         _log.info(f"Backend init: {len(self.allowed)} tickers allowed, "
-                  f"{len(self.spring_monitors)} spring monitors")
+                  f"{len(self.spring_monitors)} spring monitors, "
+                  f"alor_stream={self.use_alor_stream}")
 
     def _dets_for(self, sym):
         if sym not in self.dets:
@@ -224,63 +254,99 @@ class QuikBackend:
                 _log.warning("IMOEX fetch failed")
             time.sleep(IMOEX_PERIOD)
 
+    def _alor_stream_loop(self):
+        """Поток запуска Alor WebSocket стрима (демон, умирает с процессом)."""
+        if not self.use_alor_stream or self._alor_client is None:
+            return
+        _log.info("[alor_stream] starting WebSocket stream...")
+        self._alor_client.run_sync()
+
     def run(self):
-        """Основной поток чтения CSV."""
+        """Основной поток чтения (CSV или очередь из Alor стрима)."""
         day0_ms = int(datetime.now(MSK).replace(
             hour=0, minute=0, second=0, microsecond=0
         ).timestamp() * 1000)
-        _log.info(f"Starting CSV reader, day0_ms={day0_ms}")
 
-        # 1. Быстрый backfill: последние ~500KB, метки времени из CSV (мс точность)
-        try:
-            with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
-                f.seek(0, 2)
-                file_size = f.tell()
-                read_size = min(5000000, file_size)
-                f.seek(file_size - read_size)
-                f.readline()  # пропускаем неполную строку
-                for line in f:
-                    t = self.parse(line)
-                    if t and t["timestamp"] >= day0_ms:
-                        self.feed(t)
-                    self.lines_read += 1
-                    if self.lines_read % 1000 == 0:
-                        _log.info(f"Backfill progress: {self.lines_read} lines, "
-                                  f"{self.trades_fed} trades")
-            _log.info(f"Backfill done: {self.lines_read} lines, "
-                      f"{self.trades_fed} trades fed")
-        except FileNotFoundError:
-            _log.warning(f"CSV not found: {CSV}")
+        if self.use_alor_stream:
+            # Alor WebSocket стрим: backfill из накопителя + live из очереди
+            _log.info(f"[alor_stream] backfill from {self._alor_accumulator.path}")
+            backfill_trades = self._alor_accumulator.load_backfill()
+            for trade in backfill_trades:
+                if trade["timestamp"] >= day0_ms:
+                    self.feed(trade)
+            _log.info(f"[alor_stream] backfill done: {len(backfill_trades)} trades, "
+                      f"{self.trades_fed} fed (after day0 filter)")
+            _log.info("[alor_stream] switching to live queue mode")
+            self._reader_t0 = time.time()
+            self._reader_count = 0
+            while True:
+                try:
+                    trade = self._trade_queue.get(timeout=1.0)
+                    if trade["timestamp"] >= day0_ms:
+                        self.feed(trade)
+                    self._reader_count += 1
+                    if self._reader_count % 1000 == 0:
+                        elapsed = time.time() - self._reader_t0
+                        rate = self._reader_count / max(elapsed, 0.001)
+                        backlog = self._trade_queue.qsize()
+                        _log.info(f"[READER] count={self._reader_count} "
+                                  f"rate={rate:.0f}/s backlog_queue={backlog}")
+                except queue.Empty:
+                    continue
+        else:
+            # Старая логика CSV (QUIK)
+            _log.info(f"Starting CSV reader, day0_ms={day0_ms}")
 
-        # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
-        _log.info("Switching to live tail mode (CSV ms, no overwrite)")
-        self._reader_t0 = time.time()
-        self._reader_count = 0
-        while True:
+            # 1. Быстрый backfill: последние ~500KB, метки времени из CSV (мс точность)
             try:
                 with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
                     f.seek(0, 2)
-                    while True:
-                        line = f.readline()
-                        if not line:
-                            time.sleep(0.05)
-                            continue
+                    file_size = f.tell()
+                    read_size = min(5000000, file_size)
+                    f.seek(file_size - read_size)
+                    f.readline()  # пропускаем неполную строку
+                    for line in f:
                         t = self.parse(line)
                         if t and t["timestamp"] >= day0_ms:
                             self.feed(t)
-                        self._reader_count += 1
-                        if self._reader_count % 1000 == 0:
-                            elapsed = time.time() - self._reader_t0
-                            rate = self._reader_count / max(elapsed, 0.001)
-                            pos = f.tell()
-                            f.seek(0, 2)
-                            end = f.tell()
-                            f.seek(pos)
-                            backlog = end - pos
-                            _log.info(f"[READER] count={self._reader_count} "
-                                      f"rate={rate:.0f}/s backlog_bytes={backlog}")
+                        self.lines_read += 1
+                        if self.lines_read % 1000 == 0:
+                            _log.info(f"Backfill progress: {self.lines_read} lines, "
+                                      f"{self.trades_fed} trades")
+                _log.info(f"Backfill done: {self.lines_read} lines, "
+                          f"{self.trades_fed} trades fed")
             except FileNotFoundError:
-                time.sleep(1)
+                _log.warning(f"CSV not found: {CSV}")
+
+            # 2. Live tail: метки времени из CSV (мс) — БЕЗ перезаписи arrival-time.
+            _log.info("Switching to live tail mode (CSV ms, no overwrite)")
+            self._reader_t0 = time.time()
+            self._reader_count = 0
+            while True:
+                try:
+                    with open(CSV, "r", encoding="utf-8", errors="ignore") as f:
+                        f.seek(0, 2)
+                        while True:
+                            line = f.readline()
+                            if not line:
+                                time.sleep(0.05)
+                                continue
+                            t = self.parse(line)
+                            if t and t["timestamp"] >= day0_ms:
+                                self.feed(t)
+                            self._reader_count += 1
+                            if self._reader_count % 1000 == 0:
+                                elapsed = time.time() - self._reader_t0
+                                rate = self._reader_count / max(elapsed, 0.001)
+                                pos = f.tell()
+                                f.seek(0, 2)
+                                end = f.tell()
+                                f.seek(pos)
+                                backlog = end - pos
+                                _log.info(f"[READER] count={self._reader_count} "
+                                          f"rate={rate:.0f}/s backlog_bytes={backlog}")
+                except FileNotFoundError:
+                    time.sleep(1)
 
 
 def start_backend(shared: SharedState):
@@ -289,4 +355,6 @@ def start_backend(shared: SharedState):
     threading.Thread(target=b.run, daemon=True, name="QuikReader").start()
     threading.Thread(target=b.publisher, daemon=True, name="QuikPublisher").start()
     threading.Thread(target=b.imoex_updater, daemon=True, name="IMOEXUpdater").start()
-    _log.info("Quik backend threads started (reader, publisher, imoex_updater).")
+    if b.use_alor_stream:
+        threading.Thread(target=b._alor_stream_loop, daemon=True, name="AlorStream").start()
+    _log.info(f"Backend threads started (alor_stream={b.use_alor_stream}).")
