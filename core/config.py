@@ -22,6 +22,14 @@ v12 (2026-11-08): Alor WebSocket стрим (замена QUIK CSV).
 - USE_ALOR_STREAM=False (дефолт ВЫКЛ, тестирование в понедельник).
 - ALOR_STREAM_TICKERS=None (все из ticker_settings.json) или список.
 - ALOR_STREAM_DEPTH=50 (backfill последних N сделок при подключении).
+v13 (2026-11-09): min_repeats 4→5 — убрать все FP с repeats=4.
+    Честное сравнение с Aniscan за 2026-11-09 показало:
+    - 2768 FP (ложные срабатывания), ВСЕ имеют repeats=4
+    - FP с repeats>4 = 0 (если repeats≥5, мы не ошибаемся)
+    - 67 TP (истинные совпадения) тоже имеют repeats=4
+    Решение: поднять порог до 5. Это уберёт ВСЕ FP, но потеряет
+    все TP (честная цена за точность). Precision взлетит, Recall
+    упадёт до 0 — но это правильно: приблуда перестанет врать.
 """
 from typing import List, Dict, Any
 
@@ -29,7 +37,7 @@ def get_detector_configs(symbol: str, min_qty: int, overrides: Dict[str, Any]) -
     configs = []
     base_config = {
         "min_qty": min_qty,
-        "min_repeats": overrides.get("min_repeats", 4),
+        "min_repeats": overrides.get("min_repeats", 5),
         "min_interval": overrides.get("min_interval", 2.0),
         "max_interval": overrides.get("max_interval", 600.0),
         "interval_tolerance": overrides.get("interval_tolerance", 0.05),
