@@ -12,6 +12,10 @@ v7 (2026-11-08): интеграция Alor WebSocket стрим (замена QU
    Включение: USE_ALOR_STREAM=True в core/config.py.
    Архитектура: AlorStreamClient → queue.Queue → feed() → детекторы.
    Backfill из data/live_trades_YYYY-MM-DD.jsonl (TradeAccumulator).
+v7.1 (2026-11-09): ФИКС ПУСТОГО НАКОПИТЕЛЯ — сделка из очереди пишется
+   в TradeAccumulator (on_trade) ДО кормления детекторов. Раньше jsonl
+   оставался пустым (0 строк): накопитель создавался, но к стриму не
+   подключался (в on_trade стрима была только очередь).
 """
 import sys
 import time
@@ -282,6 +286,9 @@ class QuikBackend:
             while True:
                 try:
                     trade = self._trade_queue.get(timeout=1.0)
+                    # v7.1: ФИКС — пишем сделку в накопитель, иначе jsonl пустой.
+                    # Вызывается ДО day0-фильтра: накопитель сам разруливает даты.
+                    self._alor_accumulator.on_trade(trade)
                     if trade["timestamp"] >= day0_ms:
                         self.feed(trade)
                     self._reader_count += 1
