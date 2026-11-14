@@ -16,6 +16,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from collections import defaultdict
 
 BASE = Path(__file__).resolve().parent.parent
 DATA = BASE / "data"
@@ -54,6 +55,46 @@ class Progress:
 
     def close(self):
         print(file=sys.stderr)
+
+
+def deduplicate_history(hist_path):
+    """Читает историю, оставляет только одну запись на (symbol, side, start_ts) 
+    с максимальным repeats (финальный снимок серии)."""
+    if not hist_path.exists():
+        return 0, 0
+    
+    by_key = {}
+    total_lines = 0
+    with open(hist_path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            total_lines += 1
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            
+            key = (rec.get("symbol"), rec.get("side"), rec.get("start_ts"))
+            reps = rec.get("repeats", 0)
+            
+            # Оставляем запись с максимальным repeats (или первую, если равны)
+            if key not in by_key or reps > by_key[key].get("repeats", 0):
+                by_key[key] = rec
+                
+    deduped_lines = len(by_key)
+    if deduped_lines == total_lines:
+        return total_lines, 0 # Нечего дедуплицировать
+        
+    # Перезаписываем файл чистыми данными
+    with open(hist_path, "w", encoding="utf-8") as f:
+        # Сортируем по start_ts для хронологического порядка
+        sorted_recs = sorted(by_key.values(), key=lambda x: x.get("start_ts", 0))
+        for rec in sorted_recs:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            
+    return total_lines, deduped_lines
 
 
 def main():
@@ -147,6 +188,12 @@ def main():
     p.close()
 
     print(f"[replay_alor] скормлено={fed}, пропущено: sym={skip_sym}, qty={skip_qty}")
+    
+    # === НОВОЕ: Дедупликация истории ===
+    total, deduped = deduplicate_history(HIST)
+    if total > deduped:
+        print(f"[replay_alor] дедупликация: было {total} записей, стало {deduped} (удалено {total - deduped} дублей)")
+    
     print(f"[replay_alor] история: {HIST}")
 
 

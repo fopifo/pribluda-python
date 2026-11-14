@@ -113,7 +113,7 @@ def download():
     cookies = get_aniscan_cookies()
     headers = build_headers(cookies)
 
-    today = datetime.now(MSK).date()
+    today = (datetime.strptime(sys.argv[1], "%Y-%m-%d").date() if len(sys.argv) > 1 else datetime.now(MSK).date())
     yesterday = today - timedelta(days=1)
     today_str = str(today)
     yesterday_str = str(yesterday)

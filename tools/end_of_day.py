@@ -14,6 +14,7 @@ Jsonl-накопитель НЕ удаляется (остаётся архив�
 """
 import json
 import sys
+import time
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,35 @@ def ms_to_iso(ts_ms):
     return datetime.fromtimestamp(ts_ms / 1000, tz=MSK).isoformat(timespec="milliseconds")
 
 
+class Progress:
+    """Прогресс-бар ASCII по числу/байтам."""
+
+    def __init__(self, total, label):
+        self.total = max(int(total), 1)
+        self.label = label
+        self.done = 0
+        self.t0 = time.time()
+        self.last = 0.0
+
+    def update(self, n):
+        self.done += n
+        now = time.time()
+        if now - self.last < 0.25 and self.done < self.total:
+            return
+        self.last = now
+        pct = min(self.done * 100 // self.total, 100)
+        dt = max(now - self.t0, 1e-9)
+        speed = self.done / dt
+        eta = (self.total - self.done) / max(speed, 1.0)
+        bar = "#" * (pct // 5) + "." * (20 - pct // 5)
+        print(f"\r[end_of_day] {self.label} [{bar}] {pct:3d}% | "
+              f"{self.done}/{self.total} | {speed:.0f}/s | ETA {eta:.0f}s",
+              end="", flush=True, file=sys.stderr)
+
+    def close(self):
+        print(file=sys.stderr)
+
+
 def main():
     args = list(sys.argv[1:])
     force = "--force" in args
@@ -38,11 +68,14 @@ def main():
         print(f"[end_of_day] нет накопителя: {src}")
         sys.exit(1)
 
+    file_size = src.stat().st_size
     by_sym = defaultdict(list)
     total = 0
-    with open(src, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+    p_read = Progress(file_size, "чтение")
+    with open(src, "rb") as f:
+        for raw in f:
+            p_read.update(len(raw))
+            line = raw.decode("utf-8").strip()
             if not line:
                 continue
             try:
@@ -51,15 +84,19 @@ def main():
                 continue
             total += 1
             by_sym[t["symbol"]].append(t)
+    p_read.close()
 
     print(f"[end_of_day] дата={date} сделок={total} тикеров={len(by_sym)}")
     written = skipped = 0
-    for sym, trades in sorted(by_sym.items()):
+    syms = sorted(by_sym.items())
+    total_syms = len(syms)
+    t0 = time.time()
+    for i, (sym, trades) in enumerate(syms, 1):
         trades.sort(key=lambda t: t["timestamp"])
         dst = DATA / f"{sym}_{date}.json"
         if dst.exists() and not force:
             skipped += 1
-            print(f"  [skip] {sym}: {dst.name} уже существует (нужен --force)")
+            print(f"  [skip {i}/{total_syms}] {sym}: {dst.name} уже существует (нужен --force)")
             continue
         out = []
         for t in trades:
@@ -81,7 +118,11 @@ def main():
         written += 1
         first = datetime.fromtimestamp(trades[0]["timestamp"] / 1000, tz=MSK).strftime("%H:%M:%S")
         last = datetime.fromtimestamp(trades[-1]["timestamp"] / 1000, tz=MSK).strftime("%H:%M:%S")
-        print(f"  [ok] {sym:6s} сделок={len(trades):6d} окно={first}-{last}")
+        dt = max(time.time() - t0, 1e-9)
+        speed = i / dt
+        eta = (total_syms - i) / max(speed, 1.0)
+        print(f"  [ok {i}/{total_syms}] {sym:6s} сделок={len(trades):6d} "
+              f"окно={first}-{last} | {speed:.1f}/s ETA {eta:.0f}s")
     print(f"[end_of_day] готово: записано={written} пропущено={skipped} (jsonl не удалён)")
 
 

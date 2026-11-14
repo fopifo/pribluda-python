@@ -1,86 +1,22 @@
 """
 Приблуда на python — детектор периодичности (роботов), персистентный.
-С логированием в output/detector.log для отладки.
-MAX_ACTIVE_PER_SIDE = 500 (оптимизация производительности).
-v5: история (Н-010) пишется в МОМЕНТ ПОДТВЕРЖДЕНИЯ (count==min_repeats),
-а не при закрытии серии — статистика копится в течение дня.
-v7: КРАТНЫЕ ИНТЕРВАЛЫ — пропуск удара больше не рвёт серию:
-интервал ≈ k*база (k=2..interval_mult_max) принимается; если первый
-интервал сам был кратным (поймали с пропуском), база уточняется вниз.
-Кратные включаются ТОЛЬКО при базе >= short_interval_threshold (10с),
-чтобы НЕ трогать поведение быстрых серий. CD/INT считаются от базы.
-v8: ФИЛЬТР ДЖИТТЕРА — серии с джиттером > jitter_ratio_max × интервал
-считаются мусором и НЕ репортятся (не попадают в сигналы и в снапшот).
-v9: GRID LOCK — после подтверждения серия защёлкивается на сетку:
-удар засчитывается, если попадает в окно ±grid_tolerance_ms вокруг
-любого тика k*база (k до max_interval/base). Пропуски не рвут серию.
-До подтверждения поведение как в v7/v8 (тесты и быстрые серии не тронуты).
-v9.1: время в _write_history явно в МСК (было голый datetime.now()).
-v10: ФИЛЬТР ДВОЙНЫХ УДАРОВ — если интервал между текущей сделкой и
-последним ударом найденной серии < min_double_hit_gap_sec (1.0с),
-считать это тем же ударом (шум, burst-sell), не обновлять серию.
-Корень проблемы CNRU: тройные удары с gap=0 ломают базу серии.
-v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно, TP упал).
-v10.2: ИСТОРИЯ В НАТУРАЛЬНЫХ МС — в robots_history.jsonl дополнительно
-пишутся start_ms/end_ms/interval_ms (epoch ms, напрямую из ленты QUIK,
-без конверсий на стороне потребителей). Секундные поля (start_ts/end_ts/
-interval_avg) оставлены для старой статистики и GUI. Критерии детекции
-НЕ изменены.
-v10.3: ЛОГИРОВАНИЕ ВСЕХ СДЕЛОК — в detector.log пишутся ВСЕ сделки
-(и те, что ниже min_qty) с флагом passed_min_qty. Для анализа FN:
-видим, что происходит в зоне реза (SVCB 13 лотов, FLOT 16 лотов и т.д.).
-v10.4: лог всех сделок только по флагу log_all_trades.
-v11: АДАПТИВНЫЙ MIN_QTY — при первой сделке (если min_qty_auto=True)
-считает медианный объём сделок тикера из data/{symbol}_{date}.json,
-устанавливает min_qty = медиана × min_qty_median_pct (дефолт 0.5).
-Решает проблему MSNG (qty=3 уже сигнал) vs SBER (qty=300 шум).
-v10.5 (2026-09-08): METRO И ДЖИТТЕР В НАТУРАЛЬНЫХ МС — intervals_ms
-копит разности ts_ms соседних ударов (натуральные мс ленты, без секунд
-и умножений). jitter_ms = pstdev интервалов в мс. Критерии детекции
-(v7-v11) НЕ изменены: они по-прежнему считаются по секундным интервалам.
-v10.6 (2026-09-08): _metro отдаёт ГОТОВЫЕ отклонения каждого интервала
-от БАЗЫ серии в мс (|iv_ms - round(iv_ms/base_ms)*base_ms|), а не длины
-интервалов. Отклонения независимы друг от друга (раньше GUI считал от
-медианы и при двух интервалах получал одинаковую пару). Статус:
-ok <=150мс, warn <=300мс, bad больше. GUI только выводит.
-v10.7 (2026-09-08): ПЕРЕЩЁЛКИВАНИЕ БАЗЫ ВВЕРХ (_relock_base): если >=80%
-интервалов лежат в ±150 мс от медианы intervals_ms и медиана отличается
-от базы больше чем на 150 мс — база = медиана. Стабильный робот с точным
-периодом (пусть и не совпавшим с первой защёлкой) становится зелёным;
-рваная серия не перещёлкивается и сохраняет цвет-сигнал.
-v10.8 (2026-09-08): ПЕРЕЩЁЛКИВАНИЕ LONG→SHORT (_relock_base): если база
-LONG (>long_interval_threshold=120с), а ≥80% интервалов SHORT (<20с) и
-стабильны (±150мс от медианы SHORT) — база = медиана SHORT. Кейс GMKN:
-база 157с при реальном периоде 10с давала красные 6605/3417/000; после
-перещёлкивания 000 004 000 зелёный.
-v12 (2026-09-10): ФИЛЬТР NOISY QTY (перенос C+B из StreamGrid v2.4).
-Серия с ШУМОВЫМ объёмом (доля qty среди сделок тикера >= noisy_qty_share,
-накапливается по ходу ленты, минимум 100 сделок) блокируется
-(cb_block=True), если пропусков (k>1) больше, чем одиночных попаданий
-(k=1), И доля одиночных < 0.8. Заблокированная серия НЕ репортится:
-не даёт сигнал, не пишется в историю, не показывается в снапшоте,
-не даёт просрочку. Разблокируется автоматически, если соотношение
-восстановилось. Серии с чистыми одиночными попаданиями не трогаются
-(условие m > s); один пропуск терпим (m=1 при нескольких s не блокирует).
-Дефолт noisy_qty_filter=False (live-поведение не меняется до решения
-включить); A/B-прогоны включают флаг явно через settings.
-v12.1 (2026-09-12): ЧЕСТНЫЙ «ОСНОВНОЙ» QTY В ФИЛЬТРЕ NOISY.
-В v12 фильтр блокировал серию, если ЛЮБОЙ qty из qty_variants попал
-в шумовую долю — это было неправильно: серия с основным qty=50 и
-случайным вторичным qty=5 (из-за кривого удара) блокировалась
-целиком, хотя основной qty не шумовой. В v12.1 «основной» qty =
-самый частый объём ВНУТРИ САМОЙ серии (max по qty_counts), а не
-qty_variants[0] и не весь qty_variants. Серия шумовая ТОЛЬКО если
-основной qty попал в шумовую долю. Кратные пропуски (k>1) со
-случайным вторичным qty больше не рушат серию. Прямые потери
-(OZON sell 58.4s qty=[5,5], LKOH buy 173s qty=[10,11]) остаются
-заблокированными (правило работает). Косвенные потери (OZON buy
-50.8s qty=[50,51], SBER buy 218.5s qty=[196,200]) возвращаются в TP.
+Лог: output/detector.log. MAX_ACTIVE_PER_SIDE=500.
+Механизмы v5-v13.4: история при подтверждении и закрытии; кратные k*база=
+пропуск; фильтр двойных ударов; адаптивный min_qty; noisy-qty блок;
+перещёлкивание базы; metro для GUI; период=медиана зазоров; k-кратные и
+для коротких баз; max_qty_variants=4; report_min_repeats=8; grid-джиттер;
+regularity-гейт report_min_regular=0.6.
+v13.4: ПЕРЕОЦЕНКА ПЕРИОДА ПО СЫРОЙ ЛЕНТЕ. Скользящий буфер всех сделок
+стороны (tape_buf_max). При репорте: сырые зазоры между ударами своего qty
+в окне серии; если есть более мелкая регулярная сетка (reg>=0.6), а
+принятый период = её кратное (k>=2) -> репортим истинный период.
+Чинит base-multiple (SNGSP true 5s -> репорт 30s) без per-ticker.
 """
 import json
 import logging
 import statistics
 import os
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -97,7 +33,6 @@ if not _log.handlers:
     _log.addHandler(_handler)
     _log.setLevel(logging.INFO)
 
-# v10.7: порог перещёлкивания базы, совпадает с MS_JITTER_MAX (gui/ms)
 RELOCK_TOL_MS = 150.0
 
 
@@ -106,9 +41,9 @@ class Candidate:
                  "last_interval", "base_interval", "intervals", "warned",
                  "first_price", "last_price", "price_counts", "priced_hits",
                  "sum_qty", "qty_counts", "start_ms", "last_ms",
-                 "intervals_ms", "grid_single", "grid_multi", "cb_block")
+                 "intervals_ms", "grid_single", "grid_multi", "cb_block", "side")
 
-    def __init__(self, qty, ts, price=None, ts_ms=None):
+    def __init__(self, qty, ts, price=None, ts_ms=None, side=None):
         self.qty_variants = {qty}
         self.count = 1
         self.start_ts = ts
@@ -128,10 +63,10 @@ class Candidate:
         self.priced_hits = 1 if price is not None else 0
         self.sum_qty = qty
         self.qty_counts = {qty: 1}
-        # v12: счётчики типов гэпов (k=1 одиночные, k>1 пропуски) и блок
         self.grid_single = 0
         self.grid_multi = 0
         self.cb_block = False
+        self.side = side
 
 
 class IntervalRobotDetector(Detector):
@@ -148,7 +83,7 @@ class IntervalRobotDetector(Detector):
         self.max_interval = settings.get("max_interval")
         if self.max_interval is None:
             self.max_interval = 600
-        self.max_qty_variants = settings.get("max_qty_variants", 2)
+        self.max_qty_variants = settings.get("max_qty_variants", 4)
         self.max_qty_ratio = settings.get("max_qty_ratio", 1.10)
         self.interval_tolerance = settings.get("interval_tolerance")
         self.ignore_qty = settings.get("ignore_qty", False)
@@ -162,26 +97,22 @@ class IntervalRobotDetector(Detector):
         self.stable_qty_required = settings.get("stable_qty_required", False)
         self.stable_qty_ratio = settings.get("stable_qty_ratio", 0.8)
         self.min_display_repeats = settings.get("min_display_repeats", 2)
-        # v8: фильтр джиттера. 0 = выключен.
         self.jitter_ratio_max = settings.get("jitter_ratio_max", 0.3)
-        # v9: grid lock после подтверждения.
         self.grid_lock = settings.get("grid_lock", True)
         self.grid_tolerance_ms = settings.get("grid_tolerance_ms", 700)
-        # v10: фильтр двойных ударов (burst-sell, шум с gap<1с).
-        # v10.1: порог уменьшен с 2.0 до 1.0с (было слишком агрессивно).
         self.min_double_hit_gap_sec = settings.get("min_double_hit_gap_sec", 1.0)
-        # v10.4: лог всех сделок только по флагу log_all_trades (иначе detector.log растёт лавинообразно)
         self.log_all_trades = settings.get("log_all_trades", False)
-        # v11: адаптивный min_qty (процент от медианы объёма сделок тикера)
         self.min_qty_auto = settings.get("min_qty_auto", False)
         self.min_qty_median_pct = settings.get("min_qty_median_pct", 0.5)
         self._adaptive_qty_computed = False
-        # v12: фильтр noisy qty (C+B из StreamGrid v2.4). Дефолт ВЫКЛ:
-        # live-поведение не меняется до явного решения включить.
         self.noisy_qty_filter = settings.get("noisy_qty_filter", False)
         self.noisy_qty_share = settings.get("noisy_qty_share", 0.03)
         self._qty_freq = {}
         self._qty_total = 0
+        self.report_min_repeats = settings.get("report_min_repeats", 8)
+        self.report_min_regular = settings.get("report_min_regular", 0.6)
+        self.tape_buf_max = settings.get("tape_buf_max", 4000)
+        self._tape_buf = {}
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -191,38 +122,28 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT (v12.1): min_qty={self.min_qty}, min_qty_auto={self.min_qty_auto}, "
-                  f"min_qty_median_pct={self.min_qty_median_pct}, min_repeats={self.min_repeats}, "
-                  f"short_tol={self.short_interval_tolerance}<{self.short_interval_threshold}s, "
-                  f"mult_max={self.interval_mult_max}, stable_qty={self.stable_qty_required}, "
-                  f"min_display={self.min_display_repeats}, jitter_max={self.jitter_ratio_max}, "
-                  f"grid_lock={self.grid_lock}, grid_tol_ms={self.grid_tolerance_ms}, "
-                  f"min_double_hit_gap={self.min_double_hit_gap_sec}s, "
-                  f"noisy_qty_filter={self.noisy_qty_filter}, noisy_qty_share={self.noisy_qty_share}")
+        _log.info(f"[{symbol}] INIT (v13.4): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
+                  f"report_min_repeats={self.report_min_repeats}, report_min_regular={self.report_min_regular}, "
+                  f"tape_buf_max={self.tape_buf_max}, mult_max={self.interval_mult_max}, "
+                  f"jitter_max={self.jitter_ratio_max}, grid_tol_ms={self.grid_tolerance_ms}, "
+                  f"max_qty_variants={self.max_qty_variants}")
 
     def _compute_adaptive_min_qty(self, ts_ms):
-        """v11: считает медианный объём сделок тикера из data/{symbol}_{date}.json,
-        возвращает int(median * min_qty_median_pct). Если файл не найден — дефолт 1."""
         try:
             date_str = datetime.fromtimestamp(ts_ms / 1000, tz=MSK).strftime("%Y-%m-%d")
             data_dir = Path(__file__).resolve().parent.parent / "data"
             alor_file = data_dir / f"{self.symbol}_{date_str}.json"
             if not alor_file.exists():
-                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: файл {alor_file.name} не найден, дефолт=1")
                 return 1
             with open(alor_file, encoding="utf-8") as f:
                 trades = json.load(f)
             if not trades:
-                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: файл пуст, дефолт=1")
                 return 1
             qtys = [float(t.get("qty", 0)) for t in trades if t.get("qty")]
             if not qtys:
-                _log.info(f"[{self.symbol}] ADAPTIVE_QTY: нет объёмов, дефолт=1")
                 return 1
             median_qty = statistics.median(qtys)
             adaptive_qty = int(median_qty * self.min_qty_median_pct)
-            _log.info(f"[{self.symbol}] ADAPTIVE_QTY: медиана={median_qty:.1f}, "
-                      f"pct={self.min_qty_median_pct}, min_qty={adaptive_qty}")
             return adaptive_qty
         except Exception as e:
             _log.warning(f"[{self.symbol}] ADAPTIVE_QTY failed: {e}, дефолт=1")
@@ -234,23 +155,12 @@ class IntervalRobotDetector(Detector):
         return out
 
     def _noisy_qtys(self):
-        """v12: шумовые qty тикера — доля среди всех сделок ленты
-        >= noisy_qty_share (зеркало compare_aniscan_grid --noisy, но
-        накапливается по ходу ленты, а не из файла дня). До 100 сделок
-        фильтр не активен (частоты ещё неустойчивы)."""
         if not self.noisy_qty_filter or self._qty_total < 100:
             return set()
         return {q for q, n in self._qty_freq.items()
                 if n / self._qty_total >= self.noisy_qty_share}
 
     def _cb_update(self, candidate, iv, base):
-        """v12.1 C+B: классифицирует принятый гэп (k=1 одиночный, k>1 пропуск),
-        обновляет счётчики и пересчитывает cb_block.
-        Блок: пропусков БОЛЬШЕ одиночных (m > s, вариант C — чистые серии
-        не трогаются) И ОСНОВНОЙ qty (самый частый внутри серии по
-        qty_counts, вариант Б 2026-09-12) шумовой И доля одиночных < 0.8
-        (вариант B — один пропуск терпим: m=1 при нескольких s не блокирует).
-        """
         k = round(iv / base) if base > 0 else 1
         if k <= 1:
             candidate.grid_single += 1
@@ -263,29 +173,80 @@ class IntervalRobotDetector(Detector):
         if total > 0 and m > s:
             noisy = self._noisy_qtys()
             if noisy:
-                # v12.1: основной qty = самый частый внутри серии (qty_counts)
                 if candidate.qty_counts:
                     primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get)
                 else:
                     primary_qty = next(iter(candidate.qty_variants), None)
                 if primary_qty is not None and primary_qty in noisy:
                     blocked = (s / total) < 0.8
-        if blocked and not candidate.cb_block:
-            primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get) if candidate.qty_counts else None
-            _log.info(f"[{self.symbol}] CB_BLOCK: single={s} multi={m} "
-                      f"primary_qty={primary_qty} qty_counts={candidate.qty_counts}")
-        if not blocked and candidate.cb_block:
-            primary_qty = max(candidate.qty_counts, key=candidate.qty_counts.get) if candidate.qty_counts else None
-            _log.info(f"[{self.symbol}] CB_UNBLOCK: single={s} multi={m} "
-                      f"primary_qty={primary_qty} qty_counts={candidate.qty_counts}")
         candidate.cb_block = blocked
 
     def _jitter_ms(self, candidate):
-        """v10.5: джиттер в натуральных мс (pstdev по intervals_ms).
-        Никаких переводов секунд в мс."""
         if len(candidate.intervals_ms) >= 2:
             return statistics.pstdev(candidate.intervals_ms)
         return None
+
+    def _grid_jitter_ms(self, candidate):
+        base = candidate.base_interval or candidate.last_interval
+        if not base or base <= 0 or len(candidate.intervals_ms) < 2:
+            return None
+        base_ms = base * 1000.0
+        devs = [abs(iv - round(iv / base_ms) * base_ms) for iv in candidate.intervals_ms]
+        return statistics.pstdev(devs)
+
+    def _raw_period(self, candidate):
+        """v13.4: истинный период по СЫРЫМ зазорам своего qty в окне серии."""
+        buf = self._tape_buf.get(candidate.side)
+        if not buf or candidate.start_ms is None or candidate.last_ms is None:
+            return None
+        hits = [t for (t, q) in buf
+                if q in candidate.qty_variants
+                and candidate.start_ms <= t <= candidate.last_ms]
+        if len(hits) < 8:
+            return None
+        hits.sort()
+        gaps = [hits[i+1] - hits[i] for i in range(len(hits) - 1)]
+        med = statistics.median(gaps)
+        if med <= 0:
+            return None
+        tol = max(2000.0, 0.2 * med)
+        good = sum(1 for g in gaps if abs(g - round(g / med) * med) <= tol)
+        if good / len(gaps) < 0.6:
+            return None
+        return med / 1000.0
+
+    def _median_interval(self, candidate):
+        if len(candidate.intervals) >= 3:
+            acc = statistics.median(candidate.intervals)
+        else:
+            acc = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
+        raw = self._raw_period(candidate)
+        if raw is not None and acc > 0 and raw < acc * 0.8:
+            k = round(acc / raw)
+            if k >= 2 and abs(acc - k * raw) <= max(2.0, 0.2 * acc):
+                return raw
+        return acc
+
+    def _regularity(self, candidate):
+        ivs = candidate.intervals_ms
+        if len(ivs) < 3:
+            return 1.0
+        med = statistics.median(ivs)
+        if med <= 0:
+            return 1.0
+        tol = max(2000.0, 0.2 * med)
+        good = sum(1 for iv in ivs if abs(iv - round(iv / med) * med) <= tol)
+        return good / len(ivs)
+
+    def _report_ok(self, candidate):
+        if self.report_min_regular > 0 and self._regularity(candidate) < self.report_min_regular:
+            return False
+        if self.jitter_ratio_max > 0:
+            gj = self._grid_jitter_ms(candidate)
+            iv = self._median_interval(candidate)
+            if gj is not None and iv > 0 and gj / (iv * 1000) > self.jitter_ratio_max:
+                return False
+        return True
 
     def _write_history(self, side, candidate):
         try:
@@ -294,10 +255,9 @@ class IntervalRobotDetector(Detector):
                 "timestamp": datetime.now(MSK).isoformat(timespec="seconds"),
                 "symbol": self.symbol, "side": side,
                 "qty_variants": sorted(candidate.qty_variants),
-                "interval_avg": round((candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1), 2),
+                "interval_avg": round(self._median_interval(candidate), 2),
                 "repeats": candidate.count,
                 "start_ts": candidate.start_ts, "end_ts": candidate.last_ts,
-                # v10.2: натуральные мс, напрямую из ленты QUIK (без конверсий у потребителей)
                 "interval_ms": round((candidate.last_ms - candidate.start_ms) / max(candidate.count - 1, 1), 1),
                 "start_ms": candidate.start_ms, "end_ms": candidate.last_ms,
                 "jitter_ms": round(jitter, 1) if jitter is not None else None,
@@ -310,7 +270,7 @@ class IntervalRobotDetector(Detector):
             _log.warning(f"[{self.symbol}] history write failed: {e}")
 
     def _finalize(self, side, candidate):
-        avg_interval = (candidate.last_ts - candidate.start_ts) / max(candidate.count - 1, 1)
+        avg_interval = self._median_interval(candidate)
         jitter_ms = self._jitter_ms(candidate)
         stability_ratio = None
         if len(candidate.intervals) >= 2 and self.time_window_sec > 0:
@@ -324,8 +284,6 @@ class IntervalRobotDetector(Detector):
                       stability_ratio=stability_ratio)
 
     def _should_report(self, signal):
-        """v8: фильтр джиттера. Серия с джиттером > jitter_ratio_max × интервал
-        считается мусором и не репортится. 0 = фильтр выключен."""
         if self.jitter_ratio_max <= 0:
             return True
         if signal.jitter_ms is None or signal.interval_avg <= 0:
@@ -365,18 +323,22 @@ class IntervalRobotDetector(Detector):
             return
         self.index.setdefault(side, {}).setdefault(qty, []).append(candidate)
 
+    def _close_series(self, side, c):
+        signals = []
+        if c.count >= self.report_min_repeats and not c.cb_block:
+            if self._report_ok(c):
+                signals.append(self._finalize(side, c))
+                self._write_history(side, c)
+        self._unregister(side, c)
+        return signals
+
     def _prune_dead(self, side, now_ts):
         signals = []
         close_threshold = self.max_interval * self.close_after_misses
         al = self.active.get(side, [])
         while al and now_ts - al[0].last_ts > close_threshold:
             c = al.pop(0)
-            # v12: заблокированные (cb_block) серии не репортятся
-            if c.count >= self.min_repeats and not c.cb_block:
-                sig = self._finalize(side, c)
-                if self._should_report(sig):
-                    signals.append(sig)
-            self._unregister(side, c)
+            signals.extend(self._close_series(side, c))
         return signals
 
     def _enforce_cap(self, side):
@@ -387,12 +349,7 @@ class IntervalRobotDetector(Detector):
         to_evict = sorted(al, key=lambda c: (c.count, c.start_ts))[:overflow]
         signals = []
         for c in to_evict:
-            # v12: заблокированные (cb_block) серии не репортятся
-            if c.count >= self.min_repeats and not c.cb_block:
-                sig = self._finalize(side, c)
-                if self._should_report(sig):
-                    signals.append(sig)
-            self._unregister(side, c)
+            signals.extend(self._close_series(side, c))
         return signals
 
     def _qty_fits_loose(self, candidate, qty):
@@ -413,10 +370,6 @@ class IntervalRobotDetector(Detector):
         return max(candidate.qty_counts.values()) / total >= self.stable_qty_ratio
 
     def _interval_fits(self, candidate, interval):
-        """Возвращает (ok, base).
-        v7: кратные интервалы (k=2..mult_max) до подтверждения.
-        v9: grid lock после подтверждения — удар у любого тика k*base
-        в окне ±grid_tolerance_ms; пропуски не рвут серию."""
         if interval is None:
             return False, None
         if self.min_interval is None:
@@ -437,28 +390,23 @@ class IntervalRobotDetector(Detector):
             tol = self.interval_tolerance
         if tol is None:
             return True, base
-        # k=1: обычный шаг
         if abs(interval - base) <= base * tol:
             return True, base
-        if base >= self.short_interval_threshold:
-            # v9: grid lock после подтверждения
-            if self.grid_lock and candidate.count >= self.min_repeats:
-                k = round(interval / base)
-                kmax = int(self.max_interval // base)
-                if 1 <= k <= kmax and abs(interval - k * base) <= self.grid_tolerance_ms / 1000.0:
-                    return True, base
-            # k>=2: пропущен удар (до подтверждения)
-            k = 2
-            while k <= self.interval_mult_max and k * base <= self.max_interval:
-                if abs(interval - k * base) <= k * base * tol:
-                    return True, base
-                k += 1
-            # база сама была кратной — уточняем вниз
-            k = 2
-            while k <= self.interval_mult_max and k * interval <= self.max_interval:
-                if abs(base - k * interval) <= k * interval * tol:
-                    return True, interval
-                k += 1
+        if self.grid_lock and candidate.count >= self.min_repeats:
+            k = round(interval / base)
+            kmax = int(self.max_interval // base)
+            if 1 <= k <= kmax and abs(interval - k * base) <= self.grid_tolerance_ms / 1000.0:
+                return True, base
+        k = 2
+        while k <= self.interval_mult_max and k * base <= self.max_interval:
+            if abs(interval - k * base) <= k * base * tol:
+                return True, base
+            k += 1
+        k = 2
+        while k <= self.interval_mult_max and k * interval <= self.max_interval:
+            if abs(base - k * interval) <= k * interval * tol:
+                return True, interval
+            k += 1
         return False, None
 
     def _find_match(self, side, qty, ts):
@@ -494,13 +442,6 @@ class IntervalRobotDetector(Detector):
         candidate.price_counts[price] = candidate.price_counts.get(price, 0) + 1
 
     def _relock_base(self, candidate):
-        """v10.7 + v10.8: перещёлкивание базы на медиану интервалов в мс.
-        v10.7: >=3 интервала; медиана отличается от базы > RELOCK_TOL_MS;
-        >=80% интервалов в ±RELOCK_TOL_MS от медианы (стабильный кластер).
-        v10.8: база LONG (>long_interval_threshold), а >=80% интервалов
-        SHORT (<short_interval_threshold*1000мс) и стабильны — база = медиана.
-        Кейс: база 157с при реальном периоде 10с → перещёлкивание на 10с.
-        Рваная серия условию не удовлетворяет и цвет сохраняет."""
         if len(candidate.intervals_ms) < 3:
             return
         base = candidate.base_interval or candidate.last_interval
@@ -508,7 +449,6 @@ class IntervalRobotDetector(Detector):
             return
         base_ms = base * 1000.0
         med_ms = statistics.median(candidate.intervals_ms)
-        # v10.8: LONG→SHORT — база >120с, медиана <20с, стабильность
         if base > self.long_interval_threshold and med_ms < self.short_interval_threshold * 1000:
             short_threshold_ms = self.short_interval_threshold * 1000.0
             short_count = sum(1 for iv in candidate.intervals_ms if iv < short_threshold_ms)
@@ -517,18 +457,13 @@ class IntervalRobotDetector(Detector):
                                    if iv < short_threshold_ms and abs(iv - med_ms) <= RELOCK_TOL_MS)
                 if short_stable >= 0.8 * short_count:
                     candidate.base_interval = med_ms / 1000.0
-                    _log.info(f"[{self.symbol}] RELOCK_LONG_TO_SHORT: {base_ms:.0f}ms -> {med_ms:.0f}ms "
-                              f"(short_stable={short_stable}/{short_count})")
                     return
-        # v10.7: обычное перещёлкивание (база и медиана близки)
         if abs(med_ms - base_ms) <= RELOCK_TOL_MS:
             return
         good = sum(1 for iv in candidate.intervals_ms
                    if abs(iv - med_ms) <= RELOCK_TOL_MS)
         if good >= 0.8 * len(candidate.intervals_ms):
             candidate.base_interval = med_ms / 1000.0
-            _log.info(f"[{self.symbol}] RELOCK_BASE: {base_ms:.0f}ms -> {med_ms:.0f}ms "
-                      f"(intervals={len(candidate.intervals_ms)})")
 
     def _refine_base(self, candidate):
         base = candidate.base_interval or candidate.last_interval
@@ -554,11 +489,6 @@ class IntervalRobotDetector(Detector):
                 return
 
     def _metro(self, candidate):
-        """v10.6: готовые ОТКЛОНЕНИЯ каждого интервала от БАЗЫ серии в мс:
-        dev = |iv_ms - round(iv_ms / base_ms) * base_ms| (round ловит
-        кратные пропуски). Отклонения независимы друг от друга.
-        Статус: ok <=150мс, warn <=300мс, bad больше. GUI только выводит.
-        Порядок: от старого к новому (GUI разворачивает)."""
         if not candidate.intervals_ms:
             return []
         base = candidate.base_interval or candidate.last_interval
@@ -577,52 +507,45 @@ class IntervalRobotDetector(Detector):
         qty = trade["qty"]
         side = trade["side"]
         ts = trade["timestamp"] / 1000.0
-        ts_ms = trade["timestamp"]  # v10.2: натуральные мс из ленты
+        ts_ms = trade["timestamp"]
         price = trade.get("price")
 
-        # v12: частоты qty для noisy-фильтра — ТОЛЬКО при включённом флаге:
-        # при noisy_qty_filter=False горячий путь идентичен до-v12 буквально
         if self.noisy_qty_filter:
             self._qty_freq[qty] = self._qty_freq.get(qty, 0) + 1
             self._qty_total += 1
 
-        # v11: адаптивный min_qty (один раз при первой сделке)
         if self.min_qty_auto and not self._adaptive_qty_computed:
             adaptive_qty = self._compute_adaptive_min_qty(ts_ms)
-            self.min_qty = max(adaptive_qty, 1)  # минимум 1
+            self.min_qty = max(adaptive_qty, 1)
             self._adaptive_qty_computed = True
-            _log.info(f"[{self.symbol}] ADAPTIVE_QTY_APPLIED: min_qty={self.min_qty}")
-        
-        # v10.3: логирование всех сделок (и ниже min_qty) для анализа FN
+
         passed_min_qty = qty >= self.min_qty
         if self.log_all_trades:
-            _log.info(f"[{self.symbol}] TRADE: qty={qty}, side={side}, ts={ts:.3f}, price={price}, passed_min_qty={passed_min_qty}, min_qty={self.min_qty}")
-        
+            _log.info(f"[{self.symbol}] TRADE: qty={qty}, side={side}, ts={ts:.3f}, passed_min_qty={passed_min_qty}")
         if not passed_min_qty:
             return []
-        
+
+        # v13.4: скользящий буфер сырой ленты стороны
+        buf = self._tape_buf.get(side)
+        if buf is None:
+            buf = deque(maxlen=self.tape_buf_max)
+            self._tape_buf[side] = buf
+        buf.append((ts_ms, qty))
+
         signals = self._prune_dead(side, ts)
         match = self._find_match(side, qty, ts)
         if match is not None:
             iv = ts - match.last_ts
-            # v10: фильтр двойных ударов (burst-sell, шум с gap<1с)
-            # v10.1: порог 1.0с (было 2.0с, но TP упал)
             if iv < self.min_double_hit_gap_sec:
-                _log.info(f"[{self.symbol}] DOUBLE_HIT_SKIP: side={side}, qty={qty}, "
-                          f"interval={iv:.2f}s < {self.min_double_hit_gap_sec}s (noise)")
                 return signals
             ok, base = self._interval_fits(match, iv)
             if ok and base is not None:
                 match.base_interval = base
-                # v12 C+B: классифицируем принятый гэп и пересчитываем блок
-                # (только базы >= порога: C+B про средние/длинные базы)
                 if self.noisy_qty_filter and base >= self.short_interval_threshold:
                     self._cb_update(match, iv, base)
             match.intervals.append(iv)
-            # v10.5: натуральный мс-интервал (разность ts_ms), до обновления last_ms
             if ts_ms is not None and match.last_ms is not None:
                 match.intervals_ms.append(ts_ms - match.last_ms)
-            # v10.7 + v10.8: перещёлкивание базы вверх ДО уточнения вниз
             self._relock_base(match)
             self._refine_base(match)
             match.last_interval = iv
@@ -631,7 +554,7 @@ class IntervalRobotDetector(Detector):
                 self._index_new_variant(side, match, qty)
             match.count += 1
             match.last_ts = ts
-            match.last_ms = ts_ms  # v10.2
+            match.last_ms = ts_ms
             match.warned = False
             self._apply_price(match, qty, price)
             al = self.active.get(side, [])
@@ -641,23 +564,15 @@ class IntervalRobotDetector(Detector):
                     al.append(match)
             except ValueError:
                 al.append(match)
-            _log.info(f"[{self.symbol}] MATCH: side={side}, qty={qty}, interval={iv:.2f}s, "
-                      f"repeats={match.count}, variants={sorted(match.qty_variants)}")
-            # v12: заблокированная серия не даёт подтверждения/истории
-            if match.count == self.min_repeats and not match.cb_block:
+            if match.count == self.report_min_repeats and not match.cb_block:
                 self._confirms.append(ts)
-                self._write_history(side, match)
-                _log.info(f"[{self.symbol}] *** CONFIRMED ***: side={side}, repeats={match.count}, "
-                          f"interval={match.last_interval:.2f}s, variants={sorted(match.qty_variants)}")
+                if self._report_ok(match):
+                    self._write_history(side, match)
             if match.count >= self.max_series:
-                sig = self._finalize(side, match)
-                if self._should_report(sig) and not match.cb_block:
-                    signals.append(sig)
-                self._unregister(side, match)
+                signals.extend(self._close_series(side, match))
         else:
-            new_c = Candidate(qty, ts, price, ts_ms)
+            new_c = Candidate(qty, ts, price, ts_ms, side)
             self._register(side, new_c)
-            _log.info(f"[{self.symbol}] NEW: side={side}, qty={qty}, price={price}")
             signals.extend(self._enforce_cap(side))
         return signals
 
@@ -668,16 +583,10 @@ class IntervalRobotDetector(Detector):
             for c in list(cands):
                 gap = now_ts - c.last_ts
                 if gap > close_threshold:
-                    # v12: заблокированные (cb_block) серии не репортятся
-                    if c.count >= self.min_repeats and not c.cb_block:
-                        sig = self._finalize(side, c)
-                        if self._should_report(sig):
-                            signals.append(sig)
-                    self._unregister(side, c)
+                    signals.extend(self._close_series(side, c))
                     continue
                 if c.count < self.min_repeats:
                     continue
-                # v12: заблокированные серии не дают просрочек
                 if c.cb_block:
                     continue
                 base = c.base_interval or c.last_interval
@@ -691,7 +600,6 @@ class IntervalRobotDetector(Detector):
                                            "qty_variants": sorted(c.qty_variants),
                                            "gap_sec": round(gap, 1), "max_fit_sec": round(max_fit, 1),
                                            "просрочка": f"{gap:.1f}s > {max_fit:.1f}s"})
-                            _log.info(f"[{self.symbol}] OVERDUE: gap={gap:.1f}s > {max_fit:.1f}s")
         return signals, warnings
 
     def get_active_snapshot(self, now_ts):
@@ -700,13 +608,11 @@ class IntervalRobotDetector(Detector):
             for c in cands:
                 if c.count < self.min_display_repeats:
                     continue
-                # v12: заблокированные серии не показываем в снапшоте
                 if c.cb_block:
                     continue
                 base = c.base_interval or c.last_interval
                 seconds_to_next = (c.last_ts + base - now_ts) if base is not None else None
                 jitter_ms = self._jitter_ms(c)
-                # v8: фильтр джиттера — мусорные серии не показываем в снапшоте
                 if self.jitter_ratio_max > 0 and jitter_ms is not None and base is not None:
                     if jitter_ms / (base * 1000) > self.jitter_ratio_max:
                         continue
@@ -729,11 +635,7 @@ class IntervalRobotDetector(Detector):
         signals = []
         for side, cands in list(self.active.items()):
             for c in cands:
-                # v12: заблокированные (cb_block) серии не репортятся
-                if c.count >= self.min_repeats and not c.cb_block:
-                    sig = self._finalize(side, c)
-                    if self._should_report(sig):
-                        signals.append(sig)
+                signals.extend(self._close_series(side, c))
         self.active.clear()
         self.index.clear()
         return signals

@@ -1565,3 +1565,27 @@ GigaChat (Sber AI):**
 - bd2cdfc: min_repeats 4→5 (удалено override у 76 тикеров)
 - 2c72dbd: compare_aniscan_ours v3 (матчинг по сущностям)
 - f61aea5: PROJECT_NOTES.md — раздел Достижения 2026-11-09
+## 2026-11-14 — детектор v13→v13.4, метрики v6, fp_audit
+- Режим: Qwen пишет → владелец запускает → хвосты → цикл. Локальный агент не используется.
+- detector v13.4: период=медиана зазоров; k-кратные и для коротких баз; история при
+  подтверждении И закрытии; max_qty_variants=4; report_min_repeats=8; grid-джиттер;
+  regularity-гейт report_min_regular=0.6; raw-period переоценка по сырой ленте (tape_buf).
+- day_audit v6: глобальный жадный матчинг (qty+interval+time-tiebreak);
+  FP = серии БЕЗ параметрически подходящего эталона; re-detections выводятся отдельно.
+- fp_audit: классификация FP по ЛЕНТЕ (REAL-GRID = робот, который Aniscan не зарегистрировал;
+  NOISE = наш мусор). Отвечает «врём или недооценены».
+- Метрики 11-13 (10:00-16:16): TP=11 FP=229 FN=19 re-detect=1; Precision 4.58% Recall 36.67%;
+  fp_audit: REAL-GRID=38 NOISE=191 THIN=0. GRID-IN-TAPE=3 (SBER20s, SBER10s, AKFB45s).
+- Динамика за день: FP 618→229, NOISE 601→191, REAL-GRID 17→38, Recall 23.3→36.67%.
+- ЗАВТРА (приоритет):
+  1) matcher v7: primary-qty (самый частый qty в [lo,hi]) вместо all-containment → чинит SBER(164).
+  2) guard raw-period: не переуменьшать (SNGSP 1.3s vs true 5s) — требовать raw-regular>=0.8
+     и/или qty-эксклюзивность; не ниже разумного min_interval.
+  3) GRID-IN-TAPE=3 (SBER20/SBER10/AKFB45) — баги матчинга/периода, добить.
+  4) SDK-ветка CScalp/Privod Bondar: Qwen пишет C#-мост PbSdkConsole→data/live_trades_*.jsonl,
+     владелец запускает dotnet. cs.license в %APPDATA%\PbSdk; пароль НЕ в чат. Даёт live-ленту
+     и реальный эталон (закрывает дыру Aniscan). .NET7, телеметрия, риски на владельце.
+  5) agent.py апгрейд до tool-loop (GigaChat, из РФ) — на будущее, отдельной задачей.
+- Дисциплина: каждая выдача файла = syntax-check + BOM-removal + прогон; прогресс-бар >5с обязателен.
+- Cursor/Claude Code/Codex: НЕ «бесплатно+безлимит+из РФ». Из РФ: GigaChat (квота) или локальные open-модели.
+- .env (ANISCAN_COOKIES) НЕ коммитить.
