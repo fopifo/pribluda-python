@@ -1672,3 +1672,22 @@ git commit -F <файл>, файл писать python'ом (encoding='utf-8').
 1. Перенос на VPS (Timeweb/Selectel) для работы 24/7 без локального ПК
 2. Уведомления-алерты по цене (достиг уровня)
 3. Трёхногий арбитраж (акция + фьючерс SPBFUT)
+======================================================================
+ДОБАВЛЕНИЕ 2026-11-15 (PbSdk мост + стакан-детектор спуфинга)
+======================================================================
+**PbSdk мост (C#, папка PbSdkConsole_Project — отдельный клон cscalp-sdk):**
+- .NET 7 SDK установлен (winget). Лицензия %APPDATA%\PbSdk\cs.license (копия fopifo81.cscalp.license.dat).
+- Program.cs: коннект ко ВСЕМ площадкам пропа (Акции/Валюта/Фьючерсы) через PublicServersInfo,
+  слот на каждую; подписка по алиасам SecurityID (FUT.CNYRUBF сработал; RFUD/CETS — not found).
+- LayerEventsReceiver.cs: лента (OnTick, InvariantCulture!) -> data/live_trades_DATE.jsonl;
+  стакан (OnStockUpdate, lock(stock)+!IsDisposed, 2快照/сек, глубина 10) -> data/orderbook_DATE.jsonl.
+- Тик: сторона=Direction, время=UpdateDateTime (публичные свойства, рефлексия только к ним).
+- Инварианты AGENTS.md соблюдены: lifecycle, receiver до Connect, InvokeLayerEndAsync при isnew,
+  пересоздание слоёв при reconnect. Торговые инварианты не нужны (только лог, не торгуем).
+- start_all.bat: 3 окна (Приблуда + MAX бот + PbSdk мост).
+
+**Стакан-детектор (research/orderbook_audit.py):** ищет уровни с регулярным появлением/снятием
+крупной заявки (спуфинг). Порог=max(min-lots,0.4*p90); reg>=0.6, период 3..180с; FLASH если жизнь<период/2.
+**Самотест (research/orderbook_selftest.py):** синтетика 1200 снапшотов, мигалка 20с -> детектор нашёл
+ровно её (reg=100%, FLASH), шум отсечён. Логика доказана офлайн.
+**Статус:** рынок мёртв (ВС/ДСВД тихо) -> реальных кандидатов пока 0; мост копит, аудит прогоним при активной торговле.
