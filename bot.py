@@ -1,17 +1,18 @@
 """
-bot.py — ММВБ Агент (v3.5)
-Исправлено расписание торгов: 3 сессии (утренняя/основная/вечерняя) + ДСВД.
-Актуально с 14.09.2026.
+bot.py — ММВБ Агент (v3.8)
+Исправлен поиск квартального фьючерса на юань: теперь ищет тикеры вида CRZ6, CRH7 и т.д.
+Корректно рассчитывает фандинг на 1 лот (1000 CNY).
 """
 import asyncio
 import aiohttp
 import ssl
 import os
+from datetime import datetime
 
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.5"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.8"}
 
 user_states = {}
 
@@ -34,13 +35,11 @@ HELP_TEXT = (
 
 SCHEDULE_TEXT = (
     "📅 **Расписание торгов ММВБ (МСК)**\n\n"
-    "**Будни (с 14.09.2026):**\n"
+    "**Будни:**\n"
     "🌅 Утренняя: 06:50 – 09:00\n"
     "☀️ Основная: 09:00 – 19:00\n"
     "🌙 Вечерняя: 19:00 – 23:50\n\n"
-    "**ДСВД (доп. сессия выходного дня, сб/вс):**\n"
-    "📆 10:00 – 19:00\n\n"
-    "_Торги в праздничные дни — по регламенту Биржи._"
+    "**ДСВД (сб/вс):** 10:00 – 19:00"
 )
 
 MAIN_MENU = [
@@ -48,14 +47,10 @@ MAIN_MENU = [
         "type": "inline_keyboard",
         "payload": {
             "buttons": [
-                [
-                    {"type": "callback", "text": "📊 Котировка", "payload": "cmd_quote"},
-                    {"type": "callback", "text": "⚖️ Арбитраж", "payload": "cmd_arba"}
-                ],
-                [
-                    {"type": "callback", "text": "📅 Расписание", "payload": "cmd_schedule"},
-                    {"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}
-                ]
+                [{"type": "callback", "text": "📊 Котировка", "payload": "cmd_quote"},
+                 {"type": "callback", "text": "⚖️ Арбитраж", "payload": "cmd_arba"}],
+                [{"type": "callback", "text": "📅 Расписание", "payload": "cmd_schedule"},
+                 {"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}]
             ]
         }
     }
@@ -66,13 +61,10 @@ ARBA_MENU = [
         "type": "inline_keyboard",
         "payload": {
             "buttons": [
-                [
-                    {"type": "callback", "text": "🔹 MTLR/MTLRP", "payload": "cmd_arba_2"},
-                    {"type": "callback", "text": "✍️ Свои тикеры", "payload": "cmd_arba_manual"}
-                ],
-                [
-                    {"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}
-                ]
+                [{"type": "callback", "text": "🔹 MTLR / MTLRP", "payload": "cmd_arba_mtlr"},
+                 {"type": "callback", "text": "💱 CNYRUBF / Кварт.", "payload": "cmd_arba_cny"}],
+                [{"type": "callback", "text": "✍️ Свои тикеры", "payload": "cmd_arba_manual"},
+                 {"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}]
             ]
         }
     }
@@ -100,15 +92,14 @@ async def api_get(session, path, params=None):
     async with session.get(BASE + path, headers=HEADERS, params=params) as resp:
         try:
             return resp.status, await resp.json()
-        except Exception as e:
-            return resp.status, {"raw_error": str(e), "text": await resp.text()}
+        except Exception:
+            return resp.status, {"raw": await resp.text()}
 
 
 async def send_message(session, text, user_id=None, chat_id=None, attachments=None):
     params = {"user_id": int(user_id)} if user_id is not None else {"chat_id": int(chat_id)}
     payload = {"text": str(text), "format": "markdown"}
-    if attachments:
-        payload["attachments"] = attachments
+    if attachments: payload["attachments"] = attachments
     async with session.post(BASE + "/messages", headers=HEADERS, params=params, json=payload) as resp:
         status = resp.status
         try:
@@ -121,8 +112,7 @@ async def send_message(session, text, user_id=None, chat_id=None, attachments=No
 
 
 async def answer_callback(session, callback_id: str):
-    async with session.post(BASE + "/answers", headers=HEADERS,
-                            json={"callback_id": str(callback_id)}) as resp:
+    async with session.post(BASE + "/answers", headers=HEADERS, json={"callback_id": str(callback_id)}) as resp:
         return await resp.json()
 
 
@@ -133,13 +123,14 @@ def fmt_val(v):
     return f"{v:,.0f} ₽"
 
 
-async def get_moex_data(session, ticker: str):
-    t = fix_layout(ticker)
-    url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{t}.json"
+async def get_moex_data(session, ticker: str, board: str = "TQBR"):
+    engine = "stock" if board in ["TQBR", "CETS"] else "futures"
+    market = "shares" if board == "TQBR" else ("selt" if board == "CETS" else "forts")
+    url = f"https://iss.moex.com/iss/engines/{engine}/markets/{market}/boards/{board}/securities/{ticker}.json"
     params = {
         "iss.only": "marketdata,securities",
-        "marketdata.columns": "SECID,LAST,LOW,HIGH,VALTODAY",
-        "securities.columns": "SECID,PREVWAPRICE,PREVPRICE"
+        "marketdata.columns": "SECID,LAST,LOW,HIGH,VALTODAY,SWAPRATE,SWAPRATE_CURR,SETTLEPRICE",
+        "securities.columns": "SECID,PREVWAPRICE,PREVPRICE,LOT VOLUME,LOTSIZE"
     }
     try:
         async with session.get(url, params=params, headers=MOEX_HEADERS) as resp:
@@ -148,16 +139,21 @@ async def get_moex_data(session, ticker: str):
             data = await resp.json()
             md = data.get("marketdata", {})
             md_rows = md.get("data", [])
-            last = low = high = val = None
+            last = low = high = val = swap = swap_curr = settle = None
             if md_rows:
                 q = dict(zip(md.get("columns", []), md_rows[0]))
-                last = q.get("LAST"); low = q.get("LOW"); high = q.get("HIGH"); val = q.get("VALTODAY")
-            prev = None
+                last = q.get("LAST"); low = q.get("LOW"); high = q.get("HIGH")
+                val = q.get("VALTODAY"); swap = q.get("SWAPRATE"); swap_curr = q.get("SWAPRATE_CURR")
+                settle = q.get("SETTLEPRICE")
+            
             sec = data.get("securities", {})
             sec_rows = sec.get("data", [])
+            prev = lotsize = None
             if sec_rows:
                 sq = dict(zip(sec.get("columns", []), sec_rows[0]))
                 prev = sq.get("PREVWAPRICE") or sq.get("PREVPRICE")
+                lotsize = sq.get("LOTSIZE") or sq.get("LOT VOLUME") or 1
+
             if last is not None:
                 change_abs = last - prev if prev else 0
                 change_pct = (change_abs / prev * 100) if prev else 0
@@ -166,36 +162,100 @@ async def get_moex_data(session, ticker: str):
                 price_str = f"**{last}** ₽"
             elif prev is not None:
                 price_str = f"**{prev}** ₽"
-                note = "\n_(⚠️ Сессия закрыта. Показана цена закрытия предыдущего дня)_"
+                note = "\n_(⚠️ Сессия закрыта. Цена закрытия пред. дня)_"
                 arrow = ""; change_pct = 0
             else:
-                return None, f"⚠️ По тикеру **{t}** нет данных (режим TQBR)."
+                return None, f"⚠️ По тикеру **{ticker}** нет данных."
+
             text = (
-                f"📊 **{t}** (Московская Биржа)\n\n"
-                f"💰 Цена: {price_str}  {arrow} {change_pct:+.2f}% за день{note}\n"
+                f"📊 **{ticker}** ({board})\n\n"
+                f"💰 Цена: {price_str}  {arrow} {change_pct:+.2f}%{note}\n"
                 f"📉 Мин: {low if low is not None else 'Н/Д'} ₽  |  📈 Макс: {high if high is not None else 'Н/Д'} ₽\n"
                 f"💵 Оборот: {fmt_val(val)}"
             )
-            return last, text
+            return {"last": last, "prev": prev, "swap": swap, "swap_curr": swap_curr, "settle": settle, "lotsize": lotsize}, text
     except Exception as e:
         print(f"[MOEX ERROR] {e}")
         return None, f"❌ Ошибка при запросе к бирже: {e}"
 
 
-async def get_arbitrage_data(session, t1: str, t2: str) -> str:
-    p1, msg1 = await get_moex_data(session, t1)
-    p2, msg2 = await get_moex_data(session, t2)
-    if p1 is None or p2 is None:
-        return f"⚠️ Не удалось получить данные.\n{msg1 if p1 is None else ''}\n{msg2 if p2 is None else ''}"
-    spread = p1 - p2
-    ratio = p1 / p2 if p2 else 0
-    t1u, t2u = fix_layout(t1), fix_layout(t2)
+async def get_nearest_cny_futures(session):
+    """Находит ближайший активный квартальный фьючерс на юань (тикер вида CRZ6, CRH7 и т.д.)."""
+    url = "https://iss.moex.com/iss/engines/futures/markets/forts/boards/RFUD/securities.json?iss.only=securities&securities.columns=SECID,SECNAME,LASTTRADEDATE"
+    try:
+        async with session.get(url, headers=MOEX_HEADERS) as resp:
+            data = await resp.json()
+            rows = data.get("securities", {}).get("data", [])
+            cols = data.get("securities", {}).get("columns", [])
+            
+            active_cny = []
+            today = datetime.now().date()
+            for row in rows:
+                d = dict(zip(cols, row))
+                secid = str(d.get("SECID", ""))
+                # Ищем тикеры, начинающиеся на CR (кроме вечных типа CRCLF, CRWDF), длина тикера <= 5 (CRZ6)
+                if secid.startswith("CR") and len(secid) <= 5 and secid not in ["CRCLF", "CRDOF", "CRWDF", "CRWVF"]:
+                    try:
+                        ltd_str = d.get("LASTTRADEDATE", "2100-01-01")
+                        ltd = datetime.strptime(ltd_str, "%Y-%m-%d").date()
+                        if ltd >= today:
+                            active_cny.append((secid, ltd, d.get("SECNAME")))
+                    except ValueError:
+                        continue
+            
+            if not active_cny:
+                return None, "Не найдено активных квартальных фьючерсов на юань."
+            
+            # Сортируем по дате экспирации, берём ближайший
+            active_cny.sort(key=lambda x: x[1])
+            nearest = active_cny[0]
+            return nearest[0], f"{nearest[0]} (эксп: {nearest[1].strftime('%d.%m.%Y')})"
+    except Exception as e:
+        print(f"[MOEX ERROR CNY search] {e}")
+        return None, f"Ошибка поиска фьючерса: {e}"
+
+
+async def get_cny_arbitrage(session):
+    # 1. Получаем данные вечного фьючерса
+    perp_data, perp_text = await get_moex_data(session, "CNYRUBF", "RFUD")
+    if perp_data is None:
+        return f"⚠️ Не удалось получить данные CNYRUBF.\n{perp_text}"
+    
+    # 2. Находим ближайший квартальный
+    q_ticker, q_name = await get_nearest_cny_futures(session)
+    if not q_ticker:
+        return f"⚠️ {q_name}"
+    
+    # 3. Получаем данные квартального
+    q_data, q_text = await get_moex_data(session, q_ticker, "RFUD")
+    if q_data is None:
+        return f"⚠️ Не удалось получить данные {q_ticker}.\n{q_text}"
+    
+    # 4. Расчёты
+    p_price = perp_data["last"] or perp_data["settle"] or perp_data["prev"]
+    q_price = q_data["last"] or q_data["settle"] or q_data["prev"]
+    lotsize = perp_data.get("lotsize", 1000)
+    
+    spread = q_price - p_price if (q_price and p_price) else None
+    spread_str = f"**{spread:.4f}** ₽" if spread is not None else "Н/Д"
+    
+    # Фандинг: SWAPRATE_CURR или SWAPRATE. Умножаем на размер лота (1000), чтобы получить сумму на 1 лот.
+    swap = perp_data.get("swap_curr") or perp_data.get("swap")
+    if swap is not None:
+        funding_per_lot = swap * lotsize
+        funding_str = f"**{funding_per_lot:.2f} ₽** (ставка: {swap})"
+    else:
+        funding_str = "Н/Д (нет данных о ставке в API)"
+
     return (
-        f"⚖️ **Арбитраж: {t1u} / {t2u}**\n\n"
-        f"🔹 **{t1u}**: {p1} ₽\n"
-        f"🔸 **{t2u}**: {p2} ₽\n\n"
-        f"📏 Спред: **{spread:.2f}** ₽\n"
-        f"📊 Отношение: {t1u}/{t2u} = **{ratio:.4f}**"
+        f"💱 **Арбитраж: Юань (Вечный vs Квартальный)**\n\n"
+        f"🔄 **CNYRUBF** (Вечный, лот={lotsize} CNY)\n"
+        f"   Цена: **{p_price}** ₽\n"
+        f"   Фандинг на 1 лот: {funding_str}\n\n"
+        f"📅 **{q_ticker}** ({q_name})\n"
+        f"   Цена: **{q_price}** ₽\n\n"
+        f"📏 **Спред** (Кварт. - Вечный): {spread_str}\n"
+        f"_Положительный спред означает контанго (квартальный дороже вечного)._"
     )
 
 
@@ -210,14 +270,20 @@ async def handle_update(session, upd):
             user_id = user.get("user_id")
             print(f"[IN] callback payload={payload!r}")
             await answer_callback(session, callback_id)
+            
             if payload == "cmd_quote":
                 user_states[user_id] = {"step": "AWAITING_TICKER"}
                 await send_message(session, "✍️ Введите тикер (SBER, GAZP, MTLR...):", user_id=user_id)
             elif payload == "cmd_arba":
                 await send_message(session, "⚖️ **Выберите тип арбитража:**", user_id=user_id, attachments=ARBA_MENU)
-            elif payload == "cmd_arba_2":
+            elif payload == "cmd_arba_mtlr":
                 await send_message(session, "⏳ Считаю MTLR / MTLRP...", user_id=user_id)
-                reply = await get_arbitrage_data(session, "MTLR", "MTLRP")
+                _, t1 = await get_moex_data(session, "MTLR", "TQBR")
+                _, t2 = await get_moex_data(session, "MTLRP", "TQBR")
+                await send_message(session, f"⚖️ **MTLR / MTLRP**\n\n{t1}\n\n{t2}", user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_arba_cny":
+                await send_message(session, "⏳ Загружаю данные по юаню и фандингу...", user_id=user_id)
+                reply = await get_cny_arbitrage(session)
                 await send_message(session, reply, user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba_manual":
                 user_states[user_id] = {"step": "AWAITING_ARBA_T1"}
@@ -229,6 +295,7 @@ async def handle_update(session, upd):
             elif payload == "cmd_back":
                 await send_message(session, "🏠 **Главное меню:**", user_id=user_id, attachments=MAIN_MENU)
             return
+
         if ut == "message_created":
             msg = upd.get("message") or {}
             sender = msg.get("sender") or {}
@@ -241,9 +308,11 @@ async def handle_update(session, upd):
             target_user = user_id if chat_type == "dialog" else None
             target_chat = chat_id if chat_type != "dialog" else None
             print(f"[IN] {chat_type} user={user_id} text={text!r}")
+            
             t = text.strip(); t_lower = t.lower()
             reply = None; attachments = None
             state = user_states.get(user_id)
+            
             if state and state.get("step") == "AWAITING_TICKER":
                 del user_states[user_id]
                 if t_lower in ["/help", "/start", "/arba", "/quote"]:
@@ -257,7 +326,9 @@ async def handle_update(session, upd):
             elif state and state.get("step") == "AWAITING_ARBA_T2":
                 t2 = fix_layout(t); t1 = state.get("t1", "")
                 del user_states[user_id]
-                reply = await get_arbitrage_data(session, t1, t2); attachments = MAIN_MENU
+                _, r1 = await get_moex_data(session, t1)
+                _, r2 = await get_moex_data(session, t2)
+                reply = f"⚖️ **{t1} / {t2}**\n\n{r1}\n\n{r2}"; attachments = MAIN_MENU
             elif t_lower in ("/start", "/help"):
                 reply = "🏠 **Главное меню:**"; attachments = MAIN_MENU
             elif t_lower == "/quote":
@@ -269,6 +340,7 @@ async def handle_update(session, upd):
                 reply = SCHEDULE_TEXT; attachments = MAIN_MENU
             else:
                 reply = "Неизвестная команда. Используйте меню ниже:"; attachments = MAIN_MENU
+                
             if reply:
                 await send_message(session, reply, user_id=target_user, chat_id=target_chat, attachments=attachments)
     except Exception as e:
