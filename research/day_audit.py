@@ -1,6 +1,7 @@
 """
 day_audit.py — вечерний аудит дня.
-Метрики v6: глобальный жадный матчинг (qty+interval+time-tiebreak),
+Метрики v7: глобальный жадный матчинг (qty+interval+time-tiebreak),
+primary-qty эвристика (any вместо all для qty_variants) чинит GRID-IN-TAPE.
 FP = только серии БЕЗ параметрически подходящего эталона; повторные
 детекции того же робота (эпизоды) = re-detections, не FP.
 Классы FN + оконный дамп GRID-IN-TAPE + аудит FP.
@@ -142,7 +143,7 @@ def window_overlap_score(our_st, our_en, ref_ls, ref_le):
 
 
 def main():
-    date = sys.argv[1] if len(sys.argv) > 1 else "2026-11-10"
+    date = sys.argv[1] if len(sys.argv) > 1 else "2026-11-13"
     ws, we = "10:00", "16:16"
     if "--ws" in sys.argv:
         ws = sys.argv[sys.argv.index("--ws") + 1]
@@ -174,7 +175,7 @@ def main():
     for e in ents:
         by_key[(e["ticker"], e["side"])].append(e)
 
-    # v6: admissible = есть ли хоть один параметрически подходящий эталон
+    # v7: admissible = есть ли хоть один параметрически подходящий эталон
     admissible = [False] * len(ours)
     pairs = []
     for oi, o in enumerate(ours):
@@ -186,7 +187,11 @@ def main():
         for e in by_key.get((o["symbol"], o["side"].upper()), []):
             if abs(our_iv - e["period"]) > max(2.0, e["period"] * 0.2):
                 continue
-            if not all(e["lo"] <= q <= e["hi"] for q in our_qty):
+            # v7: primary-qty эвристика. Вместо all-containment требуем,
+            # чтобы хотя бы один qty из серии попадал в диапазон эталона.
+            # Это чинит матчинг при наличии единичных шумовых объёмов в серии
+            # (например, SBER 164 при эталоне 169-171).
+            if not any(e["lo"] <= q <= e["hi"] for q in our_qty):
                 continue
             admissible[oi] = True
             pairs.append((window_overlap_score(our_st, our_en, e["ls"], e["le"]), oi, e["id"]))
@@ -212,7 +217,7 @@ def main():
     fn = len(fn_list)
 
     print("\n" + "=" * 68)
-    print(f" МЕТРИКИ v6 (окно {ws}-{we}; FP=без подходящего эталона)")
+    print(f" МЕТРИКИ v7 (окно {ws}-{we}; FP=без подходящего эталона)")
     print("=" * 68)
     print(f" TP={tp} (overlap={tp_overlap}, param-only={tp_param_only})  FP={fp}  FN={fn}  re-detect={redetect}")
     if tp + fp:
