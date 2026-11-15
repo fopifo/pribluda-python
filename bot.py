@@ -1,7 +1,7 @@
 """
-bot.py — ММВБ Агент (v3.3)
-Критическое исправление: убран ненадежный endpoint свечей MOEX (отдавал данные за 2011 год для MTLR).
-Теперь цены и дельта берутся строго из marketdata (LAST) и securities (PREVPRICE).
+bot.py — ММВБ Агент (v3.5)
+Исправлено расписание торгов: 3 сессии (утренняя/основная/вечерняя) + ДСВД.
+Актуально с 14.09.2026.
 """
 import asyncio
 import aiohttp
@@ -11,7 +11,7 @@ import os
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.3"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.5"}
 
 user_states = {}
 
@@ -26,11 +26,57 @@ LAYOUT_MAP = {
 HELP_TEXT = (
     "Я ММВБ Агент — помощник для торгов на Московской Бирже.\n\n"
     "Команды:\n"
-    "/start — начать\n"
-    "/help — эта справка\n"
-    "/quote — узнать котировку (бот попросит ввести тикер)\n"
-    "/arba — меню арбитражных связок"
+    "/start — главное меню\n"
+    "/quote — узнать котировку\n"
+    "/arba — арбитражные связки\n"
+    "/schedule — расписание торгов"
 )
+
+SCHEDULE_TEXT = (
+    "📅 **Расписание торгов ММВБ (МСК)**\n\n"
+    "**Будни (с 14.09.2026):**\n"
+    "🌅 Утренняя: 06:50 – 09:00\n"
+    "☀️ Основная: 09:00 – 19:00\n"
+    "🌙 Вечерняя: 19:00 – 23:50\n\n"
+    "**ДСВД (доп. сессия выходного дня, сб/вс):**\n"
+    "📆 10:00 – 19:00\n\n"
+    "_Торги в праздничные дни — по регламенту Биржи._"
+)
+
+MAIN_MENU = [
+    {
+        "type": "inline_keyboard",
+        "payload": {
+            "buttons": [
+                [
+                    {"type": "callback", "text": "📊 Котировка", "payload": "cmd_quote"},
+                    {"type": "callback", "text": "⚖️ Арбитраж", "payload": "cmd_arba"}
+                ],
+                [
+                    {"type": "callback", "text": "📅 Расписание", "payload": "cmd_schedule"},
+                    {"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}
+                ]
+            ]
+        }
+    }
+]
+
+ARBA_MENU = [
+    {
+        "type": "inline_keyboard",
+        "payload": {
+            "buttons": [
+                [
+                    {"type": "callback", "text": "🔹 MTLR/MTLRP", "payload": "cmd_arba_2"},
+                    {"type": "callback", "text": "✍️ Свои тикеры", "payload": "cmd_arba_manual"}
+                ],
+                [
+                    {"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}
+                ]
+            ]
+        }
+    }
+]
 
 
 def fix_layout(text: str) -> str:
@@ -63,7 +109,6 @@ async def send_message(session, text, user_id=None, chat_id=None, attachments=No
     payload = {"text": str(text), "format": "markdown"}
     if attachments:
         payload["attachments"] = attachments
-
     async with session.post(BASE + "/messages", headers=HEADERS, params=params, json=payload) as resp:
         status = resp.status
         try:
@@ -89,7 +134,6 @@ def fmt_val(v):
 
 
 async def get_moex_data(session, ticker: str):
-    """Единый надежный запрос к MOEX без использования сломанных свечей."""
     t = fix_layout(ticker)
     url = f"https://iss.moex.com/iss/engines/stock/markets/shares/boards/TQBR/securities/{t}.json"
     params = {
@@ -102,25 +146,18 @@ async def get_moex_data(session, ticker: str):
             if resp.status != 200:
                 return None, f"❌ Ошибка запроса к бирже (код {resp.status})"
             data = await resp.json()
-
             md = data.get("marketdata", {})
             md_rows = md.get("data", [])
             last = low = high = val = None
-            
             if md_rows:
                 q = dict(zip(md.get("columns", []), md_rows[0]))
-                last = q.get("LAST")
-                low = q.get("LOW")
-                high = q.get("HIGH")
-                val = q.get("VALTODAY")
-
+                last = q.get("LAST"); low = q.get("LOW"); high = q.get("HIGH"); val = q.get("VALTODAY")
             prev = None
             sec = data.get("securities", {})
             sec_rows = sec.get("data", [])
             if sec_rows:
                 sq = dict(zip(sec.get("columns", []), sec_rows[0]))
                 prev = sq.get("PREVWAPRICE") or sq.get("PREVPRICE")
-
             if last is not None:
                 change_abs = last - prev if prev else 0
                 change_pct = (change_abs / prev * 100) if prev else 0
@@ -130,12 +167,9 @@ async def get_moex_data(session, ticker: str):
             elif prev is not None:
                 price_str = f"**{prev}** ₽"
                 note = "\n_(⚠️ Сессия закрыта. Показана цена закрытия предыдущего дня)_"
-                change_abs = 0
-                change_pct = 0
-                arrow = ""
+                arrow = ""; change_pct = 0
             else:
                 return None, f"⚠️ По тикеру **{t}** нет данных (режим TQBR)."
-
             text = (
                 f"📊 **{t}** (Московская Биржа)\n\n"
                 f"💰 Цена: {price_str}  {arrow} {change_pct:+.2f}% за день{note}\n"
@@ -143,7 +177,6 @@ async def get_moex_data(session, ticker: str):
                 f"💵 Оборот: {fmt_val(val)}"
             )
             return last, text
-
     except Exception as e:
         print(f"[MOEX ERROR] {e}")
         return None, f"❌ Ошибка при запросе к бирже: {e}"
@@ -152,47 +185,23 @@ async def get_moex_data(session, ticker: str):
 async def get_arbitrage_data(session, t1: str, t2: str) -> str:
     p1, msg1 = await get_moex_data(session, t1)
     p2, msg2 = await get_moex_data(session, t2)
-    
     if p1 is None or p2 is None:
-        # Если одна из ошибок не критична, покажем её, но лучше вернуть общий текст
         return f"⚠️ Не удалось получить данные.\n{msg1 if p1 is None else ''}\n{msg2 if p2 is None else ''}"
-    
-    # Извлекаем процент изменения из сообщений (грубо, но надежно) или пересчитаем
-    # Для чистоты пересчитаем спред
     spread = p1 - p2
     ratio = p1 / p2 if p2 else 0
-    
+    t1u, t2u = fix_layout(t1), fix_layout(t2)
     return (
-        f"⚖️ **Арбитраж: {fix_layout(t1)} / {fix_layout(t2)}**\n\n"
-        f"🔹 **{fix_layout(t1)}**: {p1} ₽\n"
-        f"🔸 **{fix_layout(t2)}**: {p2} ₽\n\n"
+        f"⚖️ **Арбитраж: {t1u} / {t2u}**\n\n"
+        f"🔹 **{t1u}**: {p1} ₽\n"
+        f"🔸 **{t2u}**: {p2} ₽\n\n"
         f"📏 Спред: **{spread:.2f}** ₽\n"
-        f"📊 Отношение: {fix_layout(t1)}/{fix_layout(t2)} = **{ratio:.4f}**"
+        f"📊 Отношение: {t1u}/{t2u} = **{ratio:.4f}**"
     )
-
-
-ARBA_KEYBOARD = [
-    {
-        "type": "inline_keyboard",
-        "payload": {
-            "buttons": [
-                [
-                    {"type": "callback", "text": "🔹 Двуногий (MTLR/MTLRP)", "payload": "cmd_arba_2"},
-                    {"type": "callback", "text": "🔸 Трёхногий", "payload": "cmd_arba_3"}
-                ],
-                [
-                    {"type": "callback", "text": "✍️ Ввести свои тикеры", "payload": "cmd_arba_manual"}
-                ]
-            ]
-        }
-    }
-]
 
 
 async def handle_update(session, upd):
     try:
         ut = upd.get("update_type")
-
         if ut == "message_callback":
             cb = upd.get("callback", {})
             callback_id = cb.get("callback_id")
@@ -200,73 +209,68 @@ async def handle_update(session, upd):
             user = cb.get("user", {})
             user_id = user.get("user_id")
             print(f"[IN] callback payload={payload!r}")
-
             await answer_callback(session, callback_id)
-
-            if payload == "cmd_arba_2":
+            if payload == "cmd_quote":
+                user_states[user_id] = {"step": "AWAITING_TICKER"}
+                await send_message(session, "✍️ Введите тикер (SBER, GAZP, MTLR...):", user_id=user_id)
+            elif payload == "cmd_arba":
+                await send_message(session, "⚖️ **Выберите тип арбитража:**", user_id=user_id, attachments=ARBA_MENU)
+            elif payload == "cmd_arba_2":
                 await send_message(session, "⏳ Считаю MTLR / MTLRP...", user_id=user_id)
                 reply = await get_arbitrage_data(session, "MTLR", "MTLRP")
-                await send_message(session, reply, user_id=user_id)
-            elif payload == "cmd_arba_3":
-                await send_message(session, "🚧 Трёхногий арбитраж в разработке.", user_id=user_id)
+                await send_message(session, reply, user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba_manual":
                 user_states[user_id] = {"step": "AWAITING_ARBA_T1"}
                 await send_message(session, "✍️ Введите **первый** тикер:", user_id=user_id)
+            elif payload == "cmd_schedule":
+                await send_message(session, SCHEDULE_TEXT, user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_help":
+                await send_message(session, HELP_TEXT, user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_back":
+                await send_message(session, "🏠 **Главное меню:**", user_id=user_id, attachments=MAIN_MENU)
             return
-
         if ut == "message_created":
             msg = upd.get("message") or {}
             sender = msg.get("sender") or {}
             recipient = msg.get("recipient") or {}
             if sender.get("is_bot"): return
-
             text = (msg.get("body") or {}).get("text") or ""
             user_id = sender.get("user_id")
             chat_id = recipient.get("chat_id")
             chat_type = recipient.get("chat_type")
             target_user = user_id if chat_type == "dialog" else None
             target_chat = chat_id if chat_type != "dialog" else None
-
             print(f"[IN] {chat_type} user={user_id} text={text!r}")
-
-            t = text.strip()
-            t_lower = t.lower()
-            reply = None
-            attachments = None
+            t = text.strip(); t_lower = t.lower()
+            reply = None; attachments = None
             state = user_states.get(user_id)
-
             if state and state.get("step") == "AWAITING_TICKER":
                 del user_states[user_id]
                 if t_lower in ["/help", "/start", "/arba", "/quote"]:
-                    reply = "Отмена ввода тикера."
+                    reply = "Отмена ввода тикера."; attachments = MAIN_MENU
                 else:
-                    _, reply = await get_moex_data(session, t)
-
+                    _, reply = await get_moex_data(session, t); attachments = MAIN_MENU
             elif state and state.get("step") == "AWAITING_ARBA_T1":
                 t1 = fix_layout(t)
                 user_states[user_id] = {"step": "AWAITING_ARBA_T2", "t1": t1}
                 reply = f"Принято: **{t1}**. Теперь введите **второй** тикер:"
-
             elif state and state.get("step") == "AWAITING_ARBA_T2":
-                t2 = fix_layout(t)
-                t1 = state.get("t1", "")
+                t2 = fix_layout(t); t1 = state.get("t1", "")
                 del user_states[user_id]
-                reply = await get_arbitrage_data(session, t1, t2)
-
+                reply = await get_arbitrage_data(session, t1, t2); attachments = MAIN_MENU
             elif t_lower in ("/start", "/help"):
-                reply = HELP_TEXT
+                reply = "🏠 **Главное меню:**"; attachments = MAIN_MENU
             elif t_lower == "/quote":
                 user_states[user_id] = {"step": "AWAITING_TICKER"}
-                reply = "✍️ Введите тикер (SBER, GAZP, MTLR...).\n_Любая раскладка и регистр._"
+                reply = "✍️ Введите тикер (SBER, GAZP, MTLR...):"
             elif t_lower == "/arba":
-                reply = "⚖️ **Выберите тип арбитражной связки:**"
-                attachments = ARBA_KEYBOARD
+                reply = "⚖️ **Выберите тип арбитража:**"; attachments = ARBA_MENU
+            elif t_lower == "/schedule":
+                reply = SCHEDULE_TEXT; attachments = MAIN_MENU
             else:
-                reply = "Неизвестная команда. Напишите /help"
-
+                reply = "Неизвестная команда. Используйте меню ниже:"; attachments = MAIN_MENU
             if reply:
                 await send_message(session, reply, user_id=target_user, chat_id=target_chat, attachments=attachments)
-
     except Exception as e:
         print(f"[ERROR] handle_update: {e}")
         import traceback
@@ -280,7 +284,6 @@ async def main():
         status, me = await api_get(session, "/me")
         print(f"[AUTH] {status}: {'OK' if status == 200 else me}")
         if status != 200: return
-
         marker = None
         print("✅ Бот запущен. Жду сообщений...")
         while True:
@@ -289,14 +292,11 @@ async def main():
             try:
                 status, data = await api_get(session, "/updates", params)
             except Exception as e:
-                print(f"[NET] {e}")
-                await asyncio.sleep(2)
-                continue
+                print(f"[NET] {e}"); await asyncio.sleep(2); continue
             if status == 401:
                 print("FATAL: токен недействителен"); return
             if status != 200:
                 print(f"[ERR] {status}: {data}"); await asyncio.sleep(2); continue
-
             new_marker = data.get("marker")
             if new_marker is not None: marker = new_marker
             for upd in data.get("updates", []):
