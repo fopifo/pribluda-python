@@ -20,7 +20,15 @@ namespace PbSdkConsole
         const string Password = "skTVnJ1J9i";
         const string CmdToken = "pribluda-local-1";
         const string HttpPrefix = "http://127.0.0.1:8787/";
-        const bool DryRun = true;
+        const bool AllowLive = true;
+        const bool TestMode = true;
+        static readonly Dictionary<string, HashSet<decimal>> TestWhitelist = new()
+        {
+            { "MTLR",      new HashSet<decimal>{ 1, 99, 100, 200, 300, 500 } },
+            { "MTLRP",     new HashSet<decimal>{ 1, 9, 10, 20, 30, 50 } },
+            { "CNYRUBF",   new HashSet<decimal>{ 1, 2, 5 } },
+            { "CNY-12.26", new HashSet<decimal>{ 1, 2, 5 } },
+        };
         static readonly string[][] TickerAliases = {
             new[]{ "TQBR.SBER" },
             new[]{ "TQBR.MTLR" },
@@ -120,8 +128,27 @@ namespace PbSdkConsole
                 decimal qty = r.GetProperty("qty").GetDecimal();
                 string type = r.TryGetProperty("type", out var ty) ? (ty.GetString() ?? "limit").ToLowerInvariant() : "limit";
                 double? reqPrice = r.TryGetProperty("price", out var pv) && pv.ValueKind == JsonValueKind.Number ? pv.GetDouble() : (double?)null;
+                bool closePos = r.TryGetProperty("close_position", out var cp) && cp.ValueKind == JsonValueKind.True;
+                bool live = r.TryGetProperty("live", out var lv) && lv.ValueKind == JsonValueKind.True;
                 if (side != "buy" && side != "sell") return "{\"ok\":false,\"error\":\"bad side\"}";
                 if (qty <= 0) return "{\"ok\":false,\"error\":\"bad qty\"}";
+                if (live && !AllowLive) return "{\"ok\":false,\"error\":\"live disabled\"}";
+                if (TestMode)
+                {
+                    if (!TestWhitelist.TryGetValue(symbol, out var allowed))
+                        return $"{{\"ok\":false,\"error\":\"test mode: symbol {symbol} not allowed\"}}";
+                    if (closePos)
+                    {
+                        if (!Layers.TryGetValue(symbol, out var layerClose))
+                            return $"{{\"ok\":false,\"error\":\"no layer {symbol}\"}}";
+                        decimal curPos = 0;
+                        try { curPos = layerClose.Posmonitor._PositionAmount; } catch { }
+                        if (qty != Math.Abs(curPos) || curPos == 0)
+                            return $"{{\"ok\":false,\"error\":\"close qty mismatch (pos={curPos}, qty={qty})\"}}";
+                    }
+                    else if (!allowed.Contains(qty))
+                        return $"{{\"ok\":false,\"error\":\"test mode: qty {qty} not in whitelist for {symbol}\"}}";
+                }
                 if (!Layers.TryGetValue(symbol, out var layer)) return $"{{\"ok\":false,\"error\":\"no layer {symbol}\"}}";
                 var stock = layer.LastStock;
                 bool ready = layer.DispatcherSlot.IsReady && !layer.IsReplications && layer.IsReplicationsDone
@@ -129,21 +156,38 @@ namespace PbSdkConsole
                 if (!ready) return "{\"ok\":false,\"error\":\"layer not ready\"}";
                 double execPrice = reqPrice ?? (side == "buy" ? stock.BestAsk : stock.BestBid);
                 execPrice = Math.Round(execPrice, layer.ContractInfo.Decimals);
-                var rec = new
+
+                if (!live)
+                {
+                    var recDry = new
+                    {
+                        ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                        id, symbol, side, qty, type,
+                        price = execPrice,
+                        close_position = closePos,
+                        status = "DRYRUN"
+                    };
+                    var lineDry = JsonSerializer.Serialize(recDry);
+                    lock (CmdLock) { CommandWriter?.WriteLine(lineDry); }
+                    Console.WriteLine($"[DRYRUN ORDER] {lineDry}");
+                    return $"{{\"ok\":true,\"dry\":true,\"symbol\":\"{symbol}\",\"side\":\"{side}\",\"qty\":{qty.ToString(CultureInfo.InvariantCulture)},\"price\":{execPrice.ToString(CultureInfo.InvariantCulture)},\"note\":\"dry-run: заявка НЕ отправлена на биржу\"}}";
+                }
+
+                var action = side == "buy" ? OrderAction.Buy : OrderAction.Sell;
+                bool sent = layer.SendOrder(execPrice, qty, action, type: OrderFlags.Limit);
+                var recLive = new
                 {
                     ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     id, symbol, side, qty, type,
                     price = execPrice,
-                    status = DryRun ? "DRYRUN" : "LIVE"
+                    close_position = closePos,
+                    status = "LIVE",
+                    accepted = sent
                 };
-                var line = JsonSerializer.Serialize(rec);
-                if (DryRun)
-                {
-                    lock (CmdLock) { CommandWriter?.WriteLine(line); }
-                    Console.WriteLine($"[DRYRUN ORDER] {line}");
-                    return $"{{\"ok\":true,\"dry\":true,\"symbol\":\"{symbol}\",\"side\":\"{side}\",\"qty\":{qty.ToString(CultureInfo.InvariantCulture)},\"price\":{execPrice.ToString(CultureInfo.InvariantCulture)},\"note\":\"dry-run: заявка НЕ отправлена на биржу\"}}";
-                }
-                return "{\"ok\":false,\"error\":\"live disabled\"}";
+                var lineLive = JsonSerializer.Serialize(recLive);
+                lock (CmdLock) { CommandWriter?.WriteLine(lineLive); }
+                Console.WriteLine($"[LIVE ORDER] {lineLive}");
+                return $"{{\"ok\":{(sent ? "true" : "false")},\"live\":true,\"accepted\":{(sent ? "true" : "false")},\"symbol\":\"{symbol}\",\"side\":\"{side}\",\"qty\":{qty.ToString(CultureInfo.InvariantCulture)},\"price\":{execPrice.ToString(CultureInfo.InvariantCulture)},\"note\":\"{(sent ? "заявка отправлена на сервер" : "сервер отклонил заявку, смотри OnLimitOrderOpFailed")}\"}}";
             }
             catch (Exception e)
             {
@@ -157,7 +201,7 @@ namespace PbSdkConsole
             http.Prefixes.Add(HttpPrefix);
             try { http.Start(); }
             catch (Exception e) { Console.WriteLine($"[!] cmd channel fail: {e.Message}"); return; }
-            Console.WriteLine($"[OK] cmd channel: {HttpPrefix} (dry-run={DryRun})");
+            Console.WriteLine($"[OK] cmd channel: {HttpPrefix} (allow-live={AllowLive}, test-mode={TestMode})");
             while (http.IsListening)
             {
                 HttpListenerContext ctx;
@@ -172,8 +216,7 @@ namespace PbSdkConsole
                         if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url!.AbsolutePath == "/order") outJson = ProcessOrder(body);
                         else if (ctx.Request.Url!.AbsolutePath == "/ping") outJson = "{\"ok\":true}";
                         else if (ctx.Request.Url!.AbsolutePath == "/state") outJson = _lastStateJson;
-                        else { code = 404; outJson = "{\"ok\":false,\"error\":\"not found\"}";
-                        }
+                        else { code = 404; outJson = "{\"ok\":false,\"error\":\"not found\"}"; }
                         var buf = Encoding.UTF8.GetBytes(outJson);
                         ctx.Response.StatusCode = code;
                         ctx.Response.ContentType = "application/json";

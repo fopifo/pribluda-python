@@ -1,9 +1,8 @@
 """
-bot.py — ММВБ Агент (v3.21)
-- Торговля (DRY-RUN): тестовый режим — ТОЛЬКО MTLR x 1 лот.
-  Кнопка 🛒 Торговля → Купить/Продать → превью → подтверждение → dry-run POST на мост.
-- Баланс (оценка моста за сегодня, с пометкой про lite-invest).
-- Мигалки со стрелками; Арбитраж спреды; Позиции группами; алерт |MTLR-MTLRP|>=3.
+bot.py — ММВБ Агент (v3.23)
+- Торговля: DRY-RUN по умолчанию + отдельная кнопка LIVE (реальная заявка).
+  Инструменты MTLR/MTLRP/CNYRUBF/CNY-12.26, фикс. лоты, закрытие позиции.
+- Баланс (lite-стиль); Мигалки; Арбитраж спреды; Позиции; алерт |MTLR-MTLRP|>=3.
 """
 import asyncio
 import aiohttp
@@ -20,15 +19,20 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.21"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.23"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
 
 BRIDGE_URL = "http://127.0.0.1:8787"
 BRIDGE_TOKEN = "pribluda-local-1"
-TEST_SYMBOL = "MTLR"
-TEST_QTY = 1
+
+TRADE_CONFIG = {
+    "MTLR":      {"lots": [1, 99, 100, 200, 300, 500], "label": "🔹 MTLR"},
+    "MTLRP":     {"lots": [1, 9, 10, 20, 30, 50],     "label": "🔹 MTLRP"},
+    "CNYRUBF":   {"lots": [1, 2, 5],                  "label": "💱 CNYRUBF (вечн)"},
+    "CNY-12.26": {"lots": [1, 2, 5],                  "label": "💱 CNY-12.26 (кварт)"},
+}
 
 OWNER_ID = 5135149
 SPREAD_THRESHOLD = 3.0
@@ -56,7 +60,7 @@ HELP_TEXT = (
     "/balance — финрез (оценка моста)\n"
     "/arba — арбитраж + спреды\n"
     "/spoof — мигалки (роботы в стакане)\n"
-    "/trade — торговля (dry-run, только MTLR x 1)\n\n"
+    "/trade — торговля (dry/live)\n\n"
     "Авто-алерт: |MTLR - MTLRP| >= 3 руб."
 )
 
@@ -419,7 +423,7 @@ async def run_spoof(session, user_id):
     await send_message(session, format_spoof(data), user_id=user_id, attachments=MAIN_MENU)
 
 
-async def bridge_post(session, path, body, timeout=5):
+async def bridge_post(session, path, body, timeout=8):
     headers = {"Content-Type": "application/json"}
     try:
         async with session.post(BRIDGE_URL + path, json=body, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
@@ -428,84 +432,126 @@ async def bridge_post(session, path, body, timeout=5):
         return 0, {"ok": False, "error": str(e)}
 
 
-def trade_menu():
-    return [
-        {"type": "inline_keyboard", "payload": {"buttons": [
-            [{"type": "callback", "text": "🟢 Купить MTLR x 1", "payload": "trade_preview:buy"}],
-            [{"type": "callback", "text": "🔴 Продать MTLR x 1", "payload": "trade_preview:sell"}],
-            [{"type": "callback", "text": "◀️ В главное меню", "payload": "cmd_back"}]
-        ]}}
-    ]
+def trade_pick_sym_menu():
+    buttons = []
+    for sym, cfg in TRADE_CONFIG.items():
+        buttons.append([{"type": "callback", "text": cfg["label"], "payload": f"t:sym:{sym}"}])
+    buttons.append([{"type": "callback", "text": "◀️ В главное меню", "payload": "cmd_back"}])
+    return [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
 
 
-def confirm_menu(side):
-    label = "купить" if side == "buy" else "продать"
+def trade_pick_act_menu(sym):
+    cfg = TRADE_CONFIG[sym]
+    return [{"type": "inline_keyboard", "payload": {"buttons": [
+        [{"type": "callback", "text": "🟢 Купить", "payload": f"t:act:{sym}:buy"}],
+        [{"type": "callback", "text": "🔴 Продать", "payload": f"t:act:{sym}:sell"}],
+        [{"type": "callback", "text": "🔄 Закрыть позицию", "payload": f"t:close:{sym}"}],
+        [{"type": "callback", "text": "◀️ Инструменты", "payload": "t:pick"}]
+    ]}}]
+
+
+def trade_pick_lot_menu(sym, side):
+    cfg = TRADE_CONFIG[sym]
+    emoji = "🟢" if side == "buy" else "🔴"
+    buttons = []
+    row = []
+    for q in cfg["lots"]:
+        row.append({"type": "callback", "text": f"{emoji} {q}", "payload": f"t:lot:{sym}:{side}:{q}"})
+        if len(row) == 3:
+            buttons.append(row); row = []
+    if row: buttons.append(row)
+    buttons.append([{"type": "callback", "text": f"◀️ {cfg['label']}", "payload": f"t:sym:{sym}"}])
+    return [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
+
+
+def trade_preview_text(sym, side, qty, close=False):
+    state = read_bridge_state()
+    if not state:
+        return "⚠️ Мост не отдаёт состояние."
+    info = state.get("symbols", {}).get(sym)
+    if not info:
+        return f"⚠️ Нет данных по {sym}."
+    if not info.get("ready"):
+        return f"⚠️ Слой {sym} не готов (нет стакана)."
+    bb = info.get("best_bid", 0); ba = info.get("best_ask", 0)
+    price = ba if side == "buy" else bb
+    if price <= 0:
+        return f"⚠️ Нет цены {'ask' if side == 'buy' else 'bid'} по {sym}."
+    side_ru = "ПОКУПКА" if side == "buy" else "ПРОДАЖА"
+    emoji = "🟢" if side == "buy" else "🔴"
+    cur_pos = info.get("position", 0)
+    pos_line = f"Текущая позиция: **{cur_pos:+g}**"
+    header = "🔄 **Закрытие позиции**" if close else f"{emoji} **Заявка**"
+    return (
+        f"{header}\n\n"
+        f"**{side_ru}: {sym} × {qty:g} лот**\n"
+        f"Цена (best {'ask' if side == 'buy' else 'bid'}): **{price:g} ₽**\n"
+        f"Сумма: **{price * qty:,.2f} ₽**\n"
+        f"{pos_line}\n\n"
+        f"🔸 **✅ DRY** = только в лог, на биржу НЕ идёт.\n"
+        f"🔸 **⚡ LIVE** = реальная заявка на сервер!"
+    )
+
+
+def confirm_menu(side, close=False):
     return [
         {"type": "inline_keyboard", "payload": {"buttons": [
-            [{"type": "callback", "text": f"✅ Подтвердить {label}", "payload": f"trade_confirm:{side}"}],
+            [{"type": "callback", "text": "✅ DRY (в лог)", "payload": "t:ok"}],
+            [{"type": "callback", "text": "⚡ LIVE (на биржу)", "payload": "t:live"}],
             [{"type": "callback", "text": "❌ Отмена", "payload": "cmd_back"}]
         ]}}
     ]
 
 
-def trade_preview_text(side):
-    state = read_bridge_state()
-    if not state:
-        return "⚠️ Мост не отдаёт состояние."
-    info = state.get("symbols", {}).get(TEST_SYMBOL)
-    if not info:
-        return f"⚠️ Нет данных по {TEST_SYMBOL}."
-    if not info.get("ready"):
-        return f"⚠️ Слой {TEST_SYMBOL} не готов (нет стакана)."
-    bb = info.get("best_bid", 0); ba = info.get("best_ask", 0)
-    price = ba if side == "buy" else bb
-    if price <= 0:
-        return f"⚠️ Нет цены {'ask' if side == 'buy' else 'bid'} по {TEST_SYMBOL}."
-    side_ru = "ПОКУПКА" if side == "buy" else "ПРОДАЖА"
-    emoji = "🟢" if side == "buy" else "🔴"
-    return (
-        f"{emoji} **Торговля — DRY-RUN** (заявка НЕ уйдёт на биржу)\n\n"
-        f"**{side_ru}: {TEST_SYMBOL} × {TEST_QTY} лот**\n"
-        f"Цена (best {'ask' if side == 'buy' else 'bid'}): **{price:g} ₽**\n"
-        f"Сумма: **{price * TEST_QTY:,.2f} ₽**\n\n"
-        f"🔸 _Тестовый режим: разрешён только {TEST_SYMBOL} x {TEST_QTY}._\n"
-        f"🔸 _Подтверждение — ниже._"
-    )
-
-
-async def do_trade_confirm(session, side, user_id):
+async def do_trade_confirm(session, user_id, live):
+    st = user_states.get(user_id, {})
+    if st.get("step") != "TRADE_PREVIEW":
+        await send_message(session, "⚠️ Превью истекло. Начни заново.", user_id=user_id, attachments=MAIN_MENU); return
+    sym = st.get("sym"); side = st.get("side"); qty = st.get("qty"); close = st.get("close", False)
     state = read_bridge_state()
     if not state:
         await send_message(session, "⚠️ Мост не отдаёт состояние.", user_id=user_id, attachments=MAIN_MENU); return
-    info = state.get("symbols", {}).get(TEST_SYMBOL)
+    info = state.get("symbols", {}).get(sym)
     if not info or not info.get("ready"):
-        await send_message(session, f"⚠️ Слой {TEST_SYMBOL} не готов.", user_id=user_id, attachments=MAIN_MENU); return
+        await send_message(session, f"⚠️ Слой {sym} не готов.", user_id=user_id, attachments=MAIN_MENU); return
     bb = info.get("best_bid", 0); ba = info.get("best_ask", 0)
     price = ba if side == "buy" else bb
     if price <= 0:
-        await send_message(session, f"⚠️ Нет цены по {TEST_SYMBOL}.", user_id=user_id, attachments=MAIN_MENU); return
+        await send_message(session, f"⚠️ Нет цены по {sym}.", user_id=user_id, attachments=MAIN_MENU); return
     body = {
         "token": BRIDGE_TOKEN,
         "id": f"bot-{uuid.uuid4().hex}",
-        "symbol": TEST_SYMBOL,
+        "symbol": sym,
         "side": side,
-        "qty": TEST_QTY,
+        "qty": qty,
         "type": "limit",
         "price": price,
     }
+    if close:
+        body["close_position"] = True
+    if live:
+        body["live"] = True
     status, data = await bridge_post(session, "/order", body)
     if status != 200 or not data.get("ok"):
         err = data.get("error", "unknown") if isinstance(data, dict) else "unknown"
         await send_message(session, f"❌ Мост отклонил: {err}", user_id=user_id, attachments=MAIN_MENU); return
     if data.get("duplicate"):
         await send_message(session, "⚠️ Команда уже была отправлена (дубль).", user_id=user_id, attachments=MAIN_MENU); return
+    user_states[user_id] = {"step": "IDLE"}
     side_ru = "ПОКУПКА" if side == "buy" else "ПРОДАЖА"
     emoji = "🟢" if side == "buy" else "🔴"
+    if live:
+        acc = data.get("accepted")
+        head = "⚡ **LIVE: заявка отправлена на сервер**" if acc else "⚡ **LIVE: сервер ОТКЛОНИЛ заявку**"
+        note = data.get("note", "")
+    else:
+        head = f"{emoji} **DRY-RUN: команда записана в лог**"
+        note = "Заявка НЕ отправлена на биржу."
     await send_message(session,
-        f"{emoji} **DRY-RUN: команда записана в лог**\n\n"
+        f"{head}\n\n"
         f"{side_ru}: {data.get('symbol')} × {data.get('qty')} @ {data.get('price')} ₽\n\n"
-        f"🔸 Заявка **НЕ** отправлена на биржу.\n"
-        f"🔸 Запись в `data/trade_commands.jsonl`.",
+        f"🔸 {note}\n"
+        f"🔸 Лог: `data/trade_commands.jsonl`.",
         user_id=user_id, attachments=MAIN_MENU)
 
 
@@ -556,18 +602,57 @@ async def handle_update(session, upd):
                 await send_message(session, await format_balance(session, read_bridge_state()), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_spoof":
                 await run_spoof(session, user_id)
-            elif payload == "cmd_trade":
-                await send_message(session, "🛒 **Торговля (DRY-RUN)**\n\nТестовый режим: только MTLR × 1 лот.\n\nВыберите действие:", user_id=user_id, attachments=trade_menu())
-            elif payload == "trade_preview:buy":
-                await send_message(session, trade_preview_text("buy"), user_id=user_id, attachments=confirm_menu("buy"))
-            elif payload == "trade_preview:sell":
-                await send_message(session, trade_preview_text("sell"), user_id=user_id, attachments=confirm_menu("sell"))
-            elif payload.startswith("trade_confirm:"):
-                side = payload.split(":", 1)[1]
-                if side in ("buy", "sell"):
-                    await do_trade_confirm(session, side, user_id)
-                else:
-                    await send_message(session, "⚠️ Неизвестная сторона.", user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_trade" or payload == "t:pick":
+                user_states[user_id] = {"step": "TRADE_PICK_SYM"}
+                await send_message(session, "🛒 **Торговля**\n\nВыберите инструмент:", user_id=user_id, attachments=trade_pick_sym_menu())
+            elif payload.startswith("t:sym:"):
+                sym = payload.split(":", 2)[2]
+                if sym not in TRADE_CONFIG:
+                    await send_message(session, "⚠️ Неизвестный инструмент.", user_id=user_id, attachments=MAIN_MENU); return
+                user_states[user_id] = {"step": "TRADE_PICK_ACT", "sym": sym}
+                cfg = TRADE_CONFIG[sym]
+                state = read_bridge_state()
+                pos = 0
+                if state:
+                    pos = state.get("symbols", {}).get(sym, {}).get("position", 0)
+                side_ru = "лонг" if pos > 0 else ("шорт" if pos < 0 else "нет позиции")
+                await send_message(session, f"**{cfg['label']}**\nТекущая позиция: **{pos:+g}** ({side_ru})\n\nВыберите действие:", user_id=user_id, attachments=trade_pick_act_menu(sym))
+            elif payload.startswith("t:act:"):
+                parts = payload.split(":", 3)
+                sym, side = parts[2], parts[3]
+                if sym not in TRADE_CONFIG or side not in ("buy", "sell"):
+                    await send_message(session, "⚠️ Неверные параметры.", user_id=user_id, attachments=MAIN_MENU); return
+                user_states[user_id] = {"step": "TRADE_PICK_LOT", "sym": sym, "side": side}
+                side_ru = "купить" if side == "buy" else "продать"
+                await send_message(session, f"**{TRADE_CONFIG[sym]['label']}** — {side_ru}\n\nВыберите объём (лоты):", user_id=user_id, attachments=trade_pick_lot_menu(sym, side))
+            elif payload.startswith("t:close:"):
+                sym = payload.split(":", 2)[2]
+                if sym not in TRADE_CONFIG:
+                    await send_message(session, "⚠️ Неизвестный инструмент.", user_id=user_id, attachments=MAIN_MENU); return
+                state = read_bridge_state()
+                if not state:
+                    await send_message(session, "⚠️ Мост не отдаёт состояние.", user_id=user_id, attachments=MAIN_MENU); return
+                info = state.get("symbols", {}).get(sym, {})
+                cur_pos = info.get("position", 0)
+                if cur_pos == 0:
+                    await send_message(session, f"⚠️ По {sym} нет открытой позиции — нечего закрывать.", user_id=user_id, attachments=trade_pick_act_menu(sym)); return
+                qty = abs(cur_pos)
+                side = "sell" if cur_pos > 0 else "buy"
+                user_states[user_id] = {"step": "TRADE_PREVIEW", "sym": sym, "side": side, "qty": qty, "close": True}
+                await send_message(session, trade_preview_text(sym, side, qty, close=True), user_id=user_id, attachments=confirm_menu(side, close=True))
+            elif payload.startswith("t:lot:"):
+                parts = payload.split(":", 4)
+                sym, side, qs = parts[2], parts[3], parts[4]
+                try: qty = int(qs)
+                except: qty = 0
+                if sym not in TRADE_CONFIG or side not in ("buy", "sell") or qty <= 0:
+                    await send_message(session, "⚠️ Неверные параметры.", user_id=user_id, attachments=MAIN_MENU); return
+                user_states[user_id] = {"step": "TRADE_PREVIEW", "sym": sym, "side": side, "qty": qty, "close": False}
+                await send_message(session, trade_preview_text(sym, side, qty, close=False), user_id=user_id, attachments=confirm_menu(side, close=False))
+            elif payload == "t:ok":
+                await do_trade_confirm(session, user_id, live=False)
+            elif payload == "t:live":
+                await do_trade_confirm(session, user_id, live=True)
             elif payload == "cmd_arba":
                 txt = await spreads_text(session)
                 await send_message(session, txt + "\n\n⚖️ **Выберите связку:**", user_id=user_id, attachments=ARBA_MENU)
@@ -591,6 +676,7 @@ async def handle_update(session, upd):
             elif payload == "cmd_help":
                 await send_message(session, HELP_TEXT, user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_back":
+                user_states[user_id] = {"step": "IDLE"}
                 await send_message(session, "🏠 **Главное меню:**", user_id=user_id, attachments=MAIN_MENU)
             return
         if ut == "message_created":
@@ -609,7 +695,7 @@ async def handle_update(session, upd):
             reply = None; att = None
             st = user_states.get(user_id)
             if st and st.get("step") == "AWAITING_TICKER":
-                del user_states[user_id]
+                user_states[user_id] = {"step": "IDLE"}
                 if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade"]:
                     reply = "Отмена ввода."; att = MAIN_MENU
                 else:
@@ -619,7 +705,7 @@ async def handle_update(session, upd):
                 reply = f"Принято: **{fix_layout(t)}**. Второй тикер:"
             elif st and st.get("step") == "AWAITING_ARBA_T2":
                 t2 = fix_layout(t); t1 = st.get("t1", "")
-                del user_states[user_id]
+                user_states[user_id] = {"step": "IDLE"}
                 d1, r1 = await get_moex_data(session, t1)
                 d2, r2 = await get_moex_data(session, t2)
                 sp = ""
@@ -638,7 +724,8 @@ async def handle_update(session, upd):
             elif tl == "/balance":
                 reply = await format_balance(session, read_bridge_state()); att = MAIN_MENU
             elif tl == "/trade":
-                reply = "🛒 **Торговля (DRY-RUN)**\n\nТолько MTLR × 1 лот.\n\nВыберите действие:"; att = trade_menu()
+                user_states[user_id] = {"step": "TRADE_PICK_SYM"}
+                reply = "🛒 **Торговля**\n\nВыберите инструмент:"; att = trade_pick_sym_menu()
             elif tl == "/arba":
                 reply = (await spreads_text(session)) + "\n\n⚖️ **Выберите связку:**"; att = ARBA_MENU
             elif tl == "/spoof":
@@ -660,7 +747,7 @@ async def main():
         print(f"[AUTH] {status}: {'OK' if status == 200 else me}")
         if status != 200: return
         asyncio.create_task(monitor_mtlr_spread(session))
-        print(f"✅ Бот запущен. Торговля (DRY-RUN, только {TEST_SYMBOL} x {TEST_QTY}) + позиции + спреды + мигалки.")
+        print(f"✅ Бот запущен. Торговля: DRY + LIVE (whitelist MTLR/MTLRP/CNYRUBF/CNY-12.26).")
         marker = None
         while True:
             params = {"timeout": 30}
