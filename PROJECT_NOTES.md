@@ -1698,3 +1698,13 @@ git commit -F <файл>, файл писать python'ом (encoding='utf-8').
 алерт в MAX (OWNER_ID=5135149) при |MTLR-MTLRP| >= 3₽ (ОБЕ стороны), с указанием какая дороже.
 Edge-trigger (пересечение порога) + cooldown 600с против спама. Запускается в main через create_task.
 Включён в start_all.bat (окно MAX Бот). Проверено: старт OK, мониторинг включён.
+======================================================================
+ДОБАВЛЕНИЕ 2026-11-16 (мост: разведение файлов + single-instance)
+======================================================================
+**Конфликт файлов исправлен:** мост писал live_trades_DATE.jsonl, который держит приблуда (Alor).
+Теперь лента моста = data/pbsdk_trades_DATE.jsonl; стакан = data/orderbook_DATE.jsonl;
+live_trades_DATE.jsonl остаётся за приблудой. Открытие через FileStream(FileShare.ReadWrite).
+**Single-instance:** named Mutex "PbSdkBridge_SingleInstance" — второй экземпляр вежливо выходит.
+**Проверено:** ровно 1 main.py + 1 bot.py + 1 PbSdkConsole; данные растут; без IOException.
+**bridge_src/** = reference-копии Program.cs/LayerEventsReceiver.cs (сборка идёт в PbSdkConsole_Project;
+при правках синхронизировать копии).
