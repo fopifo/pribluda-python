@@ -1,7 +1,7 @@
 """
-orderbook_audit.py v3 — детектор периодических слоёв по стакану.
-Фильтры надёжности: --min-n, --min-reg, --flash-only. Теги FLASH/PULL/MID.
---sweep перебор порогов; --thr абсолютный; --p90 фактор.
+orderbook_audit.py v4 — детектор периодических слоёв по стакану.
+Режимы: человек (по умолчанию) и --json (для бота, без прогресс-баров).
+Фильтры: --min-n, --min-reg, --flash-only; пороги: --thr, --p90, --min-lots, --sweep.
 """
 import sys
 import json
@@ -12,9 +12,12 @@ from zoneinfo import ZoneInfo
 
 BASE = Path(__file__).resolve().parent.parent
 MSK = ZoneInfo("Europe/Moscow")
+QUIET = False
 
 
 def bar(pct, extra):
+    if QUIET:
+        return
     filled = int(max(0.0, min(100.0, pct)) // 5)
     sys.stdout.write(f"\r[стакан] [{'#'*filled}{'.'*(20-filled)}] {pct:3.0f}% | {extra}")
     sys.stdout.flush()
@@ -55,7 +58,8 @@ def load(path):
                     price, amt = row
                     series[(sym, side, price)].append((ts, amt))
                     amounts[sym].append(amt)
-    sys.stdout.write("\n")
+    if not QUIET:
+        sys.stdout.write("\n")
     return series, amounts, count, ts_range
 
 
@@ -103,13 +107,17 @@ def detect(series, thr_map, min_n=4, min_reg=0.6, flash_only=False):
         tag = classify(med, life)
         if flash_only and tag != "FLASH":
             continue
-        out.append((sym, side, price, med, len(adds), reg, life, tag))
-    out.sort(key=lambda c: -c[4])
+        out.append({"sym": sym, "side": side, "price": price, "period_s": med,
+                    "n": len(adds), "reg": reg, "life_s": life, "tag": tag})
+    out.sort(key=lambda c: -c["n"])
     return out
 
 
 def main():
+    global QUIET
     a = sys.argv
+    if "--json" in a:
+        QUIET = True
     date = a[1] if len(a) > 1 and not a[1].startswith("--") else datetime.now(MSK).strftime("%Y-%m-%d")
     min_lots, p90f, thr_abs, sweep = 200.0, 0.4, None, None
     min_n, min_reg, flash_only = 4, 0.6, False
@@ -126,16 +134,19 @@ def main():
             sweep = [float(x) for x in nxt[0].split(",")]
     path = BASE / "data" / f"orderbook_{date}.jsonl"
     if not path.exists():
-        print(f"[!] нет файла {path.name}"); return
+        if QUIET:
+            print(json.dumps({"error": "no file", "candidates": []}))
+        else:
+            print(f"[!] нет файла {path.name}")
+        return
 
     series, amounts, count, ts_range = load(path)
-    print(f"[*] уровней: {len(series)}")
-    print("[*] АКТИВНОСТЬ РЫНКА:")
+    activity = {}
     for sym in sorted(count):
         r = ts_range[sym]
         span = (r[1] - r[0]) / 1000.0 if r[0] is not None else 0
-        rate = count[sym] / span if span > 0 else 0
-        print(f"    {sym:10s} снапшотов={count[sym]:6d}  окно={span:7.1f}s  темп={rate:4.2f}/s")
+        activity[sym] = {"snapshots": count[sym], "span_s": round(span, 1),
+                         "rate": round(count[sym] / span, 2) if span > 0 else 0}
 
     thr_default = {}
     for sym, amts in amounts.items():
@@ -143,24 +154,37 @@ def main():
         p90 = s[int(0.90 * (len(s) - 1))] if s else 0
         thr_default[sym] = max(min_lots, p90f * p90)
 
-    if sweep:
-        print(f"\n[*] SWEEP (min-n={min_n}, min-reg={min_reg:.0%}, flash_only={flash_only}):")
+    if sweep and not QUIET:
+        print(f"[*] уровней: {len(series)}")
+        for sym in sorted(activity):
+            print(f"    {sym:10s} снапшотов={activity[sym]['snapshots']:6d}  окно={activity[sym]['span_s']:8.1f}s  темп={activity[sym]['rate']:4.2f}/s")
+        print(f"\n[*] SWEEP (min-n={min_n}, min-reg={min_reg:.0%}):")
         for t in sweep:
             tm = {sym: t for sym in amounts}
             c = detect(series, tm, min_n, min_reg, flash_only)
-            top = "; ".join(f"{x[0]} {x[1]} {x[2]} P={x[3]:.0f}s n={x[4]} {x[7]}" for x in c[:3])
+            top = "; ".join(f"{x['sym']} {x['side']} {x['price']} P={x['period_s']:.0f}s n={x['n']} {x['tag']}" for x in c[:3])
             print(f"    thr={t:7.0f} -> {len(c):3d}  {top}")
         return
 
     thr_map = {sym: (thr_abs if thr_abs is not None else thr_default[sym]) for sym in amounts}
-    c = detect(series, thr_map, min_n, min_reg, flash_only)
+    cands = detect(series, thr_map, min_n, min_reg, flash_only)
+
+    if QUIET:
+        print(json.dumps({"activity": activity, "candidates": cands}, ensure_ascii=False))
+        return
+
+    print(f"[*] уровней: {len(series)}")
+    for sym in sorted(activity):
+        print(f"    {sym:10s} снапшотов={activity[sym]['snapshots']:6d}  окно={activity[sym]['span_s']:8.1f}s  темп={activity[sym]['rate']:4.2f}/s")
+    for sym in sorted(thr_map):
+        print(f"    {sym:10s} порог={thr_map[sym]:.0f}")
     print("\n" + "=" * 80)
-    print(f" ПЕРИОДИЧЕСКИЕ СЛОИ: {len(c)}  (min-n={min_n}, min-reg={min_reg:.0%})")
+    print(f" ПЕРИОДИЧЕСКИЕ СЛОИ: {len(cands)}  (min-n={min_n}, min-reg={min_reg:.0%})")
     print("=" * 80)
-    for sym, side, price, med, cnt, reg, life, tag in c[:25]:
-        ls = f"{life:.1f}s" if life is not None else "n/a"
-        print(f"  {sym:10s} {side:4s} price={price:<10} P={med:6.1f}s n={cnt:3d} reg={reg:.0%} жизнь={ls:7s} {tag}")
-    if not c:
+    for c in cands[:25]:
+        ls = f"{c['life_s']:.1f}s" if c['life_s'] is not None else "n/a"
+        print(f"  {c['sym']:10s} {c['side']:4s} price={c['price']:<10} P={c['period_s']:6.1f}s n={c['n']:3d} reg={c['reg']:.0%} жизнь={ls:7s} {c['tag']}")
+    if not cands:
         print("  (нет надёжных кандидатов при этих фильтрах)")
     print("=" * 80)
 
