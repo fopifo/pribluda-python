@@ -1748,3 +1748,15 @@ OnClosingTrade (ProfitInPrice*Amount*mult); локальный HTTP-канал �
 "✅ DRY (в лог)" и "⚡ LIVE (на биржу)"; закрытие позиции авто-расчётом.
 **ПРОВЕРЕНО БОЕМ:** LIVE покупка MTLR x1 @ 44.42 (сделка 16:05:43), позиция -101 -> -100.
 **Падение ноутбука:** uptime 24мин, minidump пуст (не BSOD); причина уточняется по System log.
+======================================================================
+ДОБАВЛЕНИЕ 2026-11-16 (kill-switch боем + watchdog)
+======================================================================
+**Мост:** POST /cancel_all -> ICore.ILayer.CancelAllOrders(CancelAllOrdersMethod) через
+typeof(ILayer) (имена интерфейса не обфусцированы); enum-аргумент подбирается по имени
+(Limit/All/Both), fallback = поштучный ILayer.CancelOrder по ID из Lomonitor._List.
+Лог cancel_all в data/trade_commands.jsonl.
+**bot v3.24:** кнопка "🛑 Снять все заявки" -> выбор слоя/ВСЕ -> подтверждение -> POST /cancel_all;
+watchdog_bridge(): алерт в MAX если bridge_state.json не обновлялся >60с (cooldown 300с).
+**ПРОВЕРЕНО БОЕМ:** снято 2 заявки MTLRP из MAX.
+**Падения ноутбука:** Kernel-Power 41/6008 без minidump (не BSOD), 5 раз за 2 недели ->
+аппаратная причина (перегрев/питание), следить температурами.

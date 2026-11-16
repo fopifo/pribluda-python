@@ -5,10 +5,12 @@ using System.Net;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text.Json;
+using System.Reflection;
 using ICore;
 using PbSdk;
 
@@ -187,7 +189,141 @@ namespace PbSdkConsole
                 var lineLive = JsonSerializer.Serialize(recLive);
                 lock (CmdLock) { CommandWriter?.WriteLine(lineLive); }
                 Console.WriteLine($"[LIVE ORDER] {lineLive}");
-                return $"{{\"ok\":{(sent ? "true" : "false")},\"live\":true,\"accepted\":{(sent ? "true" : "false")},\"symbol\":\"{symbol}\",\"side\":\"{side}\",\"qty\":{qty.ToString(CultureInfo.InvariantCulture)},\"price\":{execPrice.ToString(CultureInfo.InvariantCulture)},\"note\":\"{(sent ? "заявка отправлена на сервер" : "сервер отклонил заявку, смотри OnLimitOrderOpFailed")}\"}}";
+                return $"{{\"ok\":{(sent ? "true" : "false")},\"live\":true,\"accepted\":{(sent ? "true" : "false")},\"symbol\":\"{symbol}\",\"side\":\"{side}\",\"qty\":{qty.ToString(CultureInfo.InvariantCulture)},\"price\":{execPrice.ToString(CultureInfo.InvariantCulture)},\"note\":\"{(sent ? "заявка отправлена на сервер" : "сервер отклонил заявку")}\"}}";
+            }
+            catch (Exception e)
+            {
+                return $"{{\"ok\":false,\"error\":\"{e.Message.Replace("\"", "'")}\"}}";
+            }
+        }
+
+        static object? BuildArgValue(Type pt, string? oid, object? order)
+        {
+            try
+            {
+                if (pt == typeof(string)) return oid ?? "";
+                if (pt == typeof(bool)) return true;
+                if (pt == typeof(long) || pt == typeof(ulong)) return long.Parse(oid ?? "0", CultureInfo.InvariantCulture);
+                if (pt == typeof(int) || pt == typeof(uint)) return int.Parse(oid ?? "0", CultureInfo.InvariantCulture);
+                if (pt.IsEnum)
+                {
+                    var names = Enum.GetNames(pt);
+                    string? pick = names.FirstOrDefault(n => n.IndexOf("Limit", StringComparison.OrdinalIgnoreCase) >= 0)
+                                ?? names.FirstOrDefault(n => n.IndexOf("All", StringComparison.OrdinalIgnoreCase) >= 0)
+                                ?? names.FirstOrDefault(n => n.IndexOf("Both", StringComparison.OrdinalIgnoreCase) >= 0)
+                                ?? names.FirstOrDefault();
+                    if (pick != null)
+                    {
+                        var val = Enum.Parse(pt, pick);
+                        Console.WriteLine($"[arg] enum {pt.Name} = {pick}");
+                        return val;
+                    }
+                }
+                if (order != null && pt.IsInstanceOfType(order)) return order;
+            }
+            catch { }
+            return null;
+        }
+
+        static string ProcessCancelAll(string body)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                var r = doc.RootElement;
+                string token = r.TryGetProperty("token", out var t) ? t.GetString() ?? "" : "";
+                if (token != CmdToken) return "{\"ok\":false,\"error\":\"bad token\"}";
+                string symbol = r.TryGetProperty("symbol", out var s) ? (s.GetString() ?? "") : "";
+                bool all = string.IsNullOrEmpty(symbol) || symbol == "*";
+
+                var ifaceType = typeof(ILayer);
+                var cancelAll = ifaceType.GetMethod("CancelAllOrders");
+                var cancelOne = ifaceType.GetMethod("CancelOrder");
+
+                int totalCancelled = 0;
+                var results = new List<string>();
+                foreach (var kv in Layers)
+                {
+                    string sym = kv.Key;
+                    if (!all && sym != symbol) continue;
+                    var layer = kv.Value;
+                    int c = 0;
+                    try
+                    {
+                        object? lomonitor = layer.GetType().GetProperty("Lomonitor", BindingFlags.Public | BindingFlags.Instance)?.GetValue(layer);
+                        if (lomonitor == null) { results.Add($"{sym}:no_lomonitor"); continue; }
+                        object? listObj = null;
+                        var listProp = lomonitor.GetType().GetProperty("_List", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (listProp != null) listObj = listProp.GetValue(lomonitor);
+                        else
+                        {
+                            var listField = lomonitor.GetType().GetField("_List", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                            if (listField != null) listObj = listField.GetValue(lomonitor);
+                        }
+                        if (listObj is not IEnumerable enumerable) { results.Add($"{sym}:no_list"); continue; }
+
+                        var orders = new List<object>();
+                        foreach (var o in enumerable) if (o != null) orders.Add(o);
+                        if (orders.Count == 0) { results.Add($"{sym}:0"); continue; }
+
+                        bool done = false;
+                        if (cancelAll != null)
+                        {
+                            var ps = cancelAll.GetParameters();
+                            object?[] args = new object?[ps.Length];
+                            bool ok = true;
+                            for (int i = 0; i < ps.Length; i++)
+                            {
+                                args[i] = BuildArgValue(ps[i].ParameterType, null, null);
+                                if (args[i] == null) { ok = false; break; }
+                            }
+                            if (ok)
+                            {
+                                try
+                                {
+                                    cancelAll.Invoke(layer, args);
+                                    c = orders.Count;
+                                    done = true;
+                                }
+                                catch (Exception ex) { Console.WriteLine($"[cancel-all] {sym}: {ex.Message}"); }
+                            }
+                        }
+                        if (!done && cancelOne != null)
+                        {
+                            var ps = cancelOne.GetParameters();
+                            foreach (var order in orders)
+                            {
+                                var ot = order.GetType();
+                                string? oid = null;
+                                foreach (var name in new[] { "ID", "Id", "OrderId", "OrderID", "id" })
+                                {
+                                    var p = ot.GetProperty(name, BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                                    if (p != null) { try { oid = Convert.ToString(p.GetValue(order), CultureInfo.InvariantCulture); break; } catch { } }
+                                }
+                                if (string.IsNullOrEmpty(oid)) continue;
+                                object?[] args = new object?[ps.Length];
+                                bool ok = true;
+                                for (int i = 0; i < ps.Length; i++)
+                                {
+                                    args[i] = BuildArgValue(ps[i].ParameterType, oid, order);
+                                    if (args[i] == null) { ok = false; break; }
+                                }
+                                if (!ok) continue;
+                                try { cancelOne.Invoke(layer, args); c++; done = true; }
+                                catch (Exception ex) { Console.WriteLine($"[cancel-one] {sym} id={oid}: {ex.Message}"); }
+                            }
+                        }
+                        if (!done) { results.Add($"{sym}:no_cancel_method"); continue; }
+                    }
+                    catch (Exception e) { Console.WriteLine($"[cancel] {sym}: {e.Message}"); }
+                    results.Add($"{sym}:{c}");
+                    totalCancelled += c;
+                }
+                var rec = new { ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), action = "cancel_all", symbol = all ? "*" : symbol, cancelled = totalCancelled, details = results };
+                var line = JsonSerializer.Serialize(rec);
+                lock (CmdLock) { CommandWriter?.WriteLine(line); }
+                Console.WriteLine($"[CANCEL ALL] {line}");
+                return $"{{\"ok\":true,\"cancelled\":{totalCancelled},\"details\":[{string.Join(",", results.Select(x => $"\"{x}\""))}]}}";
             }
             catch (Exception e)
             {
@@ -214,6 +350,7 @@ namespace PbSdkConsole
                         using (var sr = new StreamReader(ctx.Request.InputStream, Encoding.UTF8)) body = sr.ReadToEnd();
                         string outJson; int code = 200;
                         if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url!.AbsolutePath == "/order") outJson = ProcessOrder(body);
+                        else if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url!.AbsolutePath == "/cancel_all") outJson = ProcessCancelAll(body);
                         else if (ctx.Request.Url!.AbsolutePath == "/ping") outJson = "{\"ok\":true}";
                         else if (ctx.Request.Url!.AbsolutePath == "/state") outJson = _lastStateJson;
                         else { code = 404; outJson = "{\"ok\":false,\"error\":\"not found\"}"; }

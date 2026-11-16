@@ -1,8 +1,8 @@
 """
-bot.py — ММВБ Агент (v3.23)
-- Торговля: DRY-RUN по умолчанию + отдельная кнопка LIVE (реальная заявка).
-  Инструменты MTLR/MTLRP/CNYRUBF/CNY-12.26, фикс. лоты, закрытие позиции.
-- Баланс (lite-стиль); Мигалки; Арбитраж спреды; Позиции; алерт |MTLR-MTLRP|>=3.
+bot.py — ММВБ Агент (v3.24)
+- + Kill-switch: 🛑 Снять все заявки (по всем слоям или по выбранному).
+- + Watchdog моста: если bridge_state не обновлялся >60с — алерт в MAX.
+- Торговля DRY/LIVE; баланс lite-стиль; мигалки со стрелками; арбитраж; алерт |MTLR-MTLRP|>=3.
 """
 import asyncio
 import aiohttp
@@ -19,13 +19,17 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.23"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.24"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
 
 BRIDGE_URL = "http://127.0.0.1:8787"
 BRIDGE_TOKEN = "pribluda-local-1"
+
+WATCHDOG_STALE_SEC = 60
+WATCHDOG_POLL_SEC = 15
+WATCHDOG_COOLDOWN_SEC = 300
 
 TRADE_CONFIG = {
     "MTLR":      {"lots": [1, 99, 100, 200, 300, 500], "label": "🔹 MTLR"},
@@ -60,8 +64,10 @@ HELP_TEXT = (
     "/balance — финрез (оценка моста)\n"
     "/arba — арбитраж + спреды\n"
     "/spoof — мигалки (роботы в стакане)\n"
-    "/trade — торговля (dry/live)\n\n"
-    "Авто-алерт: |MTLR - MTLRP| >= 3 руб."
+    "/trade — торговля (dry/live)\n"
+    "/kill — 🛑 снять все мои заявки\n\n"
+    "Авто-алерт: |MTLR - MTLRP| >= 3 руб.\n"
+    "Watchdog моста: алерт если мост молчит >60с."
 )
 
 MAIN_MENU = [
@@ -72,7 +78,8 @@ MAIN_MENU = [
          {"type": "callback", "text": "💰 Баланс", "payload": "cmd_balance"}],
         [{"type": "callback", "text": "🛒 Торговля", "payload": "cmd_trade"},
          {"type": "callback", "text": "🕵️ Мигалки", "payload": "cmd_spoof"}],
-        [{"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}]
+        [{"type": "callback", "text": "🛑 Снять все заявки", "payload": "cmd_kill"},
+         {"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}]
     ]}}
 ]
 
@@ -503,6 +510,23 @@ def confirm_menu(side, close=False):
     ]
 
 
+def kill_menu():
+    buttons = []
+    for sym in TRADE_CONFIG:
+        buttons.append([{"type": "callback", "text": f"🛑 {sym}", "payload": f"k:sym:{sym}"}])
+    buttons.append([{"type": "callback", "text": "🛑 ВСЕ СЛОИ", "payload": "k:all"}])
+    buttons.append([{"type": "callback", "text": "◀️ В главное меню", "payload": "cmd_back"}])
+    return [{"type": "inline_keyboard", "payload": {"buttons": buttons}}]
+
+
+def kill_confirm_menu(target):
+    label = "ВСЕ" if target == "*" else target
+    return [{"type": "inline_keyboard", "payload": {"buttons": [
+        [{"type": "callback", "text": f"✅ Снять заявки {label}", "payload": f"k:go:{target}"}],
+        [{"type": "callback", "text": "❌ Отмена", "payload": "cmd_back"}]
+    ]}}]
+
+
 async def do_trade_confirm(session, user_id, live):
     st = user_states.get(user_id, {})
     if st.get("step") != "TRADE_PREVIEW":
@@ -527,10 +551,8 @@ async def do_trade_confirm(session, user_id, live):
         "type": "limit",
         "price": price,
     }
-    if close:
-        body["close_position"] = True
-    if live:
-        body["live"] = True
+    if close: body["close_position"] = True
+    if live: body["live"] = True
     status, data = await bridge_post(session, "/order", body)
     if status != 200 or not data.get("ok"):
         err = data.get("error", "unknown") if isinstance(data, dict) else "unknown"
@@ -552,6 +574,23 @@ async def do_trade_confirm(session, user_id, live):
         f"{side_ru}: {data.get('symbol')} × {data.get('qty')} @ {data.get('price')} ₽\n\n"
         f"🔸 {note}\n"
         f"🔸 Лог: `data/trade_commands.jsonl`.",
+        user_id=user_id, attachments=MAIN_MENU)
+
+
+async def do_kill(session, user_id, target):
+    body = {"token": BRIDGE_TOKEN, "symbol": target}
+    status, data = await bridge_post(session, "/cancel_all", body)
+    if status != 200 or not data.get("ok"):
+        err = data.get("error", "unknown") if isinstance(data, dict) else "unknown"
+        await send_message(session, f"❌ Мост отклонил cancel_all: {err}", user_id=user_id, attachments=MAIN_MENU); return
+    n = data.get("cancelled", 0)
+    details = ", ".join(data.get("details", [])) or "—"
+    head = f"🛑 **Заявок снято: {n}**" if n > 0 else "🛑 Снимать нечего (нет активных заявок)"
+    label = "ВСЕ слои" if target == "*" else target
+    await send_message(session,
+        f"{head}\n\n"
+        f"Слоёв обработано: {label}\n"
+        f"Детали: {details}",
         user_id=user_id, attachments=MAIN_MENU)
 
 
@@ -583,6 +622,29 @@ async def monitor_mtlr_spread(session):
         await asyncio.sleep(POLL_SEC)
 
 
+async def watchdog_bridge(session):
+    last_alert = 0.0
+    ever_seen = False
+    while True:
+        try:
+            st = read_bridge_state()
+            if st:
+                ever_seen = True
+                age = (time.time() * 1000 - st.get("updated_ms", 0)) / 1000
+                if age > WATCHDOG_STALE_SEC:
+                    now = time.time()
+                    if now - last_alert > WATCHDOG_COOLDOWN_SEC:
+                        await send_message(session,
+                            f"⚠️ **Мост не отвечает {age:.0f}с**\n\n"
+                            f"bridge_state.json не обновлялся дольше {WATCHDOG_STALE_SEC}с.\n"
+                            f"Возможно, ноут/мост упал. Проверь `PbSdkConsole`.",
+                            user_id=OWNER_ID)
+                        last_alert = now
+        except Exception as e:
+            print(f"[WATCHDOG ERROR] {e}")
+        await asyncio.sleep(WATCHDOG_POLL_SEC)
+
+
 async def handle_update(session, upd):
     try:
         ut = upd.get("update_type")
@@ -602,6 +664,16 @@ async def handle_update(session, upd):
                 await send_message(session, await format_balance(session, read_bridge_state()), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_spoof":
                 await run_spoof(session, user_id)
+            elif payload == "cmd_kill":
+                await send_message(session, "🛑 **Снять заявки**\n\nВыбери слой (или ВСЕ):", user_id=user_id, attachments=kill_menu())
+            elif payload.startswith("k:sym:"):
+                sym = payload.split(":", 2)[2]
+                await send_message(session, f"Снять все заявки по **{sym}**?", user_id=user_id, attachments=kill_confirm_menu(sym))
+            elif payload == "k:all":
+                await send_message(session, "Снять заявки по **ВСЕМ** слоям?", user_id=user_id, attachments=kill_confirm_menu("*"))
+            elif payload.startswith("k:go:"):
+                target = payload.split(":", 2)[2]
+                await do_kill(session, user_id, target)
             elif payload == "cmd_trade" or payload == "t:pick":
                 user_states[user_id] = {"step": "TRADE_PICK_SYM"}
                 await send_message(session, "🛒 **Торговля**\n\nВыберите инструмент:", user_id=user_id, attachments=trade_pick_sym_menu())
@@ -696,7 +768,7 @@ async def handle_update(session, upd):
             st = user_states.get(user_id)
             if st and st.get("step") == "AWAITING_TICKER":
                 user_states[user_id] = {"step": "IDLE"}
-                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade"]:
+                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade", "/kill"]:
                     reply = "Отмена ввода."; att = MAIN_MENU
                 else:
                     _, reply = await get_moex_data(session, t); att = MAIN_MENU
@@ -726,6 +798,8 @@ async def handle_update(session, upd):
             elif tl == "/trade":
                 user_states[user_id] = {"step": "TRADE_PICK_SYM"}
                 reply = "🛒 **Торговля**\n\nВыберите инструмент:"; att = trade_pick_sym_menu()
+            elif tl == "/kill":
+                reply = "🛑 **Снять заявки**\n\nВыбери слой (или ВСЕ):"; att = kill_menu()
             elif tl == "/arba":
                 reply = (await spreads_text(session)) + "\n\n⚖️ **Выберите связку:**"; att = ARBA_MENU
             elif tl == "/spoof":
@@ -747,7 +821,8 @@ async def main():
         print(f"[AUTH] {status}: {'OK' if status == 200 else me}")
         if status != 200: return
         asyncio.create_task(monitor_mtlr_spread(session))
-        print(f"✅ Бот запущен. Торговля: DRY + LIVE (whitelist MTLR/MTLRP/CNYRUBF/CNY-12.26).")
+        asyncio.create_task(watchdog_bridge(session))
+        print(f"✅ Бот запущен. Торговля DRY/LIVE + kill-switch + watchdog моста ({WATCHDOG_STALE_SEC}с).")
         marker = None
         while True:
             params = {"timeout": 30}
