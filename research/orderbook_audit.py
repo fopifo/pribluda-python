@@ -1,7 +1,7 @@
 """
-orderbook_audit.py — детектор периодических слоёв (спуфинг) по стакану.
-Ищет уровни цены, где крупная заявка регулярно появляется/снимается.
-Читает data/orderbook_DATE.jsonl (пишет PbSdk мост).
+orderbook_audit.py v3 — детектор периодических слоёв по стакану.
+Фильтры надёжности: --min-n, --min-reg, --flash-only. Теги FLASH/PULL/MID.
+--sweep перебор порогов; --thr абсолютный; --p90 фактор.
 """
 import sys
 import json
@@ -27,10 +27,11 @@ def median(xs):
 
 
 def load(path):
-    series = defaultdict(list)   # (sym, side, price) -> [(ts, amt)]
-    amounts = defaultdict(list)  # sym -> [amt]
+    series = defaultdict(list)
+    amounts = defaultdict(list)
+    ts_range = defaultdict(lambda: [None, None])
+    count = defaultdict(int)
     size = path.stat().st_size
-    done = 0
     with open(path, "rb") as fh:
         for i, raw in enumerate(fh):
             if i % 5000 == 0:
@@ -43,6 +44,10 @@ def load(path):
             ts = d.get("timestamp")
             if not sym or ts is None:
                 continue
+            count[sym] += 1
+            r = ts_range[sym]
+            r[0] = ts if r[0] is None else min(r[0], ts)
+            r[1] = ts if r[1] is None else max(r[1], ts)
             for side in ("bids", "asks"):
                 for row in d.get(side, []):
                     if len(row) != 2:
@@ -50,40 +55,26 @@ def load(path):
                     price, amt = row
                     series[(sym, side, price)].append((ts, amt))
                     amounts[sym].append(amt)
-            done += 1
     sys.stdout.write("\n")
-    return series, amounts, done
+    return series, amounts, count, ts_range
 
 
-def main():
-    date = sys.argv[1] if len(sys.argv) > 1 else datetime.now(MSK).strftime("%Y-%m-%d")
-    min_lots = 200
-    if "--min-lots" in sys.argv:
-        min_lots = float(sys.argv[sys.argv.index("--min-lots") + 1])
-    path = BASE / "data" / f"orderbook_{date}.jsonl"
-    if not path.exists():
-        print(f"[!] нет файла {path.name}"); return
+def classify(med, life):
+    if life is None:
+        return "?"
+    if life < 0.5 * med:
+        return "FLASH"
+    if life > 0.8 * med:
+        return "PULL"
+    return "MID"
 
-    series, amounts, n = load(path)
-    print(f"[*] снапшотов: {n}; уровней: {len(series)}")
 
-    thr = {}
-    for sym, amts in amounts.items():
-        s = sorted(amts)
-        p90 = s[int(0.90 * (len(s) - 1))] if s else 0
-        thr[sym] = max(min_lots, 0.4 * p90)
-        print(f"    {sym:8s} порог слоя = {thr[sym]:.0f} лотов")
-
-    candidates = []
-    keys = list(series.keys())
-    for ki, key in enumerate(keys):
-        if ki % 200 == 0:
-            bar(100.0 * ki / len(keys), f"{ki}/{len(keys)}")
-        sym, side, price = key
-        pts = series[key]
+def detect(series, thr_map, min_n=4, min_reg=0.6, flash_only=False):
+    out = []
+    for (sym, side, price), pts in series.items():
         if len(pts) < 8:
             continue
-        t = thr[sym]
+        t = thr_map.get(sym, 200)
         adds = []
         lifetimes = []
         last_add = None
@@ -98,7 +89,7 @@ def main():
                     lifetimes.append((ts - last_add) / 1000.0)
                 last_add = None
             prev = state
-        if len(adds) < 4:
+        if len(adds) < min_n:
             continue
         gaps = [(adds[i + 1] - adds[i]) / 1000.0 for i in range(len(adds) - 1)]
         med = median(gaps)
@@ -106,25 +97,72 @@ def main():
             continue
         tol = max(1.0, 0.25 * med)
         reg = sum(1 for g in gaps if abs(g - med) <= tol) / len(gaps)
-        if reg < 0.6:
+        if reg < min_reg:
             continue
-        mean_life = sum(lifetimes) / len(lifetimes) if lifetimes else None
-        flash = mean_life is not None and mean_life < med * 0.5
-        candidates.append((sym, side, price, med, len(adds), reg, mean_life, flash))
-    sys.stdout.write("\n")
+        life = sum(lifetimes) / len(lifetimes) if lifetimes else None
+        tag = classify(med, life)
+        if flash_only and tag != "FLASH":
+            continue
+        out.append((sym, side, price, med, len(adds), reg, life, tag))
+    out.sort(key=lambda c: -c[4])
+    return out
 
-    candidates.sort(key=lambda c: -c[4])
-    print("\n" + "=" * 78)
-    print(f" ПЕРИОДИЧЕСКИЕ СЛОИ (спуфинг-кандидаты): {len(candidates)}")
-    print("=" * 78)
-    for sym, side, price, med, cnt, reg, life, flash in candidates[:25]:
-        tag = "FLASH(быстро снимает)" if flash else ""
-        life_s = f"{life:.1f}s" if life is not None else "n/a"
-        print(f"  {sym:8s} {side:4s} price={price:<10} период={med:6.1f}s "
-              f"появл={cnt:3d} reg={reg:.0%} жизнь={life_s:7s} {tag}")
-    if not candidates:
-        print("  (пока нет регулярных слоёв — рынок спокоен или порог высок)")
-    print("=" * 78)
+
+def main():
+    a = sys.argv
+    date = a[1] if len(a) > 1 and not a[1].startswith("--") else datetime.now(MSK).strftime("%Y-%m-%d")
+    min_lots, p90f, thr_abs, sweep = 200.0, 0.4, None, None
+    min_n, min_reg, flash_only = 4, 0.6, False
+    if "--min-lots" in a: min_lots = float(a[a.index("--min-lots") + 1])
+    if "--p90" in a: p90f = float(a[a.index("--p90") + 1])
+    if "--thr" in a: thr_abs = float(a[a.index("--thr") + 1])
+    if "--min-n" in a: min_n = int(a[a.index("--min-n") + 1])
+    if "--min-reg" in a: min_reg = float(a[a.index("--min-reg") + 1])
+    if "--flash-only" in a: flash_only = True
+    if "--sweep" in a:
+        sweep = [100, 200, 500, 1000, 2000, 5000, 10000]
+        nxt = a[a.index("--sweep") + 1:a.index("--sweep") + 2]
+        if nxt and not nxt[0].startswith("--"):
+            sweep = [float(x) for x in nxt[0].split(",")]
+    path = BASE / "data" / f"orderbook_{date}.jsonl"
+    if not path.exists():
+        print(f"[!] нет файла {path.name}"); return
+
+    series, amounts, count, ts_range = load(path)
+    print(f"[*] уровней: {len(series)}")
+    print("[*] АКТИВНОСТЬ РЫНКА:")
+    for sym in sorted(count):
+        r = ts_range[sym]
+        span = (r[1] - r[0]) / 1000.0 if r[0] is not None else 0
+        rate = count[sym] / span if span > 0 else 0
+        print(f"    {sym:10s} снапшотов={count[sym]:6d}  окно={span:7.1f}s  темп={rate:4.2f}/s")
+
+    thr_default = {}
+    for sym, amts in amounts.items():
+        s = sorted(amts)
+        p90 = s[int(0.90 * (len(s) - 1))] if s else 0
+        thr_default[sym] = max(min_lots, p90f * p90)
+
+    if sweep:
+        print(f"\n[*] SWEEP (min-n={min_n}, min-reg={min_reg:.0%}, flash_only={flash_only}):")
+        for t in sweep:
+            tm = {sym: t for sym in amounts}
+            c = detect(series, tm, min_n, min_reg, flash_only)
+            top = "; ".join(f"{x[0]} {x[1]} {x[2]} P={x[3]:.0f}s n={x[4]} {x[7]}" for x in c[:3])
+            print(f"    thr={t:7.0f} -> {len(c):3d}  {top}")
+        return
+
+    thr_map = {sym: (thr_abs if thr_abs is not None else thr_default[sym]) for sym in amounts}
+    c = detect(series, thr_map, min_n, min_reg, flash_only)
+    print("\n" + "=" * 80)
+    print(f" ПЕРИОДИЧЕСКИЕ СЛОИ: {len(c)}  (min-n={min_n}, min-reg={min_reg:.0%})")
+    print("=" * 80)
+    for sym, side, price, med, cnt, reg, life, tag in c[:25]:
+        ls = f"{life:.1f}s" if life is not None else "n/a"
+        print(f"  {sym:10s} {side:4s} price={price:<10} P={med:6.1f}s n={cnt:3d} reg={reg:.0%} жизнь={ls:7s} {tag}")
+    if not c:
+        print("  (нет надёжных кандидатов при этих фильтрах)")
+    print("=" * 80)
 
 
 if __name__ == "__main__":
