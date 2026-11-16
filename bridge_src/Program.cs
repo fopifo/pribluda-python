@@ -39,6 +39,22 @@ namespace PbSdkConsole
             new[]{ "FUT.CNY-12.26", "CNY-12.26", "FUT.CRZ6", "CRZ6" },
             new[]{ "CETS.CNYRUB_TOM", "CNYRUB_TOM", "CETS.CNY000000TOD", "CNY000000TOD" },
         };
+
+        static readonly Dictionary<string, double> SpoofThresholds = new()
+        {
+            { "MTLR",      2000 },
+            { "MTLRP",     500  },
+            { "CNYRUBF",   2000 },
+            { "CNY-12.26", 200  },
+            { "SBER",      5000 },
+        };
+        const double SpoofMinHoldSec = 20;
+        const double SpoofBotPeriodSec = 90;
+        const int SpoofBotMinCycles = 3;
+        const double SpoofStaleSec = 15;
+        const double SpoofAlertCooldownSec = 300;
+        const int SpoofSkipTopLevels = 5;
+
         static IPbSdkManager _sdk;
         static Mutex _singleInstance;
         static readonly ConcurrentDictionary<string, ILayer> Layers = new ConcurrentDictionary<string, ILayer>();
@@ -46,8 +62,26 @@ namespace PbSdkConsole
         static readonly HashSet<string> SeenCmdIds = new HashSet<string>();
         static readonly object CmdLock = new object();
         static StreamWriter? CommandWriter;
+        static StreamWriter? SpoofWriter;
         static string _lastStateJson = "{}";
+        static string _lastSpoofJson = "{\"levels\":[],\"updated_ms\":0}";
         const string StatePath = @"C:\Users\Public\MI_CODES\Qwen_coder\data\bridge_state.json";
+
+        sealed class TrackedLevel
+        {
+            public string Sym = "";
+            public string Side = "";
+            public double Price;
+            public double MaxAmount;
+            public double LastAmount;
+            public long FirstSeenMs;
+            public long LastSeenMs;
+            public int Cycles;
+            public long LastAlertMs;
+            public string? LastAlertKind;
+        }
+        static readonly Dictionary<string, TrackedLevel> Tracked = new Dictionary<string, TrackedLevel>();
+        static readonly object TrackedLock = new object();
 
         static StreamWriter OpenAppend(string path)
         {
@@ -113,6 +147,184 @@ namespace PbSdkConsole
                 catch { }
                 await Task.Delay(1000);
             }
+        }
+
+        static string MakeKey(string sym, string side, double price)
+            => $"{sym}|{side}|{price.ToString("F6", CultureInfo.InvariantCulture)}";
+
+        static async Task SpoofMonitorLoop()
+        {
+            Console.WriteLine($"[OK] spoof monitor: thr={SpoofThresholds.Count} tools, min-hold {SpoofMinHoldSec}s");
+            while (true)
+            {
+                try
+                {
+                    long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    var activeNow = new HashSet<string>();
+
+                    foreach (var kv in Layers)
+                    {
+                        string sym = kv.Key;
+                        var layer = kv.Value;
+                        if (!SpoofThresholds.TryGetValue(sym, out double thr)) continue;
+                        var stock = layer.LastStock;
+                        if (stock == null) continue;
+                        double bb = 0, ba = 0;
+                        try { bb = stock.BestBid; ba = stock.BestAsk; } catch { continue; }
+
+                        var bids = new List<(double p, double a)>();
+                        var asks = new List<(double p, double a)>();
+                        try
+                        {
+                            lock (stock)
+                            {
+                                int bidsLen = stock.Bids.Length;
+                                int asksLen = stock.Asks.Length;
+                                
+                                int n = 0;
+                                for (int i = 0; i < bidsLen; i++)
+                                {
+                                    n++;
+                                    if (n <= SpoofSkipTopLevels) continue;
+                                    var row = stock.Bids[i];
+                                    bids.Add((Convert.ToDouble(row.Price), Convert.ToDouble(row.Amount)));
+                                }
+                                n = 0;
+                                for (int i = 0; i < asksLen; i++)
+                                {
+                                    n++;
+                                    if (n <= SpoofSkipTopLevels) continue;
+                                    var row = stock.Asks[i];
+                                    asks.Add((Convert.ToDouble(row.Price), Convert.ToDouble(row.Amount)));
+                                }
+                            }
+                        }
+                        catch { continue; }
+
+                        ProcessSide(sym, "bids", bids, thr, bb, nowMs, activeNow);
+                        ProcessSide(sym, "asks", asks, thr, ba, nowMs, activeNow);
+                    }
+
+                    lock (TrackedLock)
+                    {
+                        var keys = Tracked.Keys.ToList();
+                        foreach (var k in keys)
+                        {
+                            if (activeNow.Contains(k)) continue;
+                            var lvl = Tracked[k];
+                            double age = (nowMs - lvl.LastSeenMs) / 1000.0;
+                            if (age < SpoofStaleSec) continue;
+                            if (lvl.LastAlertKind != "gone" && (nowMs - lvl.LastAlertMs) / 1000.0 > SpoofAlertCooldownSec)
+                            {
+                                EmitAlert(lvl, "gone", nowMs, lvl.MaxAmount);
+                            }
+                            Tracked.Remove(k);
+                        }
+                    }
+
+                    UpdateSpoofJson(nowMs);
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine($"[spoof] error: {e.Message}");
+                }
+                await Task.Delay(2000);
+            }
+        }
+
+        static void ProcessSide(string sym, string side, List<(double p, double a)> rows, double thr,
+                                double bestPrice, long nowMs, HashSet<string> activeNow)
+        {
+            foreach (var (price, amt) in rows)
+            {
+                if (amt < thr) continue;
+                string key = MakeKey(sym, side, price);
+                activeNow.Add(key);
+                TrackedLevel lvl;
+                bool isNew = false;
+                lock (TrackedLock)
+                {
+                    if (!Tracked.TryGetValue(key, out lvl!))
+                    {
+                        lvl = new TrackedLevel
+                        {
+                            Sym = sym, Side = side, Price = price,
+                            FirstSeenMs = nowMs, LastSeenMs = nowMs,
+                            MaxAmount = amt, LastAmount = amt, Cycles = 1
+                        };
+                        Tracked[key] = lvl;
+                        isNew = true;
+                    }
+                    else
+                    {
+                        lvl.LastSeenMs = nowMs;
+                        lvl.LastAmount = amt;
+                        if (amt > lvl.MaxAmount) lvl.MaxAmount = amt;
+                    }
+                }
+
+                double hold = (nowMs - lvl.FirstSeenMs) / 1000.0;
+                double sinceAlert = (nowMs - lvl.LastAlertMs) / 1000.0;
+
+                if (isNew && hold >= SpoofMinHoldSec && sinceAlert > SpoofAlertCooldownSec)
+                {
+                    EmitAlert(lvl, "wall", nowMs, amt);
+                }
+                else if (!isNew && lvl.LastAlertKind == "wall" && lvl.Cycles >= SpoofBotMinCycles
+                         && hold >= SpoofBotPeriodSec && sinceAlert > SpoofAlertCooldownSec)
+                {
+                    EmitAlert(lvl, "bot", nowMs, amt);
+                }
+            }
+        }
+
+        static void EmitAlert(TrackedLevel lvl, string kind, long nowMs, double amount)
+        {
+            lvl.LastAlertMs = nowMs;
+            lvl.LastAlertKind = kind;
+            lvl.Cycles++;
+            double hold = (nowMs - lvl.FirstSeenMs) / 1000.0;
+            string holdStr = hold >= 60 ? $"{(int)hold / 60}м{(int)hold % 60}с" : $"{(int)hold}с";
+            string ruKind = kind switch
+            {
+                "wall" => lvl.Side == "bids" ? "ПОДДЕРЖКА" : "СОПРОТИВЛЕНИЕ",
+                "bot" => "РОБОТ",
+                "gone" => "УШЛА",
+                _ => kind
+            };
+            string emoji = lvl.Side == "bids" ? "🟢⬆️" : "🔴⬇️";
+            if (kind == "gone") emoji = "💨";
+            var rec = new
+            {
+                ts = nowMs,
+                sym = lvl.Sym, side = lvl.Side, price = lvl.Price,
+                amount, kind, ru_kind = ruKind, hold_s = (int)hold,
+                cycles = lvl.Cycles, emoji
+            };
+            var line = JsonSerializer.Serialize(rec);
+            lock (CmdLock) { SpoofWriter?.WriteLine(line); }
+            Console.WriteLine($"[SPOOF {kind.ToUpper()}] {emoji} {lvl.Sym} {lvl.Side} {lvl.Price} x{amount:F0} ({holdStr}, cycles={lvl.Cycles})");
+        }
+
+        static void UpdateSpoofJson(long nowMs)
+        {
+            var list = new List<object>();
+            lock (TrackedLock)
+            {
+                foreach (var lvl in Tracked.Values)
+                {
+                    double hold = (nowMs - lvl.FirstSeenMs) / 1000.0;
+                    if (hold < SpoofMinHoldSec) continue;
+                    list.Add(new
+                    {
+                        sym = lvl.Sym, side = lvl.Side, price = lvl.Price,
+                        amount = lvl.MaxAmount, hold_s = (int)hold,
+                        cycles = lvl.Cycles, last_alert = lvl.LastAlertKind
+                    });
+                }
+            }
+            var json = JsonSerializer.Serialize(new { updated_ms = nowMs, levels = list });
+            _lastSpoofJson = json;
         }
 
         static string ProcessOrder(string body)
@@ -212,12 +424,7 @@ namespace PbSdkConsole
                                 ?? names.FirstOrDefault(n => n.IndexOf("All", StringComparison.OrdinalIgnoreCase) >= 0)
                                 ?? names.FirstOrDefault(n => n.IndexOf("Both", StringComparison.OrdinalIgnoreCase) >= 0)
                                 ?? names.FirstOrDefault();
-                    if (pick != null)
-                    {
-                        var val = Enum.Parse(pt, pick);
-                        Console.WriteLine($"[arg] enum {pt.Name} = {pick}");
-                        return val;
-                    }
+                    if (pick != null) return Enum.Parse(pt, pick);
                 }
                 if (order != null && pt.IsInstanceOfType(order)) return order;
             }
@@ -279,12 +486,7 @@ namespace PbSdkConsole
                             }
                             if (ok)
                             {
-                                try
-                                {
-                                    cancelAll.Invoke(layer, args);
-                                    c = orders.Count;
-                                    done = true;
-                                }
+                                try { cancelAll.Invoke(layer, args); c = orders.Count; done = true; }
                                 catch (Exception ex) { Console.WriteLine($"[cancel-all] {sym}: {ex.Message}"); }
                             }
                         }
@@ -353,6 +555,7 @@ namespace PbSdkConsole
                         else if (ctx.Request.HttpMethod == "POST" && ctx.Request.Url!.AbsolutePath == "/cancel_all") outJson = ProcessCancelAll(body);
                         else if (ctx.Request.Url!.AbsolutePath == "/ping") outJson = "{\"ok\":true}";
                         else if (ctx.Request.Url!.AbsolutePath == "/state") outJson = _lastStateJson;
+                        else if (ctx.Request.Url!.AbsolutePath == "/spoof_live") outJson = _lastSpoofJson;
                         else { code = 404; outJson = "{\"ok\":false,\"error\":\"not found\"}"; }
                         var buf = Encoding.UTF8.GetBytes(outJson);
                         ctx.Response.StatusCode = code;
@@ -387,12 +590,15 @@ namespace PbSdkConsole
             var logPath = Path.Combine(dataDir, $"pbsdk_trades_{today}.jsonl");
             var obPath = Path.Combine(dataDir, $"orderbook_{today}.jsonl");
             var cmdPath = Path.Combine(dataDir, "trade_commands.jsonl");
+            var spoofPath = Path.Combine(dataDir, "spoof_live.jsonl");
             LayerEventsReceiver.TradeWriter = OpenAppend(logPath);
             LayerEventsReceiver.OrderBookWriter = OpenAppend(obPath);
             CommandWriter = OpenAppend(cmdPath);
+            SpoofWriter = OpenAppend(spoofPath);
             Console.WriteLine($"[OK] tape: {logPath}");
             Console.WriteLine($"[OK] orderbook: {obPath}");
             Console.WriteLine($"[OK] commands: {cmdPath}");
+            Console.WriteLine($"[OK] spoof: {spoofPath}");
 
             Console.WriteLine("[5/6] Connect ALL markets...");
             IDispatcher dispatcher = _sdk.PrivodBondarDispatcher;
@@ -433,12 +639,14 @@ namespace PbSdkConsole
 
             _ = Task.Run(StateLoop);
             _ = Task.Run(HttpLoop);
+            _ = Task.Run(SpoofMonitorLoop);
             Console.WriteLine("[6/6] waiting. Press any key to stop.");
             Console.ReadKey(true);
             Console.WriteLine("stopping...");
             LayerEventsReceiver.TradeWriter?.Close();
             LayerEventsReceiver.OrderBookWriter?.Close();
             CommandWriter?.Close();
+            SpoofWriter?.Close();
             await _sdk.StopAsync();
         }
 

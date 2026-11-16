@@ -1,8 +1,10 @@
 """
-bot.py — ММВБ Агент (v3.24)
-- + Kill-switch: 🛑 Снять все заявки (по всем слоям или по выбранному).
-- + Watchdog моста: если bridge_state не обновлялся >60с — алерт в MAX.
-- Торговля DRY/LIVE; баланс lite-стиль; мигалки со стрелками; арбитраж; алерт |MTLR-MTLRP|>=3.
+bot.py — ММВБ Агент (v3.25)
+- Live-мигалки: фоновый опрос моста /spoof_live каждые 10с, алерты в MAX с кулдауном.
+- Kill-switch: 🛑 Снять все заявки (по слою/всем).
+- Watchdog моста: алерт если молчит >60с.
+- Торговля DRY/LIVE (whitelist MTLR/MTLRP/CNYRUBF/CNY-12.26).
+- Баланс lite-стиль; Мигалки по кнопке (дневная статистика); Арбитраж спреды; Позиции.
 """
 import asyncio
 import aiohttp
@@ -19,7 +21,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.24"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.25"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -30,6 +32,9 @@ BRIDGE_TOKEN = "pribluda-local-1"
 WATCHDOG_STALE_SEC = 60
 WATCHDOG_POLL_SEC = 15
 WATCHDOG_COOLDOWN_SEC = 300
+
+SPOOF_POLL_SEC = 10
+SPOOF_ALERT_COOLDOWN_SEC = 300  # не алертим один и тот же уровень чаще 5 мин
 
 TRADE_CONFIG = {
     "MTLR":      {"lots": [1, 99, 100, 200, 300, 500], "label": "🔹 MTLR"},
@@ -63,11 +68,13 @@ HELP_TEXT = (
     "/positions — открытые позиции\n"
     "/balance — финрез (оценка моста)\n"
     "/arba — арбитраж + спреды\n"
-    "/spoof — мигалки (роботы в стакане)\n"
+    "/spoof — мигалки (дневная статистика)\n"
     "/trade — торговля (dry/live)\n"
     "/kill — 🛑 снять все мои заявки\n\n"
-    "Авто-алерт: |MTLR - MTLRP| >= 3 руб.\n"
-    "Watchdog моста: алерт если мост молчит >60с."
+    "Фоновые алерты:\n"
+    "• |MTLR - MTLRP| >= 3 руб\n"
+    "• 🟢⬆️🔴⬇️ live-мигалки (стенки/роботы в реальном времени)\n"
+    "• watchdog моста (молчит >60с)"
 )
 
 MAIN_MENU = [
@@ -238,7 +245,7 @@ async def format_balance(session, state):
 
 
 def format_spoof(data):
-    lines = ["🕵️ **Мигалки — роботы в стакане**", ""]
+    lines = ["🕵️ **Мигалки — дневная статистика**", ""]
     cands = data.get("candidates", [])
     if not cands:
         lines.append("Сейчас явных роботов-«мигалок» не видно.")
@@ -258,6 +265,7 @@ def format_spoof(data):
         top = sorted(act.items(), key=lambda kv: -kv[1]["rate"])[:3]
         lines.append("📈 Активность рынка: " + "; ".join(f"{s} {v['rate']}/с" for s, v in top))
     lines.append("\n_🟢⬆️ поддержка = цена скорее отскочит ВВЕРХ; 🔴⬇️ сопротивление = скорее ВНИЗ._")
+    lines.append("_Live-мигалки работают в фоне и шлют алерты автоматически._")
     return "\n".join(lines)
 
 
@@ -437,6 +445,72 @@ async def bridge_post(session, path, body, timeout=8):
             return resp.status, await resp.json()
     except Exception as e:
         return 0, {"ok": False, "error": str(e)}
+
+
+async def bridge_get_json(session, path, timeout=3):
+    try:
+        async with session.get(BRIDGE_URL + path, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+            if resp.status != 200: return None
+            return await resp.json()
+    except Exception:
+        return None
+
+
+# ---------- Live-мигалки: фоновый монитор ----------
+def make_spoof_msg(level):
+    sym = level["sym"]
+    side = level["side"]
+    price = level["price"]
+    amt = level.get("amount", 0)
+    hold = level.get("hold_s", 0)
+    cycles = level.get("cycles", 1)
+    last_kind = level.get("last_alert")
+    if side == "bids":
+        emoji = "🟢⬆️"; ru = "ПОДДЕРЖКА"
+    else:
+        emoji = "🔴⬇️"; ru = "СОПРОТИВЛЕНИЕ"
+    hint = "цена скорее отскочит ВВЕРХ" if side == "bids" else "цена скорее отскочит ВНИЗ"
+    if last_kind == "bot":
+        return (f"{emoji} **{sym}: РОБОТ {ru}**\n"
+                f"Цена: **{price}**, объём: **{amt:g}** лотов\n"
+                f"Держится: {human_sec(hold)}, циклов: {cycles}\n"
+                f"_{hint} от этой линии._")
+    elif last_kind == "gone":
+        return (f"💨 **{sym}: {ru} УШЛА**\n"
+                f"Цена: **{price}**, объём был: **{amt:g}** лотов\n"
+                f"_Окно для входа: крупной стенки больше нет._")
+    else:
+        return (f"{emoji} **{sym}: {ru}**\n"
+                f"Цена: **{price}**, объём: **{amt:g}** лотов\n"
+                f"Держится: {human_sec(hold)}, циклов: {cycles}\n"
+                f"_{hint} от этой линии._")
+
+
+async def monitor_spoof(session):
+    seen: dict = {}  # key -> (kind, last_alert_ts)
+    while True:
+        try:
+            data = await bridge_get_json(session, "/spoof_live")
+            if data and isinstance(data, dict):
+                levels = data.get("levels", []) or []
+                now = time.time()
+                for lvl in levels:
+                    sym = lvl.get("sym"); side = lvl.get("side"); price = lvl.get("price")
+                    kind = lvl.get("last_alert") or "wall"
+                    if sym is None or side is None or price is None: continue
+                    key = f"{sym}|{side}|{price}|{kind}"
+                    prev = seen.get(key)
+                    if prev is None or (now - prev[1]) > SPOOF_ALERT_COOLDOWN_SEC:
+                        seen[key] = (kind, now)
+                        msg = make_spoof_msg(lvl)
+                        await send_message(session, msg, user_id=OWNER_ID)
+                # Очистить устаревшие ключи
+                for k, (knd, ts) in list(seen.items()):
+                    if now - ts > SPOOF_ALERT_COOLDOWN_SEC * 2:
+                        del seen[k]
+        except Exception as e:
+            print(f"[SPOOF-MON ERROR] {e}")
+        await asyncio.sleep(SPOOF_POLL_SEC)
 
 
 def trade_pick_sym_menu():
@@ -624,12 +698,10 @@ async def monitor_mtlr_spread(session):
 
 async def watchdog_bridge(session):
     last_alert = 0.0
-    ever_seen = False
     while True:
         try:
             st = read_bridge_state()
             if st:
-                ever_seen = True
                 age = (time.time() * 1000 - st.get("updated_ms", 0)) / 1000
                 if age > WATCHDOG_STALE_SEC:
                     now = time.time()
@@ -822,7 +894,8 @@ async def main():
         if status != 200: return
         asyncio.create_task(monitor_mtlr_spread(session))
         asyncio.create_task(watchdog_bridge(session))
-        print(f"✅ Бот запущен. Торговля DRY/LIVE + kill-switch + watchdog моста ({WATCHDOG_STALE_SEC}с).")
+        asyncio.create_task(monitor_spoof(session))
+        print(f"✅ Бот запущен. Торговля DRY/LIVE + kill-switch + watchdog + LIVE-мигалки.")
         marker = None
         while True:
             params = {"timeout": 30}
