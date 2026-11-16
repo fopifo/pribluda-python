@@ -1708,3 +1708,13 @@ live_trades_DATE.jsonl остаётся за приблудой. Открыти�
 **Проверено:** ровно 1 main.py + 1 bot.py + 1 PbSdkConsole; данные растут; без IOException.
 **bridge_src/** = reference-копии Program.cs/LayerEventsReceiver.cs (сборка идёт в PbSdkConsole_Project;
 при правках синхронизировать копии).
+======================================================================
+ДОБАВЛЕНИЕ 2026-11-16 (этап 0: позиции в MAX; чистка UI)
+======================================================================
+**Мост (Program.cs):** StateLoop раз в 1с пишет data/bridge_state.json (позиция, средняя цена,
+best bid/ask, ready по каждому подписанному слою; атомарно tmp+move). Слои хранятся в ConcurrentDictionary.
+**bot.py v3.12:** кнопка/команда Позиции читает bridge_state.json; показывает ТОЛЬКО открытые позиции,
+группы Мечел (MTLR+MTLRP) и Юань (CNYRUBF+CNY-*) со спредом по mid стакана; нулевые скрыты.
+**Алиасы подтверждены терминалом:** квартальник FUT.CNY-12.26, валюта CETS.CNYRUB_TOM / CNY000000TOD.
+**csproj клона:** NoWarn + SuppressTfmSupportBuildWarnings (консоль моста чистая).
+**.vscode/settings.json:** git.repositoryScanIgnoredFolders += PbSdkConsole_Project (убран из SCM).

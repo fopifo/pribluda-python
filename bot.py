@@ -1,18 +1,22 @@
 """
-bot.py — ММВБ Агент (v3.10)
-Фоновый алерт: |MTLR - MTLRP| >= 3 руб (раздвижка в обе стороны) -> MAX.
+bot.py — ММВБ Агент (v3.12)
+Позиции: только открытые, сгруппированы по парам (Мечел/Юань), со спредом.
++ Фоновый алерт |MTLR-MTLRP| >= 3 руб.
 """
 import asyncio
 import aiohttp
 import ssl
 import os
+import json
 import time
+from pathlib import Path
 from datetime import datetime
 
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.10"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.12"}
+DATA_DIR = Path(__file__).resolve().parent / "data"
 
 OWNER_ID = 5135149
 SPREAD_THRESHOLD = 3.0
@@ -33,10 +37,11 @@ HELP_TEXT = (
     "Я ММВБ Агент — помощник для торгов на Московской Бирже.\n\n"
     "Команды:\n"
     "/start — главное меню\n"
-    "/quote — узнать котировку\n"
+    "/quote — котировка\n"
+    "/positions — открытые позиции\n"
     "/arba — арбитражные связки\n"
-    "/schedule — расписание торгов\n\n"
-    "Авто-алерт: |MTLR - MTLRP| >= 3 руб (обе стороны)."
+    "/schedule — расписание\n\n"
+    "Авто-алерт: |MTLR - MTLRP| >= 3 руб."
 )
 
 SCHEDULE_TEXT = (
@@ -52,8 +57,9 @@ MAIN_MENU = [
     {"type": "inline_keyboard", "payload": {"buttons": [
         [{"type": "callback", "text": "📊 Котировка", "payload": "cmd_quote"},
          {"type": "callback", "text": "⚖️ Арбитраж", "payload": "cmd_arba"}],
-        [{"type": "callback", "text": "📅 Расписание", "payload": "cmd_schedule"},
-         {"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}]
+        [{"type": "callback", "text": "📌 Позиции", "payload": "cmd_positions"},
+         {"type": "callback", "text": "📅 Расписание", "payload": "cmd_schedule"}],
+        [{"type": "callback", "text": "❓ Справка", "payload": "cmd_help"}]
     ]}}
 ]
 
@@ -79,6 +85,60 @@ def create_ssl_context():
         if os.path.exists(p):
             ctx.load_verify_locations(p)
     return ctx
+
+
+def read_bridge_state():
+    p = DATA_DIR / "bridge_state.json"
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def format_positions(state):
+    if not state:
+        return "⚠️ Мост не отдаёт состояние. Запущен ли PbSdk Bridge?"
+    syms = state.get("symbols", {})
+    open_syms = {s: i for s, i in syms.items() if i.get("position", 0) != 0}
+    age = (time.time() * 1000 - state.get("updated_ms", 0)) / 1000
+    if not open_syms:
+        return f"📌 Открытых позиций нет. (обновлено {age:.0f}с)"
+
+    def leg(s):
+        i = open_syms[s]
+        p = i["position"]
+        side = "лонг" if p > 0 else "шорт"
+        return f"   {s}: {side} {abs(p):g} @ {i.get('pos_price', 0):g}"
+
+    def mid(s):
+        i = syms.get(s, {})
+        bb = i.get("best_bid", 0)
+        ba = i.get("best_ask", 0)
+        return (bb + ba) / 2 if bb > 0 and ba > 0 else None
+
+    lines = [f"📌 **Открытые позиции** (обновлено {age:.0f}с)\n"]
+    mech = [s for s in ("MTLR", "MTLRP") if s in open_syms]
+    if mech:
+        lines.append("🔹 **Мечел**")
+        lines += [leg(s) for s in mech]
+        a, b = mid("MTLR"), mid("MTLRP")
+        if a and b:
+            lines.append(f"   спред MTLR−MTLRP: {a - b:+.2f}")
+        lines.append("")
+    cny = [s for s in open_syms if s == "CNYRUBF" or s.startswith("CNY-")]
+    if cny:
+        lines.append("💱 **Юань**")
+        lines += [leg(s) for s in sorted(cny)]
+        perp = mid("CNYRUBF")
+        q = [mid(s) for s in sorted(cny) if s.startswith("CNY-")]
+        if perp and q and q[0]:
+            lines.append(f"   спред кварт−вечн: {q[0] - perp:+.4f}")
+        lines.append("")
+    rest = [s for s in open_syms if s not in mech and s not in cny]
+    for s in sorted(rest):
+        lines.append(leg(s).strip())
+    return "\n".join(lines).rstrip()
 
 
 async def api_get(session, path, params=None):
@@ -224,7 +284,6 @@ async def get_cny_arbitrage(session):
 
 
 async def monitor_mtlr_spread(session):
-    """Фоновый алерт: |MTLR - MTLRP| >= SPREAD_THRESHOLD (обе стороны)."""
     prev_mag = None
     last_alert = 0.0
     while True:
@@ -247,7 +306,7 @@ async def monitor_mtlr_spread(session):
                             f"Спред: **{spread:+.2f}** ₽ (|{mag:.2f}|)\n"
                             f"{direction}"
                         )
-                        print(f"[ALERT] MTLR spread={spread:+.2f} |{mag:.2f}|")
+                        print(f"[ALERT] MTLR spread={spread:+.2f}")
                         await send_message(session, msg, user_id=OWNER_ID)
                         last_alert = now
                     prev_mag = mag
@@ -269,6 +328,8 @@ async def handle_update(session, upd):
             if payload == "cmd_quote":
                 user_states[user_id] = {"step": "AWAITING_TICKER"}
                 await send_message(session, "✍️ Введите тикер (SBER, GAZP, MTLR...):", user_id=user_id)
+            elif payload == "cmd_positions":
+                await send_message(session, format_positions(read_bridge_state()), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba":
                 await send_message(session, "⚖️ **Выберите тип арбитража:**", user_id=user_id, attachments=ARBA_MENU)
             elif payload == "cmd_arba_mtlr":
@@ -307,7 +368,7 @@ async def handle_update(session, upd):
             st = user_states.get(user_id)
             if st and st.get("step") == "AWAITING_TICKER":
                 del user_states[user_id]
-                if tl in ["/help", "/start", "/arba", "/quote"]:
+                if tl in ["/help", "/start", "/arba", "/quote", "/positions"]:
                     reply = "Отмена ввода."; att = MAIN_MENU
                 else:
                     _, reply = await get_moex_data(session, t); att = MAIN_MENU
@@ -325,6 +386,8 @@ async def handle_update(session, upd):
             elif tl == "/quote":
                 user_states[user_id] = {"step": "AWAITING_TICKER"}
                 reply = "✍️ Введите тикер:"
+            elif tl == "/positions":
+                reply = format_positions(read_bridge_state()); att = MAIN_MENU
             elif tl == "/arba":
                 reply = "⚖️ **Выберите тип арбитража:**"; att = ARBA_MENU
             elif tl == "/schedule":
@@ -346,7 +409,7 @@ async def main():
         print(f"[AUTH] {status}: {'OK' if status == 200 else me}")
         if status != 200: return
         asyncio.create_task(monitor_mtlr_spread(session))
-        print(f"✅ Бот запущен. Мониторинг |MTLR-MTLRP| >= {SPREAD_THRESHOLD:.0f}₽ включён.")
+        print(f"✅ Бот запущен. Позиции + мониторинг |MTLR-MTLRP| >= {SPREAD_THRESHOLD:.0f}₽.")
         marker = None
         while True:
             params = {"timeout": 30}

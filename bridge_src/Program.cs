@@ -3,6 +3,9 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Text.Json;
 using ICore;
 using PbSdk;
 
@@ -17,11 +20,13 @@ namespace PbSdkConsole
             new[]{ "TQBR.MTLR" },
             new[]{ "TQBR.MTLRP" },
             new[]{ "FUT.CNYRUBF", "RFUD.CNYRUBF", "CNYRUBF" },
-            new[]{ "FUT.CRZ6", "RFUD.CRZ6", "CRZ6" },
-            new[]{ "CETS.CNYRUB_TOM", "CNYRUB_TOM" },
+            new[]{ "FUT.CNY-12.26", "CNY-12.26", "FUT.CRZ6", "CRZ6" },
+            new[]{ "CETS.CNYRUB_TOM", "CNYRUB_TOM", "CETS.CNY000000TOD", "CNY000000TOD" },
         };
         static IPbSdkManager _sdk;
         static Mutex _singleInstance;
+        static readonly ConcurrentDictionary<string, ILayer> Layers = new ConcurrentDictionary<string, ILayer>();
+        const string StatePath = @"C:\Users\Public\MI_CODES\Qwen_coder\data\bridge_state.json";
 
         static StreamWriter OpenAppend(string path)
         {
@@ -29,14 +34,37 @@ namespace PbSdkConsole
             return new StreamWriter(fs) { AutoFlush = true };
         }
 
+        static async Task StateLoop()
+        {
+            while (true)
+            {
+                try
+                {
+                    var symbols = new Dictionary<string, object>();
+                    foreach (var kv in Layers)
+                    {
+                        var l = kv.Value;
+                        decimal pos = 0; double pp = 0, bb = 0, ba = 0;
+                        try { pos = l.Posmonitor._PositionAmount; pp = l.Posmonitor._PositionPrice; } catch { }
+                        var st = l.LastStock;
+                        if (st != null) { bb = st.BestBid; ba = st.BestAsk; }
+                        bool ready = l.DispatcherSlot.IsReady && !l.IsReplications && l.IsReplicationsDone && l.IsStockReceived;
+                        symbols[kv.Key] = new { position = pos, pos_price = pp, best_bid = bb, best_ask = ba, ready = ready };
+                    }
+                    var json = JsonSerializer.Serialize(new { updated_ms = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), symbols = symbols });
+                    var tmp = StatePath + ".tmp";
+                    File.WriteAllText(tmp, json);
+                    File.Move(tmp, StatePath, true);
+                }
+                catch { }
+                await Task.Delay(1000);
+            }
+        }
+
         static async Task Main()
         {
             _singleInstance = new Mutex(true, "PbSdkBridge_SingleInstance", out bool createdNew);
-            if (!createdNew)
-            {
-                Console.WriteLine("[!] Мост уже запущен во втором экземпляре. Выход.");
-                return;
-            }
+            if (!createdNew) { Console.WriteLine("[!] Мост уже запущен. Выход."); return; }
 
             Console.WriteLine("[1/6] Init...");
             _sdk = PbSdkFactory.Create();
@@ -81,7 +109,7 @@ namespace PbSdkConsole
                 IDispatcherSlot slot;
                 if (first) { slot = probe; first = false; }
                 else { dispatcher.TryAddSlot(DispatcherSlotType.XDealingCommon, out slot, out _); }
-                if (slot == null) continue;
+                if (slot == null) { Console.WriteLine($"[!] slot null for {si.StockLongName}"); continue; }
 
                 var rec = new DispatcherSlotEventsReceiver(slot);
                 rec.Log += m => Console.WriteLine(m);
@@ -91,8 +119,10 @@ namespace PbSdkConsole
                 slot.Password = Password;
                 Console.WriteLine($"[connect] {si.StockLongName}");
                 await slot.ConnectAsync(CancellationToken.None);
+                Console.WriteLine($"[connect] {si.StockLongName} -> IsConnected={slot.IsConnected}");
             }
 
+            _ = Task.Run(StateLoop);
             Console.WriteLine("[6/6] waiting. Press any key to stop.");
             Console.ReadKey(true);
             Console.WriteLine("stopping...");
@@ -121,6 +151,7 @@ namespace PbSdkConsole
                 lr.Log += m => Console.WriteLine(m);
                 if (ld.isnew)
                     sender.Slot.InvokeLayerEndAsync(sender, layer, CancellationToken.None).GetAwaiter().GetResult();
+                Layers[layer.ContractInfo.Symbol] = layer;
                 Console.WriteLine($"  [+] subscribed {used}");
             }
         }
