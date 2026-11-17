@@ -1,118 +1,105 @@
 """
-Приблуда на python — загрузка истории сделок (alltrades) с API Алор
-за указанный день. Сохраняет data/<TICKER>_YYYY-MM-DD.json (список
-сделок с полями id/symbol/qty/price/time/timestamp(мс)/side) — формат,
-который читают research/compare_sides.py и research/replay_alor.py.
-
-Использование:
-    python tools/alor_download_day.py 2026-09-03              # все активные тикеры из ticker_settings.json
-    python tools/alor_download_day.py 2026-09-03 T OZON X5    # только указанные
-
-Идемпотентно: существующий файл пропускается. Токен: ALOR_REFRESH_TOKEN из .env.
+tools/alor_download_day.py — скачивание истории сделок за день из Алор API.
+Исправлено (2026-11-17): динамическое определение instrumentGroup (TQBR/RFUD/CETS)
+для предотвращения 404 ошибок на фьючерсах и валюте.
 """
-import json
 import sys
+import json
 import time
-from datetime import datetime, timezone
+import requests
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 BASE = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(BASE / "tools"))
-sys.path.insert(0, str(BASE))
+DATA_DIR = BASE / "data"
+MSK = ZoneInfo("Europe/Moscow")
 
-from alor_history_loader import (REFRESH_TOKEN, AlorTokenManager,
-                                 day_range_unix, get_alltrades_history_page)
-from core.ticker_settings import load_settings
+# Маппинг исключений или эвристика для определения площадки
+def get_instrument_group(symbol: str) -> str:
+    s = symbol.upper()
+    # Фьючерсы
+    if s in ("CNYRUBF", "SRU6SRZ6", "SPZ6", "SiU6") or s.startswith("CNY-") or s.endswith("F"):
+        return "RFUD"
+    # Валюта
+    if "TOM" in s or "TOD" in s or s in ("CNYRUB_TOM", "CNY000000TOD"):
+        return "CETS"
+    # Акции по умолчанию
+    return "TQBR"
 
+def load_active_tickers():
+    settings_path = BASE / "ticker_settings.json"
+    if not settings_path.exists():
+        return []
+    with open(settings_path, encoding="utf-8-sig") as f:
+        data = json.load(f)
+    return [sym for sym, cfg in data.items() if cfg.get("active", True)]
 
-class Progress:
-    """Прогресс-бар по числу сделок. ASCII, % / скорость / ETA."""
-
-    def __init__(self, total, label):
-        self.total = max(int(total), 1)
-        self.label = label
-        self.done = 0
-        self.t0 = time.time()
-        self.last = 0.0
-
-    def update(self, n):
-        self.done += n
-        now = time.time()
-        if now - self.last < 0.25 and self.done < self.total:
-            return
-        self.last = now
-        pct = min(self.done * 100 // self.total, 100)
-        dt = max(now - self.t0, 1e-9)
-        speed = self.done / dt
-        eta = (self.total - self.done) / max(speed, 1.0)
-        bar = "#" * (pct // 5) + "." * (20 - pct // 5)
-        print(f"\r[alor] {self.label} [{bar}] {pct:3d}% | "
-              f"{self.done}/{self.total} сделок | {speed:.0f}/s | ETA {eta:.0f}s",
-              end="", flush=True)
-
-    def close(self):
-        print()
-
-
-def download_symbol(tm, symbol, date_from, date_to):
-    """Все сделки тикера за день с прогресс-баром по пагинации."""
-    trades = []
-    offset = 0
-    p = None
-    while True:
-        payload = get_alltrades_history_page(tm, symbol, date_from, date_to, offset=offset)
-        total = payload.get("total", 0)
-        if p is None:
-            p = Progress(total, symbol)
-        page = payload.get("list", [])
-        if not page:
-            break
-        trades.extend(page)
-        offset += len(page)
-        p.update(len(page))
-        if offset >= total:
-            break
-    p.close()
-    return trades
-
-
-def main():
-    args = sys.argv[1:]
-    if not args:
-        print(__doc__)
-        sys.exit(1)
-    date_str = args[0]
-    tickers = args[1:]
-    if not tickers:
-        settings = load_settings()
-        tickers = [t for t, ov in settings.items() if ov.get("active", True)]
-
-    if not REFRESH_TOKEN:
-        print("Ошибка: не найден ALOR_REFRESH_TOKEN в .env")
-        sys.exit(1)
-
-    day = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
-    date_from, date_to = day_range_unix(day)
-    tm = AlorTokenManager(REFRESH_TOKEN)
-
-    print(f"[alor] дата {date_str}, тикеров: {len(tickers)}")
+def download_day(date_str: str):
+    print(f"[alor] дата {date_str}, определяем площадки...")
+    tickers = load_active_tickers()
+    print(f"[alor] тикеров для скачивания: {len(tickers)}")
+    
+    # Парсим дату для timestamp
+    dt = datetime.strptime(date_str, "%Y-%m-%d")
+    ts_from = int(datetime(dt.year, dt.month, dt.day, 0, 0, 0, tzinfo=MSK).timestamp())
+    ts_to = int(datetime(dt.year, dt.month, dt.day, 23, 59, 59, tzinfo=MSK).timestamp())
+    
     for i, sym in enumerate(tickers, 1):
-        out = BASE / "data" / f"{sym}_{date_str}.json"
-        if out.exists():
-            print(f"[{i}/{len(tickers)}] {sym}: уже есть {out.name}, пропускаю")
+        board = get_instrument_group(sym)
+        out_file = DATA_DIR / f"{sym}_{date_str}.json"
+        
+        print(f"[{i}/{len(tickers)}] {sym} ({board}): ", end="", flush=True)
+        
+        if out_file.exists() and out_file.stat().st_size > 100:
+            print("уже есть, пропускаю")
             continue
-        print(f"[{i}/{len(tickers)}] {sym}: качаю...", flush=True)
+            
+        print("качаю...", end="", flush=True)
+        
+        all_trades = []
+        offset = 0
+        limit = 50000
+        
         try:
-            trades = download_symbol(tm, sym, date_from, date_to)
+            while True:
+                url = (f"https://api.alor.ru/md/v2/Securities/MOEX/{sym}/alltrades/history"
+                       f"?instrumentGroup={board}&from={ts_from}&to={ts_to}&limit={limit}&offset={offset}")
+                resp = requests.get(url, timeout=15)
+                if resp.status_code == 404:
+                    print(f"\n  ошибка: 404 (возможно, делистинг или неверная площадка {board})")
+                    break
+                resp.raise_for_status()
+                data = resp.json()
+                
+                if not data:
+                    break
+                    
+                all_trades.extend(data)
+                
+                if len(data) < limit:
+                    break
+                offset += limit
+                time.sleep(0.1) # защита от rate limit
+                
+            if all_trades:
+                # Сортируем по времени для хронологического порядка
+                all_trades.sort(key=lambda x: x.get("timestamp", 0))
+                with open(out_file, "w", encoding="utf-8") as f:
+                    json.dump(all_trades, f, ensure_ascii=False)
+                print(f"\n  сохранено {len(all_trades)} сделок -> {out_file.name}")
+            else:
+                print(f"\n  сохранено 0 сделок -> {out_file.name}")
+                
         except Exception as e:
-            print(f"  ошибка: {e}")
-            continue
-        with open(out, "w", encoding="utf-8") as f:
-            json.dump(trades, f, ensure_ascii=False)
-        print(f"  сохранено {len(trades)} сделок -> {out.name}")
-        time.sleep(0.2)
-    print("[alor] Готово.")
-
+            print(f"\n  ошибка: {e}")
 
 if __name__ == "__main__":
-    main()
+    if len(sys.argv) > 1:
+        target_date = sys.argv[1]
+    else:
+        target_date = (datetime.now(MSK).date()).strftime("%Y-%m-%d")
+        
+    DATA_DIR.mkdir(exist_ok=True)
+    download_day(target_date)
+    print("[alor] Готово.")
