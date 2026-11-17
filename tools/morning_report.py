@@ -8,7 +8,7 @@ tools/morning_report.py — утренний ритуал: один запуск
   C. replay_alor.py (истинные стороны) — с прогресс-баром.
   D. day_audit.py (матчинг v7 + классы FN + аудит FP) — с прогресс-баром,
      полный вывод кладётся в отчёт.
-  E. Сводка «что чинить» на основе цифр.
+  E. Сводка «что чинить» на основе цифр (парсит реальный формат day_audit).
 
 Запуск: python tools/morning_report.py [YYYY-MM-DD]   # по умолчанию вчера
 Отчёт:  output/morning_report_YYYY-MM-DD.txt
@@ -17,6 +17,7 @@ tools/morning_report.py — утренний ритуал: один запуск
 """
 import sys
 import json
+import re
 import time
 import subprocess
 from collections import defaultdict
@@ -75,10 +76,9 @@ class Bar:
 
 
 class Spinner:
-    """Для subprocess без известного объёма: % времени + секунды + ETA по оценке."""
-    def __init__(self, label, est_sec=60.0):
+    """Для subprocess без известного объёма: крутится пока идёт процесс."""
+    def __init__(self, label):
         self.label = label
-        self.est = max(est_sec, 1.0)
         self.t0 = time.time()
         self.chars = "|/-\\"
         self.i = 0
@@ -92,11 +92,7 @@ class Spinner:
         self.last = now
         self.i = (self.i + 1) % 4
         el = now - self.t0
-        pct = min(99.0, 100.0 * el / self.est)
-        filled = int(pct // 5)
-        eta = max(0.0, self.est - el)
-        line = (f"[{self.label}] [{'#' * filled}{'.' * (20 - filled)}] "
-                f"{pct:3.0f}% | {el:.0f}с | ETA {eta:.0f}с {self.chars[self.i]}")
+        line = f"[{self.label}] {self.chars[self.i]} {el:.0f}с"
         if self.tty:
             sys.stdout.write("\r" + line)
             sys.stdout.flush()
@@ -104,7 +100,7 @@ class Spinner:
     def done(self):
         el = time.time() - self.t0
         if self.tty:
-            sys.stdout.write(f"\r[{self.label}] [{'#' * 20}] 100% | {el:.0f}с | ETA 0с" + " " * 8 + "\n")
+            sys.stdout.write(f"\r[{self.label}] ✅ готово за {el:.0f}с" + " " * 20 + "\n")
             sys.stdout.flush()
         else:
             print(f"[{self.label}] готово за {el:.0f}с", flush=True)
@@ -145,9 +141,9 @@ def bridge_coverage(date_str):
     return seen
 
 
-def run_phase(label, cmd, est_sec):
+def run_phase(label, cmd):
     """C/D: запуск subprocess с прогресс-баром; возвращает (rc, stdout)."""
-    sp = Spinner(label, est_sec)
+    sp = Spinner(label)
     proc = subprocess.Popen(cmd, cwd=str(BASE), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace")
@@ -163,6 +159,50 @@ def run_phase(label, cmd, est_sec):
         buf.append(rest)
     sp.done()
     return proc.returncode, "".join(buf)
+
+
+def parse_day_audit_summary(audit_out):
+    """E: парсит реальный формат day_audit.py и вытаскивает метрики + классы FN."""
+    summary = []
+    if not audit_out.strip():
+        summary.append("нет вывода day_audit — метрики недоступны (нет эталона).")
+        return summary
+    
+    # Ищем строку метрик: TP=17 (overlap=14, param-only=3)  FP=215  FN=13  re-detect=9
+    m_metrics = re.search(r'TP=(\d+)\s+\(overlap=(\d+),\s*param-only=(\d+)\)\s+FP=(\d+)\s+FN=(\d+)\s+re-detect=(\d+)', audit_out)
+    if m_metrics:
+        tp, overlap, param_only, fp, fn, redetect = m_metrics.groups()
+        summary.append(f"TP={tp} (overlap={overlap}, param-only={param_only})  FP={fp}  FN={fn}  re-detect={redetect}")
+    
+    # Ищем Precision и Recall
+    m_prec = re.search(r'Precision\s+([\d.]+)%\s+\((\d+)/(\d+)\)', audit_out)
+    if m_prec:
+        summary.append(f"Precision {m_prec.group(1)}% ({m_prec.group(2)}/{m_prec.group(3)})")
+    
+    m_rec = re.search(r'Recall\s+([\d.]+)%\s+\((\d+)/(\d+)\)', audit_out)
+    if m_rec:
+        summary.append(f"Recall {m_rec.group(1)}% ({m_rec.group(2)}/{m_rec.group(3)})")
+    
+    # Ищем классы FN
+    for cls in ("GRID-IN-TAPE", "BURST-AGG", "IRREGULAR", "THIN", "NO-TRADES"):
+        m_cls = re.search(rf'{cls}\s*:\s*(\d+)', audit_out)
+        if m_cls:
+            summary.append(f"  {cls}: {m_cls.group(1)}")
+    
+    # Ищем аудит FP
+    m_fp = re.search(r'АУДИТ FP: всего (\d+)\s+\(короткие <=120s:\s*(\d+),\s*длинные >120s:\s*(\d+)\)', audit_out)
+    if m_fp:
+        summary.append(f"FP всего={m_fp.group(1)} (короткие={m_fp.group(2)}, длинные={m_fp.group(3)})")
+    
+    # Приоритет
+    if m_metrics and int(m_metrics.group(5)) > 0:  # FN > 0
+        grid_line = re.search(r'GRID-IN-TAPE\s*:\s*(\d+)', audit_out)
+        if grid_line and int(grid_line.group(1)) > 0:
+            summary.append(">>> ПРИОРИТЕТ: GRID-IN-TAPE > 0 = баг детектора (сетка в ленте есть, не поймали).")
+        else:
+            summary.append(">>> FN > 0, но GRID-IN-TAPE = 0 — роботы не видны в ленте (шум/агрегация).")
+    
+    return summary
 
 
 def main():
@@ -214,8 +254,7 @@ def main():
     if tape_alor.exists():
         print("\n[1/2] replay_alor.py (истинные стороны)...")
         rc, replay_out = run_phase("replay",
-                                   [sys.executable, "research/replay_alor.py", date_str],
-                                   est_sec=90)
+                                   [sys.executable, "research/replay_alor.py", date_str])
         if rc != 0:
             print(f"[!] replay_alor rc={rc} — см. отчёт")
     else:
@@ -226,15 +265,14 @@ def main():
     if aniscan.exists():
         print("\n[2/2] day_audit.py (матчинг v7 + классы FN + FP)...")
         rc, audit_out = run_phase("audit",
-                                  [sys.executable, "research/day_audit.py", date_str],
-                                  est_sec=120)
+                                  [sys.executable, "research/day_audit.py", date_str])
         if rc != 0:
             print(f"[!] day_audit rc={rc} — см. отчёт")
     else:
         print("\n[2/2] day_audit ПРОПУЩЕН (нет эталона Aniscan)")
 
     # ---------- E. сводка «что чинить» ----------
-    summary = build_summary(audit_out, cov_lines)
+    summary = parse_day_audit_summary(audit_out)
 
     # ---------- сборка отчёта ----------
     OUT.mkdir(exist_ok=True)
@@ -271,34 +309,6 @@ def main():
         print("  " + s)
     print("=" * 78)
     print(f"[OK] отчёт: {rep}")
-
-
-def build_summary(audit_out, cov_lines):
-    """E: превращает цифры day_audit в приоритеты правок. Не выдумывает —
-    парсит только то, что реально есть в выводе, остальное помечает как 'нужен разбор'."""
-    out = []
-    if cov_lines:
-        out.append(cov_lines[0])
-    if not audit_out.strip():
-        out.append("нет вывода day_audit — метрики недоступны (нет эталона).")
-        return out
-    low = audit_out.lower()
-    # ищем ключевые классы FN по подстрокам (формат day_audit v6)
-    def grab(key):
-        for ln in audit_out.splitlines():
-            if key.lower() in ln.lower():
-                return ln.strip()
-        return None
-    for key in ("GRID-IN-TAPE", "BURST-AGG", "IRREGULAR", "THIN", "NO-TRADES"):
-        ln = grab(key)
-        if ln:
-            out.append(ln)
-    # приоритет
-    g = grab("GRID-IN-TAPE")
-    if g and any(c.isdigit() for c in g):
-        out.append(">>> ПРИОРИТЕТ: GRID-IN-TAPE > 0 = баг детектора (сетка в ленте есть, не поймали).")
-    out.append(">>> FP/шум и длинные серии — смотреть блок FP в полном выводе ниже.")
-    return out
 
 
 if __name__ == "__main__":
