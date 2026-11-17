@@ -2,12 +2,11 @@
 tools/morning_report.py — утренний ритуал: один запуск, один отчёт.
 
 Не дублирует day_audit/replay_alor, а ОРКЕСТРИРУЕТ их и добавляет своё:
-  A. Инвентарь входов (лента моста / Алор / Aniscan / история) + что докачать.
+  A. Инвентарь входов (лента моста / Алор / Aniscan) + что докачать.
   B. ПОКРЫТИЕ МОСТОМ: по каждому активному тикеру — есть ли его сделки в
-     ленте моста за день (ответ «видит ли приблуда тикеры этого стакана»).
+     ленте моста за день. Для дат до появления моста — честно пишет «н/д».
   C. replay_alor.py (истинные стороны) — с прогресс-баром.
-  D. day_audit.py (матчинг v7 + классы FN + аудит FP) — с прогресс-баром,
-     полный вывод кладётся в отчёт.
+  D. day_audit.py (матчинг v7 + классы FN + аудит FP) — с прогресс-баром.
   E. Сводка «что чинить» на основе цифр (парсит реальный формат day_audit).
 
 Запуск: python tools/morning_report.py [YYYY-MM-DD]   # по умолчанию вчера
@@ -29,6 +28,10 @@ BASE = Path(__file__).resolve().parent.parent
 DATA = BASE / "data"
 OUT = BASE / "output"
 MSK = ZoneInfo("Europe/Moscow")
+
+# Первая дата, когда мост PbSdk реально писал ленту (см. заметки 2026-11-15).
+# Раньше этой даты отсутствие pbsdk_trades — НОРМА, а не поломка.
+BRIDGE_FIRST_DAY = "2026-11-15"
 
 
 class Bar:
@@ -100,7 +103,7 @@ class Spinner:
     def done(self):
         el = time.time() - self.t0
         if self.tty:
-            sys.stdout.write(f"\r[{self.label}] ✅ готово за {el:.0f}с" + " " * 20 + "\n")
+            sys.stdout.write(f"\r[{self.label}] готово за {el:.0f}с" + " " * 20 + "\n")
             sys.stdout.flush()
         else:
             print(f"[{self.label}] готово за {el:.0f}с", flush=True)
@@ -120,10 +123,13 @@ def load_active_tickers():
 
 
 def bridge_coverage(date_str):
-    """B: покрытие мостом — есть ли сделки по каждому активному тикеру в ленте моста."""
+    """B: покрытие мостом. Возвращает (seen_dict, status_text).
+    status_text различает: нет файла до моста / нет файла сегодня / есть."""
     tape = DATA / f"pbsdk_trades_{date_str}.jsonl"
     if not tape.exists():
-        return None
+        if date_str < BRIDGE_FIRST_DAY:
+            return None, f"НЕТ (мост ещё не работал в {date_str} — это норма)"
+        return None, "НЕТ (мост не писал сегодня — проверить окно PbSdkConsole)"
     seen = defaultdict(int)
     size = tape.stat().st_size
     bar = Bar(size, "мост")
@@ -138,7 +144,7 @@ def bridge_coverage(date_str):
             if sym:
                 seen[sym] += 1
     bar.done()
-    return seen
+    return seen, "есть"
 
 
 def run_phase(label, cmd):
@@ -167,41 +173,40 @@ def parse_day_audit_summary(audit_out):
     if not audit_out.strip():
         summary.append("нет вывода day_audit — метрики недоступны (нет эталона).")
         return summary
-    
-    # Ищем строку метрик: TP=17 (overlap=14, param-only=3)  FP=215  FN=13  re-detect=9
-    m_metrics = re.search(r'TP=(\d+)\s+\(overlap=(\d+),\s*param-only=(\d+)\)\s+FP=(\d+)\s+FN=(\d+)\s+re-detect=(\d+)', audit_out)
+
+    m_metrics = re.search(
+        r'TP=(\d+)\s+\(overlap=(\d+),\s*param-only=(\d+)\)\s+FP=(\d+)\s+FN=(\d+)\s+re-detect=(\d+)',
+        audit_out)
     if m_metrics:
         tp, overlap, param_only, fp, fn, redetect = m_metrics.groups()
         summary.append(f"TP={tp} (overlap={overlap}, param-only={param_only})  FP={fp}  FN={fn}  re-detect={redetect}")
-    
-    # Ищем Precision и Recall
+
     m_prec = re.search(r'Precision\s+([\d.]+)%\s+\((\d+)/(\d+)\)', audit_out)
     if m_prec:
         summary.append(f"Precision {m_prec.group(1)}% ({m_prec.group(2)}/{m_prec.group(3)})")
-    
+
     m_rec = re.search(r'Recall\s+([\d.]+)%\s+\((\d+)/(\d+)\)', audit_out)
     if m_rec:
         summary.append(f"Recall {m_rec.group(1)}% ({m_rec.group(2)}/{m_rec.group(3)})")
-    
-    # Ищем классы FN
+
     for cls in ("GRID-IN-TAPE", "BURST-AGG", "IRREGULAR", "THIN", "NO-TRADES"):
         m_cls = re.search(rf'{cls}\s*:\s*(\d+)', audit_out)
         if m_cls:
             summary.append(f"  {cls}: {m_cls.group(1)}")
-    
-    # Ищем аудит FP
-    m_fp = re.search(r'АУДИТ FP: всего (\d+)\s+\(короткие <=120s:\s*(\d+),\s*длинные >120s:\s*(\d+)\)', audit_out)
+
+    m_fp = re.search(
+        r'АУДИТ FP: всего (\d+)\s+\(короткие <=120s:\s*(\d+),\s*длинные >120s:\s*(\d+)\)',
+        audit_out)
     if m_fp:
         summary.append(f"FP всего={m_fp.group(1)} (короткие={m_fp.group(2)}, длинные={m_fp.group(3)})")
-    
-    # Приоритет
-    if m_metrics and int(m_metrics.group(5)) > 0:  # FN > 0
+
+    if m_metrics and int(m_metrics.group(5)) > 0:
         grid_line = re.search(r'GRID-IN-TAPE\s*:\s*(\d+)', audit_out)
         if grid_line and int(grid_line.group(1)) > 0:
             summary.append(">>> ПРИОРИТЕТ: GRID-IN-TAPE > 0 = баг детектора (сетка в ленте есть, не поймали).")
         else:
             summary.append(">>> FN > 0, но GRID-IN-TAPE = 0 — роботы не видны в ленте (шум/агрегация).")
-    
+
     return summary
 
 
@@ -219,8 +224,11 @@ def main():
     aniscan = DATA / f"aniscan_robots_{date_str}.jsonl"
     active = load_active_tickers()
 
+    # статус моста считаем один раз (он же нужен и для покрытия)
+    cov, bridge_status = bridge_coverage(date_str)
+
     print(f"\n[входы] активных тикеров в settings: {len(active)}")
-    print(f"[входы] лента моста   : {'есть' if tape_bridge.exists() else 'НЕТ'}")
+    print(f"[входы] лента моста   : {bridge_status}")
     print(f"[входы] лента Алор    : {'есть' if tape_alor.exists() else 'НЕТ'}")
     print(f"[входы] эталон Aniscan: {'есть' if aniscan.exists() else 'НЕТ'}")
 
@@ -237,9 +245,8 @@ def main():
             print("    " + m)
 
     # ---------- B. покрытие мостом ----------
-    cov = bridge_coverage(date_str) if tape_bridge.exists() else None
     cov_lines = []
-    if cov:
+    if cov is not None:
         no_data = sorted([s for s in active if s not in cov])
         cov_lines.append(f"покрытие мостом: {len(cov)}/{len(active)} тикеров дали сделки")
         if no_data:
@@ -248,6 +255,10 @@ def main():
         print("\n[покрытие] " + cov_lines[0])
         if len(cov_lines) > 1:
             print("[покрытие] " + cov_lines[1])
+    elif date_str < BRIDGE_FIRST_DAY:
+        print("\n[покрытие] мост в эту дату не работал — покрытие не считаем (норма)")
+    else:
+        print("\n[покрытие] мост молчит сегодня — проверь окно PbSdkConsole")
 
     # ---------- C. replay_alor ----------
     replay_out = ""
@@ -283,7 +294,7 @@ def main():
     L.append("=" * 78)
     L.append("\n--- ВХОДЫ ---")
     L.append(f"активных тикеров: {len(active)}")
-    L.append(f"лента моста: {'есть' if tape_bridge.exists() else 'НЕТ'} | "
+    L.append(f"лента моста: {bridge_status} | "
              f"лента Алор: {'есть' if tape_alor.exists() else 'НЕТ'} | "
              f"Aniscan: {'есть' if aniscan.exists() else 'НЕТ'}")
     if missing:

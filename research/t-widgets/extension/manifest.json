@@ -1,0 +1,19 @@
+{
+  "manifest_version": 3,
+  "name": "Pribluda TW Intercept",
+  "version": "1.1",
+  "description": "Перехват OnRobots2 (T-Widgets) для приблуды",
+  "content_scripts": [
+    {
+      "matches": [
+        "https://www.tbank.ru/terminal/*",
+        "https://www.tbank.ru/terminal-beta/*",
+        "https://www.tbank-online.com/*",
+        "https://invest.tbank.ru/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ]
+}
