@@ -24,6 +24,12 @@ namespace PbSdkConsole
         const string HttpPrefix = "http://127.0.0.1:8787/";
         const bool AllowLive = true;
         const bool TestMode = true;
+        const bool SpoofEnabled = false; // фоновые мигалки ОТКЛЮЧЕНЫ (спам)
+        const string ProjectRoot = @"C:\Users\Public\MI_CODES\Qwen_coder";
+        const int ConnectRetries = 3;
+        const int ConnectRetryDelayMs = 5000;
+
+        // Торговый whitelist (не меняется расширением подписки)
         static readonly Dictionary<string, HashSet<decimal>> TestWhitelist = new()
         {
             { "MTLR",      new HashSet<decimal>{ 1, 99, 100, 200, 300, 500 } },
@@ -31,22 +37,10 @@ namespace PbSdkConsole
             { "CNYRUBF",   new HashSet<decimal>{ 1, 2, 5 } },
             { "CNY-12.26", new HashSet<decimal>{ 1, 2, 5 } },
         };
-        static readonly string[][] TickerAliases = {
-            new[]{ "TQBR.SBER" },
-            new[]{ "TQBR.MTLR" },
-            new[]{ "TQBR.MTLRP" },
-            new[]{ "FUT.CNYRUBF", "RFUD.CNYRUBF", "CNYRUBF" },
-            new[]{ "FUT.CNY-12.26", "CNY-12.26", "FUT.CRZ6", "CRZ6" },
-            new[]{ "CETS.CNYRUB_TOM", "CNYRUB_TOM", "CETS.CNY000000TOD", "CNY000000TOD" },
-        };
 
         static readonly Dictionary<string, double> SpoofThresholds = new()
         {
-            { "MTLR",      2000 },
-            { "MTLRP",     500  },
-            { "CNYRUBF",   2000 },
-            { "CNY-12.26", 200  },
-            { "SBER",      5000 },
+            { "MTLR", 2000 }, { "MTLRP", 500 }, { "CNYRUBF", 2000 }, { "CNY-12.26", 200 },
         };
         const double SpoofMinHoldSec = 20;
         const double SpoofBotPeriodSec = 90;
@@ -65,7 +59,11 @@ namespace PbSdkConsole
         static StreamWriter? SpoofWriter;
         static string _lastStateJson = "{}";
         static string _lastSpoofJson = "{\"levels\":[],\"updated_ms\":0}";
-        const string StatePath = @"C:\Users\Public\MI_CODES\Qwen_coder\data\bridge_state.json";
+        const string StatePath = ProjectRoot + @"\data\bridge_state.json";
+
+        static List<string> TapeSymbols = new List<string>();
+        static readonly HashSet<string> Subscribed = new HashSet<string>();
+        static readonly object SubLock = new object();
 
         sealed class TrackedLevel
         {
@@ -82,6 +80,33 @@ namespace PbSdkConsole
         }
         static readonly Dictionary<string, TrackedLevel> Tracked = new Dictionary<string, TrackedLevel>();
         static readonly object TrackedLock = new object();
+
+        static List<string> LoadTapeSymbols()
+        {
+            var list = new List<string>();
+            var path = Path.Combine(ProjectRoot, "ticker_settings.json");
+            try
+            {
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    bool active = true;
+                    if (prop.Value.TryGetProperty("active", out var a) && a.ValueKind == JsonValueKind.False)
+                        active = false;
+                    if (active) list.Add(prop.Name);
+                }
+                Console.WriteLine($"[OK] ticker_settings: {list.Count} активных тикеров");
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine($"[!] ticker_settings.json не прочитан: {e.Message}");
+                Console.WriteLine("[!] подписка не выполнена — проверь файл");
+            }
+            return list;
+        }
+
+        static string[] AliasesFor(string sym)
+            => new[] { "TQBR." + sym, "FUT." + sym, "CETS." + sym, sym };
 
         static StreamWriter OpenAppend(string path)
         {
@@ -154,14 +179,13 @@ namespace PbSdkConsole
 
         static async Task SpoofMonitorLoop()
         {
-            Console.WriteLine($"[OK] spoof monitor: thr={SpoofThresholds.Count} tools, min-hold {SpoofMinHoldSec}s");
+            if (!SpoofEnabled) { Console.WriteLine("[OK] spoof monitor: ОТКЛЮЧЕН"); return; }
             while (true)
             {
                 try
                 {
                     long nowMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
                     var activeNow = new HashSet<string>();
-
                     foreach (var kv in Layers)
                     {
                         string sym = kv.Key;
@@ -169,71 +193,54 @@ namespace PbSdkConsole
                         if (!SpoofThresholds.TryGetValue(sym, out double thr)) continue;
                         var stock = layer.LastStock;
                         if (stock == null) continue;
-                        double bb = 0, ba = 0;
-                        try { bb = stock.BestBid; ba = stock.BestAsk; } catch { continue; }
-
+                        try { if (stock.BestBid == 0 && stock.BestAsk == 0) continue; } catch { continue; }
                         var bids = new List<(double p, double a)>();
                         var asks = new List<(double p, double a)>();
                         try
                         {
                             lock (stock)
                             {
+                                if (stock.IsDisposed) continue;
                                 int bidsLen = stock.Bids.Length;
                                 int asksLen = stock.Asks.Length;
-                                
-                                int n = 0;
-                                for (int i = 0; i < bidsLen; i++)
+                                for (int i = SpoofSkipTopLevels; i < bidsLen; i++)
                                 {
-                                    n++;
-                                    if (n <= SpoofSkipTopLevels) continue;
                                     var row = stock.Bids[i];
                                     bids.Add((Convert.ToDouble(row.Price), Convert.ToDouble(row.Amount)));
                                 }
-                                n = 0;
-                                for (int i = 0; i < asksLen; i++)
+                                for (int i = SpoofSkipTopLevels; i < asksLen; i++)
                                 {
-                                    n++;
-                                    if (n <= SpoofSkipTopLevels) continue;
                                     var row = stock.Asks[i];
                                     asks.Add((Convert.ToDouble(row.Price), Convert.ToDouble(row.Amount)));
                                 }
                             }
                         }
                         catch { continue; }
-
-                        ProcessSide(sym, "bids", bids, thr, bb, nowMs, activeNow);
-                        ProcessSide(sym, "asks", asks, thr, ba, nowMs, activeNow);
+                        ProcessSide(sym, "bids", bids, thr, nowMs, activeNow);
+                        ProcessSide(sym, "asks", asks, thr, nowMs, activeNow);
                     }
-
                     lock (TrackedLock)
                     {
-                        var keys = Tracked.Keys.ToList();
-                        foreach (var k in keys)
+                        foreach (var k in Tracked.Keys.ToList())
                         {
                             if (activeNow.Contains(k)) continue;
                             var lvl = Tracked[k];
                             double age = (nowMs - lvl.LastSeenMs) / 1000.0;
                             if (age < SpoofStaleSec) continue;
                             if (lvl.LastAlertKind != "gone" && (nowMs - lvl.LastAlertMs) / 1000.0 > SpoofAlertCooldownSec)
-                            {
                                 EmitAlert(lvl, "gone", nowMs, lvl.MaxAmount);
-                            }
                             Tracked.Remove(k);
                         }
                     }
-
                     UpdateSpoofJson(nowMs);
                 }
-                catch (Exception e)
-                {
-                    Console.WriteLine($"[spoof] error: {e.Message}");
-                }
+                catch (Exception e) { Console.WriteLine($"[spoof] error: {e.Message}"); }
                 await Task.Delay(2000);
             }
         }
 
         static void ProcessSide(string sym, string side, List<(double p, double a)> rows, double thr,
-                                double bestPrice, long nowMs, HashSet<string> activeNow)
+                                long nowMs, HashSet<string> activeNow)
         {
             foreach (var (price, amt) in rows)
             {
@@ -262,19 +269,13 @@ namespace PbSdkConsole
                         if (amt > lvl.MaxAmount) lvl.MaxAmount = amt;
                     }
                 }
-
                 double hold = (nowMs - lvl.FirstSeenMs) / 1000.0;
                 double sinceAlert = (nowMs - lvl.LastAlertMs) / 1000.0;
-
                 if (isNew && hold >= SpoofMinHoldSec && sinceAlert > SpoofAlertCooldownSec)
-                {
                     EmitAlert(lvl, "wall", nowMs, amt);
-                }
                 else if (!isNew && lvl.LastAlertKind == "wall" && lvl.Cycles >= SpoofBotMinCycles
                          && hold >= SpoofBotPeriodSec && sinceAlert > SpoofAlertCooldownSec)
-                {
                     EmitAlert(lvl, "bot", nowMs, amt);
-                }
             }
         }
 
@@ -283,27 +284,14 @@ namespace PbSdkConsole
             lvl.LastAlertMs = nowMs;
             lvl.LastAlertKind = kind;
             lvl.Cycles++;
-            double hold = (nowMs - lvl.FirstSeenMs) / 1000.0;
-            string holdStr = hold >= 60 ? $"{(int)hold / 60}м{(int)hold % 60}с" : $"{(int)hold}с";
-            string ruKind = kind switch
-            {
-                "wall" => lvl.Side == "bids" ? "ПОДДЕРЖКА" : "СОПРОТИВЛЕНИЕ",
-                "bot" => "РОБОТ",
-                "gone" => "УШЛА",
-                _ => kind
-            };
-            string emoji = lvl.Side == "bids" ? "🟢⬆️" : "🔴⬇️";
-            if (kind == "gone") emoji = "💨";
             var rec = new
             {
-                ts = nowMs,
-                sym = lvl.Sym, side = lvl.Side, price = lvl.Price,
-                amount, kind, ru_kind = ruKind, hold_s = (int)hold,
-                cycles = lvl.Cycles, emoji
+                ts = nowMs, sym = lvl.Sym, side = lvl.Side, price = lvl.Price,
+                amount, kind, hold_s = (int)((nowMs - lvl.FirstSeenMs) / 1000.0), cycles = lvl.Cycles
             };
             var line = JsonSerializer.Serialize(rec);
             lock (CmdLock) { SpoofWriter?.WriteLine(line); }
-            Console.WriteLine($"[SPOOF {kind.ToUpper()}] {emoji} {lvl.Sym} {lvl.Side} {lvl.Price} x{amount:F0} ({holdStr}, cycles={lvl.Cycles})");
+            Console.WriteLine($"[SPOOF {kind.ToUpper()}] {lvl.Sym} {lvl.Side} {lvl.Price} x{amount:F0}");
         }
 
         static void UpdateSpoofJson(long nowMs)
@@ -323,8 +311,7 @@ namespace PbSdkConsole
                     });
                 }
             }
-            var json = JsonSerializer.Serialize(new { updated_ms = nowMs, levels = list });
-            _lastSpoofJson = json;
+            _lastSpoofJson = JsonSerializer.Serialize(new { updated_ms = nowMs, levels = list });
         }
 
         static string ProcessOrder(string body)
@@ -376,10 +363,8 @@ namespace PbSdkConsole
                     var recDry = new
                     {
                         ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                        id, symbol, side, qty, type,
-                        price = execPrice,
-                        close_position = closePos,
-                        status = "DRYRUN"
+                        id, symbol, side, qty, type, price = execPrice,
+                        close_position = closePos, status = "DRYRUN"
                     };
                     var lineDry = JsonSerializer.Serialize(recDry);
                     lock (CmdLock) { CommandWriter?.WriteLine(lineDry); }
@@ -392,11 +377,8 @@ namespace PbSdkConsole
                 var recLive = new
                 {
                     ts = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                    id, symbol, side, qty, type,
-                    price = execPrice,
-                    close_position = closePos,
-                    status = "LIVE",
-                    accepted = sent
+                    id, symbol, side, qty, type, price = execPrice,
+                    close_position = closePos, status = "LIVE", accepted = sent
                 };
                 var lineLive = JsonSerializer.Serialize(recLive);
                 lock (CmdLock) { CommandWriter?.WriteLine(lineLive); }
@@ -574,6 +556,9 @@ namespace PbSdkConsole
             _singleInstance = new Mutex(true, "PbSdkBridge_SingleInstance", out bool createdNew);
             if (!createdNew) { Console.WriteLine("[!] Мост уже запущен. Выход."); return; }
 
+            TapeSymbols = LoadTapeSymbols();
+            if (TapeSymbols.Count == 0) { Console.WriteLine("[!] нечего подписывать. Выход."); return; }
+
             Console.WriteLine("[1/6] Init...");
             _sdk = PbSdkFactory.Create();
             Console.WriteLine("[2/6] Auth...");
@@ -585,7 +570,7 @@ namespace PbSdkConsole
 
             Console.WriteLine("[4/6] Log files...");
             var today = DateTime.Now.ToString("yyyy-MM-dd");
-            var dataDir = @"C:\Users\Public\MI_CODES\Qwen_coder\data";
+            var dataDir = Path.Combine(ProjectRoot, "data");
             Directory.CreateDirectory(dataDir);
             var logPath = Path.Combine(dataDir, $"pbsdk_trades_{today}.jsonl");
             var obPath = Path.Combine(dataDir, $"orderbook_{today}.jsonl");
@@ -598,7 +583,6 @@ namespace PbSdkConsole
             Console.WriteLine($"[OK] tape: {logPath}");
             Console.WriteLine($"[OK] orderbook: {obPath}");
             Console.WriteLine($"[OK] commands: {cmdPath}");
-            Console.WriteLine($"[OK] spoof: {spoofPath}");
 
             Console.WriteLine("[5/6] Connect ALL markets...");
             IDispatcher dispatcher = _sdk.PrivodBondarDispatcher;
@@ -627,20 +611,44 @@ namespace PbSdkConsole
 
                 var rec = new DispatcherSlotEventsReceiver(slot);
                 string slotName = si.StockLongName;
-                rec.Log += msg => { Console.WriteLine(msg); TryParseFin(msg, slotName); };
+                // ДИАГНОСТИКА: печатаем все события слота, кроме частых fin-строк
+                rec.Log += msg =>
+                {
+                    TryParseFin(msg, slotName);
+                    if (msg != null && !msg.StartsWith("Slot: Currency:"))
+                        Console.WriteLine($"[{slotName}] {msg}");
+                };
                 rec.CanCreateLayers += OnCanCreateLayers;
                 slot.PublicServerInfo = si;
                 slot.Account = Account;
                 slot.Password = Password;
                 Console.WriteLine($"[connect] {si.StockLongName}");
-                await slot.ConnectAsync(CancellationToken.None);
+                try { await slot.ConnectAsync(CancellationToken.None); }
+                catch (Exception e) { Console.WriteLine($"[connect] {si.StockLongName} исключение: {e.Message}"); }
+
+                for (int attempt = 1; attempt <= ConnectRetries && !slot.IsConnected; attempt++)
+                {
+                    Console.WriteLine($"[connect] {si.StockLongName}: НЕ подключён, пауза {ConnectRetryDelayMs / 1000}с, попытка {attempt}/{ConnectRetries}");
+                    await Task.Delay(ConnectRetryDelayMs);
+                    try { await slot.ConnectAsync(CancellationToken.None); }
+                    catch (Exception e) { Console.WriteLine($"[connect] {si.StockLongName} исключение: {e.Message}"); }
+                }
                 Console.WriteLine($"[connect] {si.StockLongName} -> IsConnected={slot.IsConnected}");
             }
 
             _ = Task.Run(StateLoop);
             _ = Task.Run(HttpLoop);
-            _ = Task.Run(SpoofMonitorLoop);
-            Console.WriteLine("[6/6] waiting. Press any key to stop.");
+            if (SpoofEnabled) _ = Task.Run(SpoofMonitorLoop);
+            else Console.WriteLine("[OK] spoof monitor: ОТКЛЮЧЕН");
+
+            Console.WriteLine("[6/6] жду подписки (30с)...");
+            await Task.Delay(30000);
+            var missing = TapeSymbols.Where(s => !Subscribed.Contains(s)).ToList();
+            Console.WriteLine("======================================================================");
+            Console.WriteLine($" ПОДПИСКА: {Subscribed.Count} из {TapeSymbols.Count} тикеров; слоёв={Layers.Count}");
+            Console.WriteLine($" НЕ НАЙДЕНО ({missing.Count}): {string.Join(", ", missing)}");
+            Console.WriteLine("======================================================================");
+            Console.WriteLine("waiting. Press any key to stop.");
             Console.ReadKey(true);
             Console.WriteLine("stopping...");
             LayerEventsReceiver.TradeWriter?.Close();
@@ -652,27 +660,53 @@ namespace PbSdkConsole
 
         static void OnCanCreateLayers(DispatcherSlotEventsReceiver sender)
         {
-            Console.WriteLine($"[OK] contracts: {sender.Slot.PublicServerInfo?.StockLongName}");
-            foreach (var aliases in TickerAliases)
+            string slotName = sender.Slot.PublicServerInfo?.StockLongName ?? "?";
+            Console.WriteLine($"[contracts] {slotName}: справочник получен, ищу тикеры");
+            int ok = 0;
+            foreach (var sym in TapeSymbols)
             {
+                bool reserved;
+                lock (SubLock) { reserved = Subscribed.Add(sym); }
+                if (!reserved) continue;
+
                 IContractInfo info = null;
                 string used = null;
-                foreach (var a in aliases)
+                foreach (var a in AliasesFor(sym))
                 {
-                    info = sender.Slot.ContractsTable.SearchContractByID(a);
+                    try { info = sender.Slot.ContractsTable.SearchContractByID(a); }
+                    catch { info = null; }
                     if (info != null) { used = a; break; }
                 }
-                if (info == null) { Console.WriteLine($"  [!] not found {aliases[0]}"); continue; }
-                var ld = sender.Slot.InvokeLayerAsync(info, CancellationToken.None).GetAwaiter().GetResult();
-                ILayer layer = ld.layer;
-                if (layer == null) continue;
-                var lr = new LayerEventsReceiver(layer);
-                lr.Log += m => Console.WriteLine(m);
-                if (ld.isnew)
-                    sender.Slot.InvokeLayerEndAsync(sender, layer, CancellationToken.None).GetAwaiter().GetResult();
-                Layers[layer.ContractInfo.Symbol] = layer;
-                Console.WriteLine($"  [+] subscribed {used}");
+                if (info == null)
+                {
+                    lock (SubLock) { Subscribed.Remove(sym); }
+                    continue;
+                }
+
+                try
+                {
+                    var ld = sender.Slot.InvokeLayerAsync(info, CancellationToken.None).GetAwaiter().GetResult();
+                    ILayer layer = ld.layer;
+                    if (layer == null)
+                    {
+                        lock (SubLock) { Subscribed.Remove(sym); }
+                        continue;
+                    }
+                    var lr = new LayerEventsReceiver(layer);
+                    lr.Log += m => { };
+                    if (ld.isnew)
+                        sender.Slot.InvokeLayerEndAsync(sender, layer, CancellationToken.None).GetAwaiter().GetResult();
+                    Layers[layer.ContractInfo.Symbol] = layer;
+                    ok++;
+                    Console.WriteLine($"  [+] {slotName}: {used}");
+                }
+                catch (Exception e)
+                {
+                    lock (SubLock) { Subscribed.Remove(sym); }
+                    Console.WriteLine($"  [!] {sym}: {e.Message}");
+                }
             }
+            Console.WriteLine($"[+] {slotName}: подписано {ok}, всего слоёв {Layers.Count}");
         }
     }
 }

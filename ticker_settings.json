@@ -798,5 +798,65 @@
   "SiU6": {
     "active": true,
     "min_qty": 1
+  },
+  "ENPG": {
+    "active": true,
+    "min_qty": 10,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
+  },
+  "LSRG": {
+    "active": true,
+    "min_qty": 10,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
+  },
+  "CNYRUBF": {
+    "active": true,
+    "min_qty": 1,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
+  },
+  "CNY-12.26": {
+    "active": true,
+    "min_qty": 1,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
+  },
+  "CNYRUB_TOM": {
+    "active": true,
+    "min_qty": 1,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
+  },
+  "CNY000000TOD": {
+    "active": true,
+    "min_qty": 1,
+    "min_interval": 2.0,
+    "max_interval": 600.0,
+    "interval_tolerance": 0.05,
+    "max_qty_ratio": 1.1,
+    "min_display_repeats": 3,
+    "min_double_hit_gap_sec": 0.0
   }
 }
