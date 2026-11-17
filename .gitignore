@@ -12,3 +12,6 @@ output/
 
 # вложенный клон cscalp-sdk — в родительском git не нужен
 PbSdkConsole_Project/
+
+# рхив мёртвого кода (не коммитим)
+_archive/
