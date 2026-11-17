@@ -9,3 +9,6 @@ data/
 output/
 
 .vscode/
+
+# вложенный клон cscalp-sdk — в родительском git не нужен
+PbSdkConsole_Project/
