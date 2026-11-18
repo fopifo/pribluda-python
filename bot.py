@@ -1,8 +1,9 @@
 """
-bot.py — ММВБ Агент (v3.26)
+bot.py — ММВБ Агент (v3.27)
 - Фикс MOEX SSL: отдельная сессия с ssl=False для публичных данных ISS.
 - Фоновые live-мигалки ОТКЛЮЧЕНЫ. Дневная статистика по кнопке работает.
 - Kill-switch, watchdog моста, торговля DRY/LIVE, баланс lite-стиль.
+- v3.27: раздел Арбитраж -> кнопка Фандинг (вечные фьючерсы + мои позиции).
 """
 import asyncio
 import aiohttp
@@ -19,7 +20,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.26"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.27"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -65,7 +66,8 @@ HELP_TEXT = (
     "/quote — котировка\n"
     "/positions — открытые позиции\n"
     "/balance — финрез (оценка моста)\n"
-    "/arba — арбитраж + спреды\n"
+    "/arba — арбитраж + спреды + фандинг\n"
+    "/funding — фандинг вечных фьючерсов\n"
     "/spoof — мигалки (дневная статистика)\n"
     "/trade — торговля (dry/live)\n"
     "/kill — 🛑 снять все мои заявки\n\n"
@@ -92,7 +94,8 @@ ARBA_MENU = [
         [{"type": "callback", "text": "🔹 MTLR / MTLRP", "payload": "cmd_arba_mtlr"},
          {"type": "callback", "text": "💱 CNYRUBF / Кварт.", "payload": "cmd_arba_cny"}],
         [{"type": "callback", "text": "✍️ Свои тикеры", "payload": "cmd_arba_manual"},
-         {"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}]
+         {"type": "callback", "text": "💰 Фандинг", "payload": "cmd_arba_funding"}],
+        [{"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}]
     ]}}
 ]
 
@@ -248,6 +251,43 @@ def format_spoof(data):
     lines.append("_Фоновые live-мигалки отключены._")
     return "\n".join(lines)
 
+def format_funding():
+    """Фандинг вечных фьючерсов + мои позиции (из data/funding_YYYY-MM-DD.json)."""
+    today = datetime.now(MSK).date().isoformat()
+    f = DATA_DIR / f"funding_{today}.json"
+    if not f.exists():
+        return "⚠️ Нет файла фандинга за сегодня.\n\nЗапусти: `python tools/funding_scraper.py`"
+    try:
+        with open(f, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except Exception as e:
+        return f"❌ Ошибка чтения фандинга: {e}"
+    funding = data.get("funding", {})
+    my = data.get("my_positions", {})
+    lines = [f"💰 **Фандинг вечных фьючерсов** ({today})", ""]
+    rows = sorted(funding.items(),
+                  key=lambda kv: (kv[1].get("settled_rub") is None, -(kv[1].get("settled_rub") or 0)))[:10]
+    lines.append("**Топ-10 итоговый фандинг (за контракт):**")
+    for t, v in rows:
+        lot = v.get("lot") or 0
+        s = v.get("settled_rub")
+        pc = f"{s * lot:+.2f} ₽" if (s is not None and lot) else "—"
+        lines.append(f"   {t}: {v.get('settled', '—')} × лот {lot} = **{pc}**")
+    if my:
+        lines.append("")
+        lines.append("**📊 Мои позиции** (шорт получает при +фандинге):")
+        tot = 0.0
+        for t, mp in sorted(my.items()):
+            tf = mp.get("total_funding", 0); tot += tf
+            e = "🟢" if tf >= 0 else "🔴"
+            lines.append(f"   {e} {t}: поз {mp.get('position', 0):+g} → **{tf:+.2f} ₽**")
+        te = "🟢" if tot >= 0 else "🔴"
+        lines.append(f"\n   **ИТОГО: {te} {tot:+.2f} ₽**")
+    else:
+        lines.append("\n_Открытых позиций по вечникам нет._")
+    lines.append("\n_Обновить: `python tools/funding_scraper.py`_")
+    return "\n".join(lines)
+
 async def api_get(session, path, params=None):
     async with session.get(BASE_URL + path, headers=HEADERS, params=params) as resp:
         try: return resp.status, await resp.json()
@@ -285,7 +325,6 @@ async def get_moex_data(session_moex, ticker: str, board: str = "TQBR"):
         "securities.columns": "SECID,PREVWAPRICE,PREVPRICE,PREVSETTLE,LOTSIZE"
     }
     try:
-        # Используем session_moex, у которой ssl=False
         async with session_moex.get(url, params=params, headers=MOEX_HEADERS) as resp:
             if resp.status != 200: return None, f"❌ Ошибка биржи ({resp.status})"
             data = await resp.json()
@@ -699,6 +738,8 @@ async def handle_update(session_max, session_moex, upd):
             elif payload == "cmd_arba_cny":
                 await send_message(session_max, "⏳ Загружаю юань...", user_id=user_id)
                 await send_message(session_max, await get_cny_arbitrage(session_moex), user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_arba_funding":
+                await send_message(session_max, format_funding(), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba_manual":
                 user_states[user_id] = {"step": "AWAITING_ARBA_T1"}
                 await send_message(session_max, "✍️ Введите **первый** тикер:", user_id=user_id)
@@ -721,7 +762,7 @@ async def handle_update(session_max, session_moex, upd):
             
             if st and st.get("step") == "AWAITING_TICKER":
                 user_states[user_id] = {"step": "IDLE"}
-                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade", "/kill"]:
+                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade", "/kill", "/funding"]:
                     reply = "Отмена ввода."; att = MAIN_MENU
                 else:
                     _, reply = await get_moex_data(session_moex, fix_layout(t)); att = MAIN_MENU
@@ -747,6 +788,8 @@ async def handle_update(session_max, session_moex, upd):
                 reply = "🛑 **Снять заявки**\n\nВыбери слой (или ВСЕ):"; att = kill_menu()
             elif tl == "/arba":
                 reply = (await spreads_text(session_moex)) + "\n\n⚖️ **Выберите связку:**"; att = ARBA_MENU
+            elif tl == "/funding":
+                reply = format_funding(); att = MAIN_MENU
             elif tl == "/spoof":
                 await run_spoof(session_max, user_id); return
             else:
@@ -759,7 +802,6 @@ async def handle_update(session_max, session_moex, upd):
         import traceback; traceback.print_exc()
 
 async def main():
-    # ДВА коннектора: строгий для MAX, без проверки для публичного MOEX ISS
     ssl_strict = create_ssl_context()
     connector_max = aiohttp.TCPConnector(ssl=ssl_strict)
     connector_moex = aiohttp.TCPConnector(ssl=False)
@@ -774,7 +816,7 @@ async def main():
             asyncio.create_task(watchdog_bridge(session_max))
             if SPOOF_ENABLED: asyncio.create_task(monitor_spoof(session_max))
             
-            print(f"✅ Бот запущен. Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
+            print(f"✅ Бот запущен v3.27 (фандинг в арбитраже). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
             marker = None
             while True:
                 params = {"timeout": 30}
