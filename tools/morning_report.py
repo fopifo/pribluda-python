@@ -8,6 +8,9 @@ tools/morning_report.py — утренний ритуал: один запуск
   C. replay_alor.py (истинные стороны) — с прогресс-баром.
   D. day_audit.py (матчинг v7 + классы FN + аудит FP) — с прогресс-баром.
   E. Сводка «что чинить» на основе цифр (парсит реальный формат day_audit).
+  F. clean_tw_robots.py (дедуп эталона TW) — с прогресс-баром.
+  G. tw_compare.py (сравнение с TW) — с прогресс-баром.
+  H. tw_fn_summary.py (сводка по роботам TW) — с прогресс-баром.
 
 Запуск: python tools/morning_report.py [YYYY-MM-DD]   # по умолчанию вчера
 Отчёт:  output/morning_report_YYYY-MM-DD.txt
@@ -123,8 +126,7 @@ def load_active_tickers():
 
 
 def bridge_coverage(date_str):
-    """B: покрытие мостом. Возвращает (seen_dict, status_text).
-    status_text различает: нет файла до моста / нет файла сегодня / есть."""
+    """B: покрытие мостом. Возвращает (seen_dict, status_text)."""
     tape = DATA / f"pbsdk_trades_{date_str}.jsonl"
     if not tape.exists():
         if date_str < BRIDGE_FIRST_DAY:
@@ -148,7 +150,7 @@ def bridge_coverage(date_str):
 
 
 def run_phase(label, cmd):
-    """C/D: запуск subprocess с прогресс-баром; возвращает (rc, stdout)."""
+    """Запуск subprocess с прогресс-баром; возвращает (rc, stdout)."""
     sp = Spinner(label)
     proc = subprocess.Popen(cmd, cwd=str(BASE), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,
@@ -222,23 +224,22 @@ def main():
     tape_bridge = DATA / f"pbsdk_trades_{date_str}.jsonl"
     tape_alor = DATA / f"live_trades_{date_str}.jsonl"
     aniscan = DATA / f"aniscan_robots_{date_str}.jsonl"
+    tw_file = DATA / f"tw_robots_{date_str}.jsonl"
     active = load_active_tickers()
 
-    # статус моста считаем один раз (он же нужен и для покрытия)
     cov, bridge_status = bridge_coverage(date_str)
 
     print(f"\n[входы] активных тикеров в settings: {len(active)}")
     print(f"[входы] лента моста   : {bridge_status}")
     print(f"[входы] лента Алор    : {'есть' if tape_alor.exists() else 'НЕТ'}")
     print(f"[входы] эталон Aniscan: {'есть' if aniscan.exists() else 'НЕТ'}")
+    print(f"[входы] эталон TW     : {'есть' if tw_file.exists() else 'НЕТ'}")
 
     missing = []
     if not aniscan.exists():
-        missing.append(f"Aniscan за {date_str}:  python tools/aniscan_robot_history.py {date_str}"
-                       f"  (браузер залогинен на aniscan.ru)")
+        missing.append(f"Aniscan за {date_str}:  python tools/aniscan_robot_history.py {date_str}")
     if not tape_alor.exists():
-        missing.append(f"Алор за {date_str}:      python tools/alor_download_day.py {date_str}"
-                       f"  (качается только законченный день)")
+        missing.append(f"Алор за {date_str}:      python tools/alor_download_day.py {date_str}")
     if missing:
         print("\n[!] чего не хватает — выполни и повтори ритуал:")
         for m in missing:
@@ -263,24 +264,51 @@ def main():
     # ---------- C. replay_alor ----------
     replay_out = ""
     if tape_alor.exists():
-        print("\n[1/2] replay_alor.py (истинные стороны)...")
+        print("\n[1/5] replay_alor.py (истинные стороны)...")
         rc, replay_out = run_phase("replay",
                                    [sys.executable, "research/replay_alor.py", date_str])
         if rc != 0:
             print(f"[!] replay_alor rc={rc} — см. отчёт")
     else:
-        print("\n[1/2] replay_alor ПРОПУЩЕН (нет ленты Алора)")
+        print("\n[1/5] replay_alor ПРОПУЩЕН (нет ленты Алора)")
 
     # ---------- D. day_audit ----------
     audit_out = ""
     if aniscan.exists():
-        print("\n[2/2] day_audit.py (матчинг v7 + классы FN + FP)...")
+        print("\n[2/5] day_audit.py (матчинг v7 + классы FN + FP)...")
         rc, audit_out = run_phase("audit",
                                   [sys.executable, "research/day_audit.py", date_str])
         if rc != 0:
             print(f"[!] day_audit rc={rc} — см. отчёт")
     else:
-        print("\n[2/2] day_audit ПРОПУЩЕН (нет эталона Aniscan)")
+        print("\n[2/5] day_audit ПРОПУЩЕН (нет эталона Aniscan)")
+
+    # ---------- F. clean_tw_robots ----------
+    tw_clean_out = ""
+    if tw_file.exists():
+        print("\n[3/5] clean_tw_robots.py (дедуп эталона TW)...")
+        rc, tw_clean_out = run_phase("tw_clean",
+                                     [sys.executable, "tools/clean_tw_robots.py", date_str])
+    else:
+        print("\n[3/5] clean_tw_robots ПРОПУЩЕН (нет эталона TW)")
+
+    # ---------- G. tw_compare ----------
+    tw_compare_out = ""
+    if tw_file.exists():
+        print("\n[4/5] tw_compare.py (сравнение с TW)...")
+        rc, tw_compare_out = run_phase("tw_cmp",
+                                       [sys.executable, "research/tw_compare.py", date_str])
+    else:
+        print("\n[4/5] tw_compare ПРОПУЩЕН (нет эталона TW)")
+
+    # ---------- H. tw_fn_summary ----------
+    tw_fn_out = ""
+    if tw_file.exists():
+        print("\n[5/5] tw_fn_summary.py (сводка по роботам TW)...")
+        rc, tw_fn_out = run_phase("tw_fn",
+                                  [sys.executable, "research/tw_fn_summary.py", date_str])
+    else:
+        print("\n[5/5] tw_fn_summary ПРОПУЩЕН (нет эталона TW)")
 
     # ---------- E. сводка «что чинить» ----------
     summary = parse_day_audit_summary(audit_out)
@@ -296,7 +324,8 @@ def main():
     L.append(f"активных тикеров: {len(active)}")
     L.append(f"лента моста: {bridge_status} | "
              f"лента Алор: {'есть' if tape_alor.exists() else 'НЕТ'} | "
-             f"Aniscan: {'есть' if aniscan.exists() else 'НЕТ'}")
+             f"Aniscan: {'есть' if aniscan.exists() else 'НЕТ'} | "
+             f"TW: {'есть' if tw_file.exists() else 'НЕТ'}")
     if missing:
         L.append("не хватает:")
         for m in missing:
@@ -304,22 +333,33 @@ def main():
     if cov_lines:
         L.append("\n--- ПОКРЫТИЕ МОСТОМ ---")
         L.extend(cov_lines)
-    L.append("\n--- РЕЗЮМЕ ДЛЯ ДОРАБОТКИ ---")
+    
+    L.append("\n--- РЕЗЮМЕ ДЛЯ ДОРАБОТКИ (из day_audit) ---")
     L.extend(summary)
+    
     L.append("\n--- ВЫВОД day_audit (полный) ---")
     L.append(audit_out if audit_out else "(не запускался)")
+    
     L.append("\n--- ВЫВОД replay_alor (полный) ---")
     L.append(replay_out if replay_out else "(не запускался)")
+    
+    L.append("\n--- ВЫВОД clean_tw_robots ---")
+    L.append(tw_clean_out if tw_clean_out else "(не запускался)")
+    
+    L.append("\n--- ВЫВОД tw_compare ---")
+    L.append(tw_compare_out if tw_compare_out else "(не запускался)")
+    
+    L.append("\n--- ВЫВОД tw_fn_summary ---")
+    L.append(tw_fn_out if tw_fn_out else "(не запускался)")
+    
     L.append("\n" + "=" * 78)
     text = "\n".join(L)
     rep.write_text(text, encoding="utf-8")
 
     print("\n" + "=" * 78)
-    print(" РЕЗЮМЕ ДЛЯ ДОРАБОТКИ:")
-    for s in summary:
-        print("  " + s)
+    print(f" РИТУАЛ ЗАВЕРШЁН. Отчёт сохранён: {rep}")
+    print(" Можешь прочитать его и закрыть это окно.")
     print("=" * 78)
-    print(f"[OK] отчёт: {rep}")
 
 
 if __name__ == "__main__":
