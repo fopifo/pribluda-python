@@ -1,11 +1,14 @@
 /*
-content_main.js v7.0 — MAIN world. Качает историю Aniscan same-origin fetch
-(куки приложатся). Данные шлёт в content_bridge через window.postMessage,
-далее background -> вкладка-мост localhost -> сервер (same-origin, без PNA/CSP).
+content_main.js v7.1 — MAIN world.
+- ИСТОРИЯ: авто-выкачка на ЛЮБОЙ странице aniscan (same-origin fetch, куки сами).
+- РАЗВЕДКА live: fetch + WS(onmessage/listener) + ПОТОКОВЫЙ XHR (SockJS xhr_streaming):
+  ловим progress/readystatechange и шлём первые кадры в debug.
+Данные идут через bridge -> background -> вкладка-мост -> сервер.
 */
 (function () {
   const HIST_BASE = "https://aniscan.ru/api/robot-histories";
   const API_RE = /aniscan\.ru\/api\//;
+  const WS_RE = /aniscan\.ru\/(websocket|robot-context)\//;
   const MAX_PAGES = 40;
   let historyLoaded = false;
   const seenDebug = new Set();
@@ -33,6 +36,13 @@ content_main.js v7.0 — MAIN world. Качает историю Aniscan same-or
     });
   }
 
+  function dbg(kind, url, sample) {
+    const key = kind + ":" + url;
+    if (seenDebug.has(key)) return;
+    seenDebug.add(key);
+    send("aniscan_debug", { received_at: nowIso(), kind: kind, url: url, sample: sample || "" });
+  }
+
   async function loadHistory() {
     if (historyLoaded) return;
     historyLoaded = true;
@@ -51,7 +61,7 @@ content_main.js v7.0 — MAIN world. Качает историю Aniscan same-or
         const r = await fetch(url, { credentials: "include" });
         if (!r.ok) break;
         const data = await r.json();
-        const content = (data && data.content) || [];
+        const content = Array.isArray(data) ? data : ((data && data.content) || []);
         if (content.length === 0) break;
         const a = await send("aniscan_history", { received_at: nowIso(), page: p, url: url, data: data });
         if (a && a.stop) break;
@@ -61,35 +71,40 @@ content_main.js v7.0 — MAIN world. Качает историю Aniscan same-or
     } catch (e) { console.log("[pb-aniscan] loadHistory err: " + e); historyLoaded = false; }
   }
 
+  // fetch-разведка
   const origFetch = window.fetch;
   window.fetch = async function (input, init) {
     const resp = await origFetch.apply(this, arguments);
     try {
       const url = (typeof input === "string") ? input : (input && input.url) || "";
-      if (API_RE.test(url) && url.indexOf("robot-histories") === -1 && !seenDebug.has(url)) {
-        seenDebug.add(url);
-        send("aniscan_debug", { received_at: nowIso(), kind: "fetch", url: url });
-      }
+      if (API_RE.test(url) && url.indexOf("robot-histories") === -1) dbg("fetch", url);
     } catch (e) {}
     return resp;
   };
 
+  // XHR-разведка: обычный load + ПОТОКОВЫЙ progress (SockJS xhr_streaming)
   const origOpen = XMLHttpRequest.prototype.open;
   const origSend = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.open = function (m, url) { this.__pbUrl = url; return origOpen.apply(this, arguments); };
   XMLHttpRequest.prototype.send = function () {
     const url = this.__pbUrl || "";
-    this.addEventListener("load", function () {
+    const self = this;
+    function grab(tag) {
       try {
-        if (API_RE.test(url) && url.indexOf("robot-histories") === -1 && !seenDebug.has(url)) {
-          seenDebug.add(url);
-          send("aniscan_debug", { received_at: nowIso(), kind: "xhr", url: url });
-        }
+        if (!(API_RE.test(url) || WS_RE.test(url))) return;
+        if (url.indexOf("robot-histories") !== -1) return;
+        let txt = "";
+        try { txt = (self.responseText || "").slice(0, 400); } catch (e) {}
+        dbg(tag, url, txt);
       } catch (e) {}
-    });
+    }
+    this.addEventListener("load", function () { grab("xhr"); });
+    this.addEventListener("progress", function () { grab("xhr_stream"); });
+    this.addEventListener("readystatechange", function () { if (self.readyState === 3) grab("xhr_stream"); });
     return origSend.apply(this, arguments);
   };
 
+  // WS-разведка
   function logWs(ws, ev) {
     try {
       const key = "ws:" + ws.url;
@@ -125,6 +140,6 @@ content_main.js v7.0 — MAIN world. Качает историю Aniscan same-or
   PbWebSocket.CLOSING = OrigWS.CLOSING; PbWebSocket.CLOSED = OrigWS.CLOSED;
   window.WebSocket = PbWebSocket;
 
-  if (location.pathname.indexOf("robot-history") !== -1) setTimeout(loadHistory, 800);
-  console.log("[pb-aniscan] v7.0 MAIN активен (вкладка-мост localhost)");
+  setTimeout(loadHistory, 800);   // на любой странице aniscan
+  console.log("[pb-aniscan] v7.1 MAIN активен (история везде + live-разведка stream/WS)");
 })();
