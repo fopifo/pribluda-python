@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "Pribluda Aniscan Intercept",
+  "version": "7.0",
+  "description": "Aniscan: история и live через вкладку-мост localhost (обход PNA и CSP страницы)",
+  "host_permissions": [
+    "https://aniscan.ru/*",
+    "http://127.0.0.1:8765/*"
+  ],
+  "background": { "service_worker": "background.js" },
+  "content_scripts": [
+    {
+      "matches": ["https://aniscan.ru/*"],
+      "js": ["content_main.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://aniscan.ru/*"],
+      "js": ["content_bridge.js"],
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["http://127.0.0.1:8765/*"],
+      "js": ["content_local.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
