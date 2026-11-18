@@ -1,6 +1,6 @@
 """
 Приблуда на python — офлайн-реплей ИСТИННЫХ сторон (Алор) через боевые
-детекторы. Читает data/<TICKER>_YYYY-MM-DD.json (скачивается
+детекторы. Читает data/live_trades_YYYY-MM-DD.jsonl (скачивается
 tools/alor_download_day.py), кормит детекторы в хронологическом порядке.
 История пишется изолированно в data/replay_alor_history.jsonl
 (очищается в начале), боевые файлы НЕ трогает.
@@ -50,7 +50,7 @@ class Progress:
         eta = (self.total - self.done) / max(speed, 1.0)
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
         print(f"\r[replay_alor] {self.label} [{bar}] {pct:3d}% | "
-              f"{self.done}/{self.total} сделок | {speed:.0f}/s | ETA {eta:.0f}s",
+              f"{self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с",
               end="", flush=True, file=sys.stderr)
 
     def close(self):
@@ -114,9 +114,10 @@ def main():
     if "--noisy-qty" in args:
         noisy_qty = True
 
-    files = sorted(DATA.glob(f"*_{date_str}.json"))
+    # ИСПРАВЛЕНИЕ: ищем именно live_trades_*.jsonl, как сохраняет alor_download_day.py
+    files = sorted(DATA.glob(f"live_trades_{date_str}.jsonl"))
     if not files:
-        print(f"[replay_alor] Нет файлов data/*_{date_str}.json. "
+        print(f"[replay_alor] Нет файлов data/live_trades_{date_str}.jsonl. "
               f"Скачай: python tools/alor_download_day.py {date_str}")
         sys.exit(1)
     print(f"[replay_alor] файлов Алора: {len(files)}")
@@ -131,11 +132,13 @@ def main():
     for f in files:
         try:
             with open(f, "r", encoding="utf-8") as fp:
-                lst = json.load(fp)
-            if isinstance(lst, list):
-                trades.extend(lst)
+                for line in fp:
+                    line = line.strip()
+                    if line:
+                        trades.append(json.loads(line))
         except Exception as e:
             print(f"  ошибка чтения {f.name}: {e}")
+    
     trades.sort(key=lambda t: t.get("timestamp") or 0)
     print(f"[replay_alor] сделок всего: {len(trades)}")
 
@@ -189,7 +192,7 @@ def main():
 
     print(f"[replay_alor] скормлено={fed}, пропущено: sym={skip_sym}, qty={skip_qty}")
     
-    # === НОВОЕ: Дедупликация истории ===
+    # === Дедупликация истории ===
     total, deduped = deduplicate_history(HIST)
     if total > deduped:
         print(f"[replay_alor] дедупликация: было {total} записей, стало {deduped} (удалено {total - deduped} дублей)")
