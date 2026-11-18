@@ -1,9 +1,11 @@
 """
-bot.py — ММВБ Агент (v3.27)
+bot.py — ММВБ Агент (v3.30)
 - Фикс MOEX SSL: отдельная сессия с ssl=False для публичных данных ISS.
 - Фоновые live-мигалки ОТКЛЮЧЕНЫ. Дневная статистика по кнопке работает.
 - Kill-switch, watchdog моста, торговля DRY/LIVE, баланс lite-стиль.
-- v3.27: раздел Арбитраж -> кнопка Фандинг (вечные фьючерсы + мои позиции).
+- v3.28: фоновое авто-обновление фандинга (старт + после клиринга 18:50).
+- v3.29: в "Мой фандинг" добавлен фандинг/лот.
+- v3.30: таблицы фандинга в code block (строгое выравнивание) + TW Watchdog (алерт, если браузер/расширение не пишут роботов).
 """
 import asyncio
 import aiohttp
@@ -20,7 +22,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.27"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.30"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -35,6 +37,18 @@ WATCHDOG_COOLDOWN_SEC = 300
 SPOOF_ENABLED = False
 SPOOF_POLL_SEC = 10
 SPOOF_ALERT_COOLDOWN_SEC = 300
+
+# --- фандинг: авто-обновление ---
+FUNDING_CLEARING_HOUR = 18
+FUNDING_CLEARING_MIN = 50
+FUNDING_CHECK_SEC = 60
+FUNDING_RETRY_SEC = 1800
+_funding_state = {"last_update_date": None, "clearing_done_date": None, "next_retry_ts": 0}
+
+# --- TW Watchdog ---
+TW_WATCHDOG_SILENT_SEC = 120
+TW_WATCHDOG_COOLDOWN_SEC = 600
+_tw_watchdog_state = {"last_alert_ts": 0}
 
 TRADE_CONFIG = {
     "MTLR":      {"lots": [1, 99, 100, 200, 300, 500], "label": "🔹 MTLR"},
@@ -67,13 +81,16 @@ HELP_TEXT = (
     "/positions — открытые позиции\n"
     "/balance — финрез (оценка моста)\n"
     "/arba — арбитраж + спреды + фандинг\n"
-    "/funding — фандинг вечных фьючерсов\n"
+    "/funding — мой фандинг (топ-10 + позиции)\n"
+    "/funding_full — все фандинги (63 инструмента)\n"
     "/spoof — мигалки (дневная статистика)\n"
     "/trade — торговля (dry/live)\n"
     "/kill — 🛑 снять все мои заявки\n\n"
     "Фоновые алерты:\n"
     "• |MTLR - MTLRP| >= 3 руб\n"
-    "• watchdog моста (молчит >60с)"
+    "• watchdog моста (молчит >60с)\n"
+    "• авто-обновление фандинга (старт + после клиринга 18:50)\n"
+    "• TW Watchdog (напоминание открыть браузер, если роботы не пишутся)"
 )
 
 MAIN_MENU = [
@@ -94,8 +111,9 @@ ARBA_MENU = [
         [{"type": "callback", "text": "🔹 MTLR / MTLRP", "payload": "cmd_arba_mtlr"},
          {"type": "callback", "text": "💱 CNYRUBF / Кварт.", "payload": "cmd_arba_cny"}],
         [{"type": "callback", "text": "✍️ Свои тикеры", "payload": "cmd_arba_manual"},
-         {"type": "callback", "text": "💰 Фандинг", "payload": "cmd_arba_funding"}],
-        [{"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}]
+         {"type": "callback", "text": "💰 Мой фандинг", "payload": "cmd_arba_funding"}],
+        [{"type": "callback", "text": "📋 Все фандинги", "payload": "cmd_arba_funding_full"},
+         {"type": "callback", "text": "◀️ Назад", "payload": "cmd_back"}]
     ]}}
 ]
 
@@ -251,42 +269,148 @@ def format_spoof(data):
     lines.append("_Фоновые live-мигалки отключены._")
     return "\n".join(lines)
 
-def format_funding():
-    """Фандинг вечных фьючерсов + мои позиции (из data/funding_YYYY-MM-DD.json)."""
+def _load_funding():
     today = datetime.now(MSK).date().isoformat()
     f = DATA_DIR / f"funding_{today}.json"
     if not f.exists():
-        return "⚠️ Нет файла фандинга за сегодня.\n\nЗапусти: `python tools/funding_scraper.py`"
+        return None, f"⚠️ Нет файла фандинга за сегодня.\n\nБот обновит его сам после клиринга (18:50 МСК).\nИли вручную: `python tools/funding_scraper.py`"
     try:
         with open(f, encoding="utf-8") as fh:
-            data = json.load(fh)
+            return json.load(fh), None
     except Exception as e:
-        return f"❌ Ошибка чтения фандинга: {e}"
+        return None, f"❌ Ошибка чтения фандинга: {e}"
+
+def format_funding():
+    """Мой фандинг: топ-10 + мои позиции с фандингом/лот (в code block для выравнивания)."""
+    data, err = _load_funding()
+    if err: return err
+    today = datetime.now(MSK).date().isoformat()
     funding = data.get("funding", {})
     my = data.get("my_positions", {})
-    lines = [f"💰 **Фандинг вечных фьючерсов** ({today})", ""]
+    lines = [f"💰 **Мой фандинг** ({today})", ""]
     rows = sorted(funding.items(),
                   key=lambda kv: (kv[1].get("settled_rub") is None, -(kv[1].get("settled_rub") or 0)))[:10]
     lines.append("**Топ-10 итоговый фандинг (за контракт):**")
+    lines.append("```text")
     for t, v in rows:
         lot = v.get("lot") or 0
         s = v.get("settled_rub")
         pc = f"{s * lot:+.2f} ₽" if (s is not None and lot) else "—"
-        lines.append(f"   {t}: {v.get('settled', '—')} × лот {lot} = **{pc}**")
+        lines.append(f"{t:<10} {v.get('settled', '—'):>12} × лот {lot:<4} = {pc}")
+    lines.append("```")
     if my:
         lines.append("")
         lines.append("**📊 Мои позиции** (шорт получает при +фандинге):")
         tot = 0.0
         for t, mp in sorted(my.items()):
             tf = mp.get("total_funding", 0); tot += tf
+            pos = mp.get("position", 0)
+            lot = mp.get("lot", 0)
+            fpl = mp.get("funding_per_unit", 0)
+            fpl_lot = fpl * lot
             e = "🟢" if tf >= 0 else "🔴"
-            lines.append(f"   {e} {t}: поз {mp.get('position', 0):+g} → **{tf:+.2f} ₽**")
+            lines.append(f"   {e} {t}: поз {pos:+g} | фандинг/лот **{fpl_lot:+.4f} ₽** → **{tf:+.2f} ₽**")
         te = "🟢" if tot >= 0 else "🔴"
         lines.append(f"\n   **ИТОГО: {te} {tot:+.2f} ₽**")
     else:
         lines.append("\n_Открытых позиций по вечникам нет._")
-    lines.append("\n_Обновить: `python tools/funding_scraper.py`_")
+    lines.append("\n_Обновить: бот сам после клиринга. Полный список: 📋 Все фандинги._")
     return "\n".join(lines)
+
+def format_funding_full():
+    """Все фандинги: полный список вечных фьючерсов (строго выровненные колонки в code block)."""
+    data, err = _load_funding()
+    if err: return err
+    today = datetime.now(MSK).date().isoformat()
+    funding = data.get("funding", {})
+    rows = sorted(funding.items(),
+                  key=lambda kv: (kv[1].get("settled_rub") is None, -(kv[1].get("settled_rub") or 0)))
+    lines = [f"📋 **ВСЕ фандинги вечных фьючерсов** ({today}), всего {len(rows)}", ""]
+    lines.append("```text")
+    lines.append(f"{'ТИКЕР':<10} {'ЛОТ':>5} {'ИТОГ×ЛОТ':>10}")
+    lines.append("-" * 27)
+    for t, v in rows:
+        lot = v.get("lot") or 0
+        s = v.get("settled_rub")
+        pc = f"{s * lot:+.2f}" if (s is not None and lot) else "—"
+        lines.append(f"{t:<10} {lot:>5} {pc:>10}")
+    lines.append("```")
+    lines.append("\n_Значения в ₽ за 1 контракт. Обновление: бот сам после клиринга (18:50)._")
+    return "\n".join(lines)
+
+async def run_funding_scraper(session):
+    print("[FUNDING] запускаю авто-обновление фандинга...")
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, str(BASE / "tools" / "funding_scraper.py"),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL, cwd=str(BASE))
+        out, _ = await proc.communicate()
+        txt = out.decode("utf-8", "ignore")
+        ok = "[OK]" in txt
+        print(f"[FUNDING] скраппер завершён, ok={ok}")
+        return ok
+    except Exception as e:
+        print(f"[FUNDING] ошибка скраппера: {e}")
+        return False
+
+async def funding_updater(session):
+    while True:
+        try:
+            now_dt = datetime.now(MSK)
+            today = now_dt.date().isoformat()
+            after_clearing = (now_dt.hour > FUNDING_CLEARING_HOUR) or (now_dt.hour == FUNDING_CLEARING_HOUR and now_dt.minute >= FUNDING_CLEARING_MIN)
+            need = False
+            fpath = DATA_DIR / f"funding_{today}.json"
+            if not fpath.exists():
+                need = True
+            elif after_clearing and _funding_state.get("clearing_done_date") != today:
+                need = True
+            if need and time.time() >= _funding_state.get("next_retry_ts", 0):
+                ok = await run_funding_scraper(session)
+                if ok:
+                    _funding_state["last_update_date"] = today
+                    if after_clearing:
+                        _funding_state["clearing_done_date"] = today
+                    _funding_state["next_retry_ts"] = 0
+                else:
+                    _funding_state["next_retry_ts"] = time.time() + FUNDING_RETRY_SEC
+        except Exception as e:
+            print(f"[FUNDING] updater error: {e}")
+        await asyncio.sleep(FUNDING_CHECK_SEC)
+
+async def tw_watchdog(session):
+    """Фон. цикл: проверка, что TW-перехватчик пишет роботов."""
+    while True:
+        try:
+            now_dt = datetime.now(MSK)
+            # Проверяем только в торговое время (10:00 - 18:50)
+            if 10 <= now_dt.hour < 19 or (now_dt.hour == 19 and now_dt.minute == 0):
+                today = now_dt.date().isoformat()
+                fname = f"tw_robots_{today}.jsonl"
+                fpath = DATA_DIR / fname
+                
+                is_silent = False
+                if not fpath.exists():
+                    is_silent = True
+                else:
+                    age = time.time() - os.path.getmtime(fpath)
+                    if age > TW_WATCHDOG_SILENT_SEC:
+                        is_silent = True
+                        
+                if is_silent and (time.time() - _tw_watchdog_state["last_alert_ts"]) > TW_WATCHDOG_COOLDOWN_SEC:
+                    msg = (
+                        "⚠️ **Внимание: T-Widgets не пишет роботов!**\n\n"
+                        "Проверьте:\n"
+                        "1. Браузер открыт с вкладкой терминала.\n"
+                        "2. Расширение 'Pribluda TW Intercept' включено.\n"
+                        "3. Нажата кнопка 'Разрешить' при запросе доступа.\n\n"
+                        "Без этого эталон для детектора не собирается."
+                    )
+                    await send_message(session, msg, user_id=OWNER_ID)
+                    _tw_watchdog_state["last_alert_ts"] = time.time()
+        except Exception as e:
+            print(f"[TW WATCHDOG ERROR] {e}")
+        await asyncio.sleep(60)
 
 async def api_get(session, path, params=None):
     async with session.get(BASE_URL + path, headers=HEADERS, params=params) as resp:
@@ -740,6 +864,8 @@ async def handle_update(session_max, session_moex, upd):
                 await send_message(session_max, await get_cny_arbitrage(session_moex), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba_funding":
                 await send_message(session_max, format_funding(), user_id=user_id, attachments=MAIN_MENU)
+            elif payload == "cmd_arba_funding_full":
+                await send_message(session_max, format_funding_full(), user_id=user_id, attachments=MAIN_MENU)
             elif payload == "cmd_arba_manual":
                 user_states[user_id] = {"step": "AWAITING_ARBA_T1"}
                 await send_message(session_max, "✍️ Введите **первый** тикер:", user_id=user_id)
@@ -762,7 +888,7 @@ async def handle_update(session_max, session_moex, upd):
             
             if st and st.get("step") == "AWAITING_TICKER":
                 user_states[user_id] = {"step": "IDLE"}
-                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade", "/kill", "/funding"]:
+                if tl in ["/help", "/start", "/arba", "/quote", "/positions", "/spoof", "/balance", "/trade", "/kill", "/funding", "/funding_full"]:
                     reply = "Отмена ввода."; att = MAIN_MENU
                 else:
                     _, reply = await get_moex_data(session_moex, fix_layout(t)); att = MAIN_MENU
@@ -790,6 +916,8 @@ async def handle_update(session_max, session_moex, upd):
                 reply = (await spreads_text(session_moex)) + "\n\n⚖️ **Выберите связку:**"; att = ARBA_MENU
             elif tl == "/funding":
                 reply = format_funding(); att = MAIN_MENU
+            elif tl == "/funding_full":
+                reply = format_funding_full(); att = MAIN_MENU
             elif tl == "/spoof":
                 await run_spoof(session_max, user_id); return
             else:
@@ -814,9 +942,11 @@ async def main():
             
             asyncio.create_task(monitor_mtlr_spread(session_moex))
             asyncio.create_task(watchdog_bridge(session_max))
+            asyncio.create_task(funding_updater(session_max))
+            asyncio.create_task(tw_watchdog(session_max))
             if SPOOF_ENABLED: asyncio.create_task(monitor_spoof(session_max))
             
-            print(f"✅ Бот запущен v3.27 (фандинг в арбитраже). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
+            print(f"✅ Бот запущен v3.30 (выравнивание фандинга + TW Watchdog). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
             marker = None
             while True:
                 params = {"timeout": 30}

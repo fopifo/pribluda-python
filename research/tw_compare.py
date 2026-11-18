@@ -9,10 +9,13 @@
   Наши:      start_ms/end_ms/interval_ms — детектор пишет напрямую из ленты QUIK.
              Строки старого формата (без мс) пропускаются.
   T-Widgets: interval — уже мс; start/end — ISO-строки (Z) -> epoch ms.
+  Формат TW: payload содержит ключ "robots" (список), каждый элемент плоский:
+             ticker, id, isBuy, interval, minLots, maxLots, start, end, count, endSkips.
 
 v2 (2026-09-03): bursts (int<2с или count<4) вне сравнения; FN по интервалу вниз.
 v2.1 (2026-09-03): --ours PATH — сравнивать с указанным файлом нашей истории
              (для A/B на истории реплея data/replay_history.jsonl).
+v2.2 (2026-11-18): исправлен load_tw под плоскую структуру payload.robots (без вложенных active/completed).
 
 Метрики:
   TP — робот есть и у нас, и у T-Widgets (совпали по критерию)
@@ -98,7 +101,8 @@ class Progress:
 
 
 def load_tw(path):
-    """tw_robots_*.jsonl -> список записей в мс (active+completed, дедуп по id)."""
+    """tw_robots_*.jsonl -> список записей в мс (дедуп по id).
+    Формат: payload содержит плоский список 'robots'."""
     out = {}
     p = Progress(path.stat().st_size, "tw ")
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -111,31 +115,36 @@ def load_tw(path):
                 rec = json.loads(line)
             except Exception:
                 continue
+            
             payload = rec.get("payload") or {}
+            # ИСПРАВЛЕНИЕ: robots - это плоский список, без вложенных active/completed
             for rob in payload.get("robots") or []:
                 ticker = rob.get("ticker")
                 if not ticker:
                     continue
-                for state in ("active", "completed"):
-                    for a in rob.get(state) or []:
-                        end_ms = iso_to_ms(a.get("end"))
-                        key = (ticker, "buy" if a.get("isBuy") else "sell", a.get("id"))
-                        old = out.get(key)
-                        if old is not None and (old["end_ms"] or 0) >= (end_ms or 0):
-                            continue
-                        out[key] = {
-                            "ticker": ticker,
-                            "side": key[1],
-                            "id": a.get("id"),
-                            "interval_ms": float(a.get("interval") or 0),
-                            "qty_min": a.get("minLots") or 0,
-                            "qty_max": a.get("maxLots") or 0,
-                            "start_ms": iso_to_ms(a.get("start")),
-                            "end_ms": end_ms,
-                            "count": a.get("count"),
-                            "end_skips": a.get("endSkips"),
-                            "state": state,
-                        }
+                
+                end_ms = iso_to_ms(rob.get("end"))
+                side = "buy" if rob.get("isBuy") else "sell"
+                key = (ticker, side, rob.get("id"))
+                
+                old = out.get(key)
+                # Дедуп: оставляем запись с самым поздним end_ms
+                if old is not None and (old["end_ms"] or 0) >= (end_ms or 0):
+                    continue
+                
+                out[key] = {
+                    "ticker": ticker,
+                    "side": side,
+                    "id": rob.get("id"),
+                    "interval_ms": float(rob.get("interval") or 0),
+                    "qty_min": rob.get("minLots") or 0,
+                    "qty_max": rob.get("maxLots") or 0,
+                    "start_ms": iso_to_ms(rob.get("start")),
+                    "end_ms": end_ms,
+                    "count": rob.get("count"),
+                    "end_skips": rob.get("endSkips"),
+                    "state": "active", # для совместимости вывода
+                }
     p.close()
     return list(out.values())
 

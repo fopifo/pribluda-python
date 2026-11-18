@@ -94,7 +94,8 @@ class Progress:
 
 
 def load_tw(path):
-    """tw_robots_*.jsonl -> список роботов в мс (active+completed, дедуп по id)."""
+    """tw_robots_*.jsonl -> список роботов в мс (дедуп по id).
+    Формат: payload содержит плоский список 'robots'."""
     out = {}
     p = Progress(path.stat().st_size, "tw ")
     with open(path, "r", encoding="utf-8", errors="ignore") as f:
@@ -107,29 +108,34 @@ def load_tw(path):
                 rec = json.loads(line)
             except Exception:
                 continue
+            
             payload = rec.get("payload") or {}
+            # ИСПРАВЛЕНИЕ: robots - это плоский список, без вложенных active/completed
             for rob in payload.get("robots") or []:
                 ticker = rob.get("ticker")
                 if not ticker:
                     continue
-                for state in ("active", "completed"):
-                    for a in rob.get(state) or []:
-                        end_ms = iso_to_ms(a.get("end"))
-                        key = (ticker, "buy" if a.get("isBuy") else "sell", a.get("id"))
-                        old = out.get(key)
-                        if old is not None and (old["end_ms"] or 0) >= (end_ms or 0):
-                            continue
-                        out[key] = {
-                            "ticker": ticker,
-                            "side": key[1],
-                            "id": a.get("id"),
-                            "interval_ms": float(a.get("interval") or 0),
-                            "qty_min": a.get("minLots") or 0,
-                            "qty_max": a.get("maxLots") or 0,
-                            "start_ms": iso_to_ms(a.get("start")),
-                            "end_ms": end_ms,
-                            "count": a.get("count"),
-                        }
+                
+                end_ms = iso_to_ms(rob.get("end"))
+                side = "buy" if rob.get("isBuy") else "sell"
+                key = (ticker, side, rob.get("id"))
+                
+                old = out.get(key)
+                # Дедуп: оставляем запись с самым поздним end_ms
+                if old is not None and (old["end_ms"] or 0) >= (end_ms or 0):
+                    continue
+                
+                out[key] = {
+                    "ticker": ticker,
+                    "side": side,
+                    "id": rob.get("id"),
+                    "interval_ms": float(rob.get("interval") or 0),
+                    "qty_min": rob.get("minLots") or 0,
+                    "qty_max": rob.get("maxLots") or 0,
+                    "start_ms": iso_to_ms(rob.get("start")),
+                    "end_ms": end_ms,
+                    "count": rob.get("count"),
+                }
     p.close()
     return list(out.values())
 
@@ -195,10 +201,10 @@ def main():
 
     print()
     print("=" * 100)
-    print(f"ПРОФИЛИ РОБОТОВ T-WIDGETS за {date_str} (топ-{DETAIL_LIMIT} по персистентности)")
+    print(f"ПРОФИЛЬ РОБОТОВ T-WIDGETS за {date_str} (топ-{DETAIL_LIMIT} по персистентности)")
     print("=" * 100)
     print(f"{'TICKER':6} {'SIDE':4} {'QTY':>10} {'INT':>5} {'серий':>5} {'max_cnt':>7} "
-          f"{'жизнь':>8} {'посл.акт':>8} {'min_qty':>7}  ВЕРДИКТ")
+          f"{'жизнь':>8} {'посл.акт':>8} {'min_qty':>7}  ВЕРДКТ")
     for r in rows[:DETAIL_LIMIT]:
         print(
             f"{r['ticker']:6} {r['side']:4} [{r['qmin']},{r['qmax']}]".ljust(23) +
