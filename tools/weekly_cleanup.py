@@ -19,20 +19,23 @@ PATTERNS = [
     "pbsdk_trades_*.jsonl",
     "orderbook_*.jsonl",
     "aniscan_robots_*.jsonl",
-    "*_202*.json",  # дневные файлы Алора
+    "*_202*.json",       # дневные файлы Алора
+    "positions_*.json",  # снапшоты позиций (для фандинга)
+    "funding_*.json",    # дневные файлы фандинга
 ]
+
 
 def main():
     print("=" * 70)
     print(" ЕЖЕНЕДЕЛЬНАЯ ОЧИСТКА (удаление данных старше 7 дней)")
     print("=" * 70)
-    
+
     now = datetime.now(MSK)
     cutoff = now - timedelta(days=DAYS_TO_KEEP)
-    
+
     deleted_count = 0
     deleted_size = 0
-    
+
     for pattern in PATTERNS:
         for file_path in DATA.glob(pattern):
             try:
@@ -42,14 +45,17 @@ def main():
                     file_path.unlink()
                     deleted_count += 1
                     deleted_size += size
-                    print(f"[-] Удалён: {file_path.name} ({size / 1024 / 1024:.1f} МБ, возраст: {(now - mtime).days} дн.)")
+                    age_days = (now - mtime).days
+                    size_mb = size / 1024 / 1024
+                    print(f"[-] Удалён: {file_path.name} ({size_mb:.1f} МБ, возраст: {age_days} дн.)")
             except Exception as e:
                 print(f"[!] Ошибка с {file_path.name}: {e}")
-                
+
     print("=" * 70)
     print(f"✅ ГОТОВО. Удалено файлов: {deleted_count}")
     print(f"   Освобождено места: {deleted_size / 1024 / 1024:.1f} МБ")
     print("=" * 70)
+
 
 if __name__ == "__main__":
     main()
