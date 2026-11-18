@@ -2,24 +2,20 @@
 tools/morning_report.py — утренний ритуал: один запуск, один отчёт.
 
 Фазы:
-  0. Авто-докачка Алора за дату (неинтерактивный скрипт). Aniscan — интерактивный
-     curl-диалог, его авто-докачка из Python невозможна (зависнет); для Aniscan
-     готовится расширение Chrome (см. следующий шаг).
-  A. Инвентарь входов (лента моста / Алор / Aniscan / TW) + что докачать вручную.
-  B. Покрытие мостом по активным тикерам.
-  1. replay_alor.py (истинные стороны).
-  2. day_audit.py (матчинг v7 + классы FN + аудит FP).
-  3. clean_tw_robots.py (дедуп эталона T-Widgets: убираем накопительные дубли).
-  4. tw_compare.py (сравнение наших роботов с эталоном T-Widgets: TP/FP/FN).
-  5. tw_fn_summary.py (кого мы режем на входе по min_qty).
-  E. Сводка «что чинить» из цифр day_audit.
+  0.  Авто-докачка Алора за дату (неинтерактивный).
+  0b. Ожидание Aniscan: расширение Chrome (живёт в браузере, открыто батником
+      start_all.bat шаг 2/7) само тянет историю за today+yesterday. Ждём до
+      180 сек (запас для слабого ноута), опрашивая файл каждые 5 сек.
+  A.  Инвентарь входов (лента моста / Алор / Aniscan / TW) + что докачать вручную.
+  B.  Покрытие мостом по активным тикерам.
+  1.  replay_alor.py (истинные стороны).
+  2.  day_audit.py (матчинг v7 + классы FN + аудит FP).
+  3.  clean_tw_robots.py (дедуп эталона T-Widgets).
+  4.  tw_compare.py (сравнение с TW: TP/FP/FN).
+  5.  tw_fn_summary.py (кого мы режем на входе по min_qty).
+  E.  Сводка «что чинить» из цифр day_audit.
 
 Запуск: python tools/morning_report.py [YYYY-MM-DD]   # по умолчанию вчера
-Отчёт:  выводится в консоль (прогресс-бары дочерних скриптов видны)
-        и дублируется в output/morning_report_YYYY-MM-DD.txt (архив).
-
-Прогресс-бары: вывод дочерних процессов стримится в консоль напрямую,
-поэтому их собственные ASCII-бары (%%/скорость/ETA) видны (правило 2026-08-26).
 """
 import sys
 import os
@@ -32,7 +28,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-# Принудительный UTF-8 для консоли Windows (лечит кракозябры вывода).
+# Принудительный UTF-8 для консоли Windows
 if hasattr(sys.stdout, "reconfigure"):
     try: sys.stdout.reconfigure(encoding="utf-8")
     except Exception: pass
@@ -45,17 +41,21 @@ DATA = BASE / "data"
 OUT = BASE / "output"
 MSK = ZoneInfo("Europe/Moscow")
 
-# Первая дата, когда мост PbSdk реально писал ленту (см. заметки 2026-11-15).
 BRIDGE_FIRST_DAY = "2026-11-15"
 
-# Кодировка для дочерних python-процессов: заставляем их писать в UTF-8.
+# Запас ожидания Aniscan (сек). Расширение в браузере должно успеть выкачать
+# историю за время от старта Chrome (батник start_all.bat) до запуска отчёта.
+# На слабом ноуте: загрузка Chrome ~15с + вкладки ~10с + aniscan 40 страниц ~15с
+# + буфер на гонку/перезапуск моста ~30с = итого ~70с. Закладываем 180с (x2.5).
+ANISCAN_WAIT_MAX_SEC = 180
+ANISCAN_POLL_INTERVAL_SEC = 5
+
 CHILD_ENV = dict(os.environ)
 CHILD_ENV["PYTHONUTF8"] = "1"
 CHILD_ENV["PYTHONIOENCODING"] = "utf-8"
 
 
 class Bar:
-    """ASCII прогресс-бар: %% | позиция | скорость | ETA (правило 2026-08-26)."""
     def __init__(self, total, label):
         self.total = max(int(total), 1)
         self.label = label
@@ -112,7 +112,6 @@ def load_active_tickers():
 
 
 def bridge_coverage(date_str):
-    """B: покрытие мостом. Возвращает (seen_dict, status_text)."""
     tape = DATA / f"pbsdk_trades_{date_str}.jsonl"
     if not tape.exists():
         if date_str < BRIDGE_FIRST_DAY:
@@ -136,8 +135,6 @@ def bridge_coverage(date_str):
 
 
 def run_phase(label, cmd):
-    """Запуск subprocess; вывод дочернего процесса СТРИМИТСЯ в консоль напрямую
-    (поэтому его собственные прогресс-бары видны). Возвращает (rc, stdout)."""
     proc = subprocess.Popen(cmd, cwd=str(BASE), stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, text=True,
                             encoding="utf-8", errors="replace", env=CHILD_ENV)
@@ -159,7 +156,6 @@ def run_phase(label, cmd):
 
 
 def _clean_for_report(text):
-    """Убираем строки-прогресс-бары из архивного отчёта (в консоли они и так видны)."""
     keep = []
     for ln in text.splitlines():
         if "ETA" in ln and ("[#" in ln or "[." in ln or "] " in ln):
@@ -169,7 +165,6 @@ def _clean_for_report(text):
 
 
 def parse_day_audit_summary(audit_out):
-    """E: парсит реальный формат day_audit.py и вытаскивает метрики + классы FN."""
     summary = []
     if not audit_out.strip():
         summary.append("нет вывода day_audit — метрики недоступны (нет эталона).")
@@ -211,6 +206,33 @@ def parse_day_audit_summary(audit_out):
     return summary
 
 
+def wait_for_aniscan(date_str):
+    """0b: ждём появления файла aniscan_robots_<дата>.jsonl. Расширение Chrome
+    само его тянет (живёт в браузере, открыто start_all.bat). Возвращает
+    (exists: bool, waited_sec: int)."""
+    an_path = DATA / f"aniscan_robots_{date_str}.jsonl"
+    if an_path.exists() and an_path.stat().st_size > 0:
+        return True, 0
+
+    waited = 0
+    chars = "|/-\\"
+    ci = 0
+    print(f"[0b] Ожидание Aniscan (расширение в браузере): макс {ANISCAN_WAIT_MAX_SEC}с, опрос каждые {ANISCAN_POLL_INTERVAL_SEC}с...")
+    while waited < ANISCAN_WAIT_MAX_SEC:
+        sys.stdout.write(f"\r[0b] {chars[ci % 4]} жду {waited:>3}/{ANISCAN_WAIT_MAX_SEC}с  (файл: {an_path.name})")
+        sys.stdout.flush()
+        time.sleep(ANISCAN_POLL_INTERVAL_SEC)
+        waited += ANISCAN_POLL_INTERVAL_SEC
+        ci += 1
+        if an_path.exists() and an_path.stat().st_size > 0:
+            sys.stdout.write(f"\r[0b] ✅ Aniscan появился через {waited}с ({an_path.name}, {an_path.stat().st_size} байт)\n")
+            sys.stdout.flush()
+            return True, waited
+    sys.stdout.write(f"\r[0b] ❌ Aniscan не появился за {ANISCAN_WAIT_MAX_SEC}с. Проверь: Chrome запущен? вкладка aniscan.ru открыта? расширение Pribluda Aniscan Intercept активно?\n")
+    sys.stdout.flush()
+    return False, waited
+
+
 def main():
     date_str = sys.argv[1] if len(sys.argv) > 1 else (
         datetime.now(MSK) - timedelta(days=1)).strftime("%Y-%m-%d")
@@ -219,19 +241,23 @@ def main():
     print(f" УТРЕННИЙ РИТУАЛ — {date_str}")
     print("=" * 78)
 
-    # ---------- 0. авто-докачка Алора (неинтерактивный) ----------
+    # ---------- 0. авто-докачка Алора ----------
     tape_alor = DATA / f"live_trades_{date_str}.jsonl"
     if not tape_alor.exists():
         print(f"\n[0/6] Авто-докачка Алора за {date_str} (неинтерактивный)...")
         rc, _ = run_phase("alor_dl", [sys.executable, "tools/alor_download_day.py", date_str])
         if rc != 0:
-            print(f"[!] alor_download_day rc={rc} — см. отчёт")
+            print(f"[!] alor_download_day rc={rc}")
         tape_alor = DATA / f"live_trades_{date_str}.jsonl"
     else:
         print(f"\n[0/6] Алор за {date_str} уже есть — докачка не нужна")
 
-    # ---------- A. инвентарь входов ----------
+    # ---------- 0b. ожидание Aniscan ----------
+    print()
+    aniscan_ok, waited = wait_for_aniscan(date_str)
     aniscan = DATA / f"aniscan_robots_{date_str}.jsonl"
+
+    # ---------- A. инвентарь входов ----------
     tw_file = DATA / f"tw_robots_{date_str}.jsonl"
     active = load_active_tickers()
 
@@ -240,17 +266,15 @@ def main():
     print(f"\n[входы] активных тикеров в settings: {len(active)}")
     print(f"[входы] лента моста   : {bridge_status}")
     print(f"[входы] лента Алор    : {'есть' if tape_alor.exists() else 'НЕТ'}")
-    print(f"[входы] эталон Aniscan: {'есть' if aniscan.exists() else 'НЕТ'}")
+    print(f"[входы] эталон Aniscan: {'есть ('+str(aniscan.stat().st_size)+' байт)' if aniscan.exists() else 'НЕТ (ожидали '+str(waited)+'с)'}")
     print(f"[входы] эталон TW     : {'есть' if tw_file.exists() else 'НЕТ'}")
 
-    # Алор докачан автоматически выше — в missing его нет.
-    # Aniscan пока интерактивный (curl-диалог) — остаётся ручным шагом.
     missing = []
-    if not aniscan.exists():
-        missing.append(f"Aniscan за {date_str}:  python tools/aniscan_robot_history.py {date_str}"
-                       f"   (браузер залогинен на aniscan.ru; интерактивный curl-диалог)")
+    if not aniscan.exists() or not aniscan_ok:
+        missing.append(f"Aniscan за {date_str}: расширение не выкачало за {ANISCAN_WAIT_MAX_SEC}с. "
+                       f"Открой https://aniscan.ru/robot-history/table в Chrome, затем запусти ритуал ещё раз.")
     if missing:
-        print("\n[!] чего не хватает — докачай вручную и повтори ритуал:")
+        print("\n[!] чего не хватает:")
         for m in missing:
             print("    " + m)
 
@@ -276,7 +300,7 @@ def main():
         print("\n[1/6] replay_alor.py (истинные стороны)...")
         rc, replay_out = run_phase("replay", [sys.executable, "research/replay_alor.py", date_str])
         if rc != 0:
-            print(f"[!] replay_alor rc={rc} — см. отчёт")
+            print(f"[!] replay_alor rc={rc}")
     else:
         print("\n[1/6] replay_alor ПРОПУЩЕН (нет ленты Алора)")
 
@@ -286,14 +310,14 @@ def main():
         print("\n[2/6] day_audit.py (матчинг v7 + классы FN + FP)...")
         rc, audit_out = run_phase("audit", [sys.executable, "research/day_audit.py", date_str])
         if rc != 0:
-            print(f"[!] day_audit rc={rc} — см. отчёт")
+            print(f"[!] day_audit rc={rc}")
     else:
         print("\n[2/6] day_audit ПРОПУЩЕН (нет эталона Aniscan)")
 
     # ---------- 3. clean_tw_robots ----------
     tw_clean_out = ""
     if tw_file.exists():
-        print("\n[3/6] clean_tw_robots.py (дедуп эталона TW: убираем накопительные дубли снимков)...")
+        print("\n[3/6] clean_tw_robots.py (дедуп эталона TW)...")
         rc, tw_clean_out = run_phase("tw_clean", [sys.executable, "tools/clean_tw_robots.py", date_str])
     else:
         print("\n[3/6] clean_tw_robots ПРОПУЩЕН (нет эталона TW)")
@@ -314,7 +338,7 @@ def main():
     else:
         print("\n[5/6] tw_fn_summary ПРОПУЩЕН (нет эталона TW)")
 
-    # ---------- E. сводка «что чинить» ----------
+    # ---------- E. сводка ----------
     summary = parse_day_audit_summary(audit_out)
 
     # ---------- сборка отчёта ----------
@@ -328,10 +352,10 @@ def main():
     L.append(f"активных тикеров: {len(active)}")
     L.append(f"лента моста: {bridge_status} | "
              f"лента Алор: {'есть' if tape_alor.exists() else 'НЕТ'} | "
-             f"Aniscan: {'есть' if aniscan.exists() else 'НЕТ'} | "
+             f"Aniscan: {'есть' if aniscan.exists() else 'НЕТ (ждал '+str(waited)+'с)'} | "
              f"TW: {'есть' if tw_file.exists() else 'НЕТ'}")
     if missing:
-        L.append("не хватает (докачать вручную):")
+        L.append("проблемы:")
         for m in missing:
             L.append("  " + m)
     if cov_lines:
