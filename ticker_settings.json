@@ -788,15 +788,15 @@
     "min_qty_median_pct": 0.3
   },
   "SRU6SRZ6": {
-    "active": true,
+    "active": false,
     "min_qty": 1
   },
   "SPZ6": {
-    "active": true,
+    "active": false,
     "min_qty": 1
   },
   "SiU6": {
-    "active": true,
+    "active": false,
     "min_qty": 1
   },
   "ENPG": {

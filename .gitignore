@@ -16,3 +16,7 @@ PbSdkConsole_Project/
 # рхив мёртвого кода (не коммитим)
 _archive/
 output/morning_report_*.txt
+
+tools/apply_*.py
+tools/disable_*.py
+tools/rollback_*.py

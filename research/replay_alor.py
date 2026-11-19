@@ -29,8 +29,9 @@ HIST = BASE / "data" / "replay_alor_history.jsonl"
 
 
 class Progress:
-    """Прогресс-бар: в живой консоли рисует \r (плавно), при чтении через pipe
-    молчит полностью (кроме финального DONE), чтобы не спамить morning_report."""
+    """ASCII прогресс-бар. В живой консоли — \r каждые 0.25с.
+    В pipe (morning_report) — полная строка с \\n каждые 10%, чтобы
+    readline() не вис и было видно работу (не молчать 18 минут)."""
 
     def __init__(self, total, label):
         self.total = max(int(total), 1)
@@ -38,31 +39,41 @@ class Progress:
         self.done = 0
         self.t0 = time.time()
         self.last_tick = 0.0
+        self.last_pct = -1
         self.is_tty = sys.stderr.isatty()
 
-    def update(self, n):
-        self.done += n
-        if not self.is_tty:
-            return  # в pipe не пишем ничего
+    def _line(self):
         now = time.time()
-        if now - self.last_tick < 0.25 and self.done < self.total:
-            return
-        self.last_tick = now
         pct = min(self.done * 100 // self.total, 100)
         dt = max(now - self.t0, 1e-9)
         speed = self.done / dt
         eta = (self.total - self.done) / max(speed, 1.0)
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
-        line = f"[replay_alor] {self.label} [{bar}] {pct:3d}% | {self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с"
-        sys.stderr.write("\r" + line)
-        sys.stderr.flush()
+        return (f"[replay_alor] {self.label} [{bar}] {pct:3d}% | "
+                f"{self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с")
+
+    def update(self, n):
+        self.done += n
+        now = time.time()
+        pct = min(self.done * 100 // self.total, 100)
+        if self.is_tty:
+            if now - self.last_tick < 0.25 and self.done < self.total:
+                return
+            self.last_tick = now
+            sys.stderr.write("\r" + self._line())
+            sys.stderr.flush()
+        else:
+            # pipe: печатаем каждые 10% (10 строк на весь прогон)
+            if pct // 10 != self.last_pct // 10:
+                self.last_pct = pct
+                print(self._line(), file=sys.stderr, flush=True)
 
     def close(self):
         if self.is_tty:
-            print(file=sys.stderr)
+            sys.stderr.write("\r" + self._line() + "\n")
+            sys.stderr.flush()
         else:
-            # в pipe — одна финальная строка с переводом, чтобы readline() завершился
-            print(f"[replay_alor] feed [####################] 100% | {self.total}/{self.total} сделок | DONE", file=sys.stderr, flush=True)
+            print(self._line(), file=sys.stderr, flush=True)
 
 
 def deduplicate_history(hist_path):

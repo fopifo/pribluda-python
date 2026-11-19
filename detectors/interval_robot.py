@@ -278,7 +278,29 @@ class IntervalRobotDetector(Detector):
                 return True
         return False
 
+    def _is_alias(self, side, candidate):
+        """O(1) проверка: перекрывается ли серия с ПОСЛЕДНЕЙ записанной серией того же тикера."""
+        if not self.suppress_alias or candidate.start_ms is None or candidate.last_ms is None:
+            return False
+        key = (self.symbol, side)
+        last = self._last_reported.get(key)
+        if not last:
+            return False
+        lst_start, lst_end, lst_count = last
+        overlap = min(lst_end, candidate.last_ms) - max(lst_start, candidate.start_ms)
+        if overlap <= 0:
+            return False
+        span_new = max(candidate.last_ms - candidate.start_ms, 1)
+        # Если новая серия перекрывает старую на >=70% И старая была длиннее (или равна) -> это алиас
+        if (overlap / span_new) >= self.alias_overlap and lst_count >= candidate.count:
+            return True
+        return False
+
     def _write_history(self, side, candidate):
+        # Блокируем алиас-дубли (O(1), не тормозит!)
+        if self._is_alias(side, candidate):
+            return
+
         # v14.0 гейт подавления алиасов
         if self._is_alias(side, candidate):
             return
