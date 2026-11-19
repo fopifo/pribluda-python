@@ -1,5 +1,5 @@
 """
-bot.py — ММВБ Агент (v3.32)
+bot.py — ММВБ Агент (v3.33)
 - Фикс MOEX SSL: отдельная сессия с ssl=False для публичных данных ISS.
 - Фоновые live-мигалки ОТКЛЮЧЕНЫ. Дневная статистика по кнопке работает.
 - Kill-switch, watchdog моста, торговля DRY/LIVE, баланс lite-стиль.
@@ -7,7 +7,9 @@ bot.py — ММВБ Агент (v3.32)
 - v3.29: в "Мой фандинг" добавлен фандинг/лот.
 - v3.30: таблицы фандинга в code block + TW Watchdog.
 - v3.31: "Мой фандинг" берёт позицию LIVE из bridge_state.json.
-- v3.32: /balance показывает PnL в пунктах и рублях от средней цены входа (avg_entry).
+- v3.32: /balance показывает PnL в пунктах и рублях от средней цены входа.
+- v3.33: /balance = ОДНА общая строка = сумма ИТОГО по площадкам; cur берётся из
+         ISS LAST (как ЛК), а не mid из моста; убрана ложная двойная строка.
 """
 import asyncio
 import aiohttp
@@ -24,7 +26,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.32"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.33"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -79,7 +81,7 @@ HELP_TEXT = (
     "/start — главное меню\n"
     "/quote — котировка\n"
     "/positions — открытые позиции\n"
-    "/balance — финрез (оценка моста + PnL от средней)\n"
+    "/balance — финрез (по ЛК: last, от средней)\n"
     "/arba — арбитраж + спреды + фандинг\n"
     "/funding — мой фандинг (топ-10 + позиции)\n"
     "/funding_full — все фандинги (63 инструмента)\n"
@@ -200,71 +202,51 @@ def format_positions(state):
     return "\n".join(lines).rstrip()
 
 async def format_balance(session, state):
+    """v3.33: одна общая строка = сумма ИТОГО по площадкам; cur = ISS LAST (как ЛК)."""
     if not state: return "⚠️ Мост не отдаёт состояние."
     age = (time.time() * 1000 - state.get("updated_ms", 0)) / 1000
     syms = state.get("symbols", {})
     fin = state.get("fin", {})
-    lines = [f"💰 **Финрез за сегодня (оценка моста)** (обновлено {age:.0f}с)\n"]
+    lines = [f"💰 **Финрез по позициям (от средней, как в ЛК)** (мост {age:.0f}с)\n"]
     plats = {}
-    
     for s, i in syms.items():
         pos = i.get("position", 0)
-        realized = i.get("realized", 0.0)
+        realized = i.get("realized", 0.0) or 0.0
         avg = i.get("avg_entry") or i.get("pos_price") or 0
-        bb, ba = i.get("best_bid", 0), i.get("best_ask", 0)
-        cur = (bb + ba) / 2 if bb > 0 and ba > 0 else None
-        
+        bb, ba = i.get("best_bid", 0) or 0, i.get("best_ask", 0) or 0
         d, _ = await get_moex_data(session, iss_ticker(s), board_of(s))
         if not d: continue
-        if cur is None: cur = d.get("last")
-        prev = d.get("prev_settle") if board_of(s) == "RFUD" else d.get("prev")
-        if prev is None: prev = d.get("prev")
-        if cur is None or prev is None: continue
+        cur = d.get("last")
+        if cur is None and bb and ba:
+            cur = (bb + ba) / 2
+        if cur is None or avg <= 0: continue
         if pos == 0 and abs(realized) < 0.005: continue
-        
-        lotsize = d.get("lotsize", 1)
         minstep = d.get("minstep")
-        
-        # Финрез за сегодня (от вчерашнего закрытия)
-        daily = realized + (cur - prev) * pos * point_mult(s)
-        
-        # Общий PnL от средней цены в пунктах и рублях
-        if minstep and avg > 0:
-            sign = 1 if pos > 0 else -1
-            pts = (cur - avg) / minstep * sign
-            cost_per_pt = minstep * lotsize
-            total_pnl = pts * abs(pos) * cost_per_pt + realized
-        else:
-            pts = 0
-            total_pnl = daily
-            
-        plats.setdefault(platform_of(s), []).append((s, pos, daily, total_pnl, pts, avg))
-        
-    grand_daily = 0.0
-    grand_total = 0.0
+        lotsize = d.get("lotsize") or 1
+        if not minstep:
+            plats.setdefault(platform_of(s), []).append((s, pos, avg, cur, None, None, realized))
+            continue
+        sign = 1 if pos > 0 else -1
+        pts = (cur - avg) / minstep * sign
+        rub = realized + (cur - avg) * pos * lotsize
+        plats.setdefault(platform_of(s), []).append((s, pos, avg, cur, pts, rub, realized))
+    grand = 0.0
     for plat in ("Акции", "Фьючерсы", "Валюта"):
         rows = plats.get(plat)
         if not rows: continue
         lines.append(f"**{plat}**")
-        sub_daily = 0.0
-        sub_total = 0.0
-        for s, pos, daily, total_pnl, pts, avg in sorted(rows):
-            sub_daily += daily
-            sub_total += total_pnl
-            e_daily = "🟢" if daily >= 0 else "🔴"
-            e_total = "🟢" if total_pnl >= 0 else "🔴"
-            avg_str = f"@{avg:g}" if avg > 0 else "N/A"
-            pts_str = f"{pts:+.1f}п"
-            lines.append(f"   {e_total} {s}: поз {pos:+g} {avg_str} | сегодня: {e_daily}{daily:+,.2f} ₽ | **всего: {pts_str} / {total_pnl:+,.2f} ₽**")
-        lines.append(f"   ИТОГО {plat}: сегодня {sub_daily:+,.2f} ₽ | **всего {sub_total:+,.2f} ₽**\n")
-        grand_daily += sub_daily
-        grand_total += sub_total
-        
-    ge_daily = "🟢" if grand_daily >= 0 else "🔴"
-    ge_total = "🟢" if grand_total >= 0 else "🔴"
-    lines.append(f"💵 **ОБЩИЙ финрез за сегодня: {ge_daily} {grand_daily:+,.2f} ₽**")
-    lines.append(f"💵 **ОБЩИЙ нереализованный PnL от средней: {ge_total} {grand_total:+,.2f} ₽**")
-    
+        sub = 0.0
+        for s, pos, avg, cur, pts, rub, realized in sorted(rows):
+            if rub is None:
+                lines.append(f"   ⚪ {s}: поз {pos:+g} @ {avg:g} | нет шага ISS")
+                continue
+            sub += rub
+            e = "🟢" if rub >= 0 else "🔴"
+            lines.append(f"   {e} {s}: поз {pos:+g} @ {avg:g}→{cur:g} | {pts:+.1f}п | **{rub:+,.2f} ₽**")
+        lines.append(f"   ИТОГО {plat}: **{sub:+,.2f} ₽**\n")
+        grand += sub
+    ge = "🟢" if grand >= 0 else "🔴"
+    lines.append(f"💵 **ОБЩИЙ ИТОГ по всем площадкам: {ge} {grand:+,.2f} ₽**")
     if fin:
         lines.append("\n_Данные привода (комиссии/активы):_")
         ct = 0.0
@@ -272,8 +254,7 @@ async def format_balance(session, state):
             c = d.get("Commission", 0.0); ct += c
             lines.append(f"   {slot}: комиссия {c:,.2f} ₽ | активов {d.get('TotalAssets', 0):,.0f} ₽ | свободно {d.get('FreeAssets', 0):,.0f} ₽")
         lines.append(f"   Комиссия всего: {ct:,.2f} ₽")
-    lines.append("\n_= реализованный сегодня + (тек.цена − вчерашний сеттлемент/WAP) × позиция × стоимость пункта._")
-    lines.append("_Точный финрез многодневной позиции = в lite-invest._")
+    lines.append("\n_Финрез = реализованный + (последняя цена − средняя входа) × позиция × лот. Совпадает по методологии с «Фин.рез.» в ЛК._")
     return "\n".join(lines)
 
 def format_spoof(data):
@@ -312,14 +293,10 @@ def _load_funding():
         return None, f"❌ Ошибка чтения фандинга: {e}"
 
 def format_funding():
-    """Мой фандинг: топ-10 + мои позиции.
-    v3.31: позиция берётся LIVE из bridge_state.json (совпадает с «Позиции» и
-    «Баланс»), ставка/лот — из funding_*.json. Деньги = -pos * lot * settled."""
     data, err = _load_funding()
     if err: return err
     today = datetime.now(MSK).date().isoformat()
     funding = data.get("funding", {})
-
     state = read_bridge_state()
     src = "live из моста"
     live = {}
@@ -331,7 +308,6 @@ def format_funding():
     if not live:
         src = "из файла (мост недоступен)"
         live = {t: (mp.get("position") or 0) for t, mp in (data.get("my_positions") or {}).items()}
-
     lines = [f"💰 **Мой фандинг** ({today})", ""]
     rows = sorted(funding.items(),
                   key=lambda kv: (kv[1].get("settled_rub") is None, -(kv[1].get("settled_rub") or 0)))[:10]
@@ -343,7 +319,6 @@ def format_funding():
         pc = f"{s * lot:+.2f} ₽" if (s is not None and lot) else "—"
         lines.append(f"{t:<10} {v.get('settled', '—'):>12} × лот {lot:<4} = {pc}")
     lines.append("```")
-
     lines.append("")
     lines.append(f"**📊 Мои позиции** (позиция {src}; шорт получает при +фандинге):")
     tot = 0.0
@@ -991,7 +966,7 @@ async def main():
             asyncio.create_task(funding_updater(session_max))
             asyncio.create_task(tw_watchdog(session_max))
             if SPOOF_ENABLED: asyncio.create_task(monitor_spoof(session_max))
-            print(f"✅ Бот запущен v3.32 (PnL в пунктах от средней). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
+            print(f"✅ Бот запущен v3.33 (общий финрез = сумма по площадкам, cur=ISS last).")
             marker = None
             while True:
                 params = {"timeout": 30}
