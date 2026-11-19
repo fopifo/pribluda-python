@@ -4,7 +4,7 @@ day_audit.py — вечерний аудит дня.
 primary-qty эвристика (any вместо all для qty_variants) чинит GRID-IN-TAPE.
 FP = только серии БЕЗ параметрически подходящего эталона; повторные
 детекции того же робота (эпизоды) = re-detections, не FP.
-Классы FN + оконный дамп GRID-IN-TAPE + аудит FP.
+Классы FN + оконный дамп GRID-IN-TAPE + аудит FP + детали IRREGULAR.
 """
 import sys
 import json
@@ -175,7 +175,6 @@ def main():
     for e in ents:
         by_key[(e["ticker"], e["side"])].append(e)
 
-    # v7: admissible = есть ли хоть один параметрически подходящий эталон
     admissible = [False] * len(ours)
     pairs = []
     for oi, o in enumerate(ours):
@@ -187,10 +186,6 @@ def main():
         for e in by_key.get((o["symbol"], o["side"].upper()), []):
             if abs(our_iv - e["period"]) > max(2.0, e["period"] * 0.2):
                 continue
-            # v7: primary-qty эвристика. Вместо all-containment требуем,
-            # чтобы хотя бы один qty из серии попадал в диапазон эталона.
-            # Это чинит матчинг при наличии единичных шумовых объёмов в серии
-            # (например, SBER 164 при эталоне 169-171).
             if not any(e["lo"] <= q <= e["hi"] for q in our_qty):
                 continue
             admissible[oi] = True
@@ -244,12 +239,22 @@ def main():
     print("\n" + "-" * 68)
     print(f" АУДИТ FP: всего {fp} (короткие <=120s: {len(short_fp)}, "
           f"длинные >120s: {len(long_fp)})")
-    long_fp.sort(key=lambda o: -int(o.get("repeats") or 0))
-    for o in long_fp[:10]:
+    
+    print("\n" + "-" * 68)
+    print(" ДЕТАЛИ FP (топ-10 по количеству повторов):")
+    fp_sorted = sorted(fp_list, key=lambda o: -int(o.get("repeats") or 0))
+    for o in fp_sorted[:10]:
         st, _ = our_window(o)
         t0 = datetime.fromtimestamp(st, MSK).strftime("%H:%M:%S")
         print(f"   {o['symbol']:6s} {o['side']:4s} int={float(o['interval_avg']):.0f}s "
-              f"reps={o['repeats']} старт={t0}")
+              f"reps={o['repeats']} старт={t0} qty={o.get('qty_variants')}")
+
+    print("\n" + "-" * 68)
+    print(" ДЕТАЛИ IRREGULAR (топ-10, которые могли бы быть сеткой):")
+    for e, n, med in cls["IRREGULAR"][:10]:
+        t0 = datetime.fromtimestamp(e["ls"], MSK).strftime("%H:%M:%S")
+        print(f"   {e['ticker']:6s} {e['side']:4s} int={e['period']:.0f}s "
+              f"lots={e['lo']:.0f}-{e['hi']:.0f} старт={t0} ударов={n} med={med:.1f}s")
 
     print("\n" + "-" * 68)
     print(" ОКОННЫЙ ДАМП GRID-IN-TAPE (топ-5):")

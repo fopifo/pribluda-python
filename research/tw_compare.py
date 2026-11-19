@@ -1,326 +1,208 @@
 """
-Приблуда на python — компаратор: наши роботы против роботов T-Widgets.
-
-Сравнивает:
-  - наш поток:      data/robots_history.jsonl (или файл, указанный --ours)
-  - эталон T-Widgets: data/tw_robots_YYYY-MM-DD.jsonl (перехватчик OnRobots2)
-
-!!! ЕДИНИЦЫ: ВСЁ ВНУТРИ — МИЛЛИСЕКУНДЫ (epoch ms) !!!
-  Наши:      start_ms/end_ms/interval_ms — детектор пишет напрямую из ленты QUIK.
-             Строки старого формата (без мс) пропускаются.
-  T-Widgets: interval — уже мс; start/end — ISO-строки (Z) -> epoch ms.
-  Формат TW: payload содержит ключ "robots" (список), каждый элемент плоский:
-             ticker, id, isBuy, interval, minLots, maxLots, start, end, count, endSkips.
-
-v2 (2026-09-03): bursts (int<2с или count<4) вне сравнения; FN по интервалу вниз.
-v2.1 (2026-09-03): --ours PATH — сравнивать с указанным файлом нашей истории
-             (для A/B на истории реплея data/replay_history.jsonl).
-v2.2 (2026-11-18): исправлен load_tw под плоскую структуру payload.robots (без вложенных active/completed).
-
-Метрики:
-  TP — робот есть и у нас, и у T-Widgets (совпали по критерию)
-  FP — наш робот, которого T-Widgets не видит
-  FN — реальный робот T-Widgets, которого мы не видим
-  Precision = TP/(TP+FP), Recall = TP/(TP+FN)
-
-Критерий совпадения (наш r и TW w):
-  1) ticker и side равны;
-  2) окна пересекаются с допуском TIME_TOL_MS;
-  3) INT_LO <= r.interval_ms / w.interval_ms <= INT_HI;
-  4) лоты пересекаются с допуском QTY_TOL (наш диапазон расширяется).
-
-Использование (из корня проекта):
-    python research/tw_compare.py             # последний tw_robots_*.jsonl
-    python research/tw_compare.py 2026-09-03  # конкретная дата
-    python research/tw_compare.py --ours data/replay_history.jsonl
-
-Ничего не меняет — только читает и печатает.
+tw_compare.py — сравнение нашей истории детекций с эталоном T-Widgets.
+Считает TP, FP, FN и задержку детекции (в мс).
 """
-import json
 import sys
-import time
-from datetime import datetime
+import json
 from pathlib import Path
+from collections import defaultdict
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 BASE = Path(__file__).resolve().parent.parent
-DATA = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
 
-TIME_TOL_MS = 120_000      # допуск по пересечению окон (2 мин), мс
-INT_LO, INT_HI = 0.7, 1.3  # допуск по отношению интервалов
-QTY_TOL = 0.5              # расширение диапазона лотов, 50%
-DETAIL_LIMIT = 30          # строк деталей на категорию
-MIN_INTERVAL_MS = 2000.0   # TW-роботы быстрее этого — bursts (вне анализа)
-MIN_COUNT = 4              # минимум сделок у TW-робота
-
-
-def iso_to_ms(s):
-    """ISO-строка (с Z) -> epoch ms."""
-    if not s:
-        return None
+def load_tw_robots(path):
+    """Загружает файл TW-роботов, учитывая вложенную структуру payload['robots']."""
     try:
-        if s.endswith("Z"):
-            s = s[:-1] + "+00:00"
-        return int(datetime.fromisoformat(s).timestamp() * 1000)
-    except (ValueError, TypeError):
-        return None
-
-
-class Progress:
-    """Прогресс-бар по байтам файла. ASCII, без юникода."""
-
-    def __init__(self, total, label):
-        self.total = max(total, 1)
-        self.label = label
-        self.done = 0
-        self.t0 = time.time()
-        self.last = 0.0
-
-    def update(self, n):
-        self.done += n
-        now = time.time()
-        if now - self.last < 0.25 and self.done < self.total:
-            return
-        self.last = now
-        pct = min(self.done * 100 // self.total, 100)
-        dt = max(now - self.t0, 1e-9)
-        speed = self.done / dt
-        eta = (self.total - self.done) / max(speed, 1.0)
-        bar = "#" * (pct // 5) + "." * (20 - pct // 5)
-        print(
-            f"\r[tw_compare] {self.label} [{bar}] {pct:3d}% | "
-            f"{self.done // 1024}/{self.total // 1024}KB | "
-            f"{speed / 1024:.0f}KB/s | ETA {eta:.0f}s",
-            end="",
-            flush=True,
-        )
-
-    def close(self):
-        print()
-
-
-def load_tw(path):
-    """tw_robots_*.jsonl -> список записей в мс (дедуп по id).
-    Формат: payload содержит плоский список 'robots'."""
-    out = {}
-    p = Progress(path.stat().st_size, "tw ")
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            p.update(len(line))
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = json.loads(line)
-            except Exception:
-                continue
-            
-            payload = rec.get("payload") or {}
-            # ИСПРАВЛЕНИЕ: robots - это плоский список, без вложенных active/completed
-            for rob in payload.get("robots") or []:
-                ticker = rob.get("ticker")
-                if not ticker:
-                    continue
-                
-                end_ms = iso_to_ms(rob.get("end"))
-                side = "buy" if rob.get("isBuy") else "sell"
-                key = (ticker, side, rob.get("id"))
-                
-                old = out.get(key)
-                # Дедуп: оставляем запись с самым поздним end_ms
-                if old is not None and (old["end_ms"] or 0) >= (end_ms or 0):
-                    continue
-                
-                out[key] = {
-                    "ticker": ticker,
-                    "side": side,
-                    "id": rob.get("id"),
-                    "interval_ms": float(rob.get("interval") or 0),
-                    "qty_min": rob.get("minLots") or 0,
-                    "qty_max": rob.get("maxLots") or 0,
-                    "start_ms": iso_to_ms(rob.get("start")),
-                    "end_ms": end_ms,
-                    "count": rob.get("count"),
-                    "end_skips": rob.get("endSkips"),
-                    "state": "active", # для совместимости вывода
-                }
-    p.close()
-    return list(out.values())
-
-
-def load_ours(path, date_str):
-    """наша история за дату (МСК) -> список записей в мс.
-    Строки старого формата (без start_ms) пропускаются."""
+        with open(path, "r", encoding="utf-8") as fh:
+            data = json.loads(fh.read())
+            if isinstance(data, dict) and "payload" in data and "robots" in data["payload"]:
+                return data["payload"]["robots"]
+            elif isinstance(data, list):
+                return data
+            else:
+                return [data]
+    except json.JSONDecodeError:
+        pass
+    
+    # Fallback: построчное чтение (NDJSON)
     out = []
-    legacy = 0
-    p = Progress(path.stat().st_size, "our")
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
-        for line in f:
-            p.update(len(line))
+    with open(path, "r", encoding="utf-8") as fh:
+        for line in fh:
             line = line.strip()
-            if not line:
-                continue
-            try:
-                r = json.loads(line)
-            except Exception:
-                continue
-            start_ms = r.get("start_ms")
-            end_ms = r.get("end_ms")
-            interval_ms = r.get("interval_ms")
-            if start_ms is None or end_ms is None or interval_ms is None:
-                legacy += 1
-                continue
-            day = datetime.fromtimestamp(start_ms / 1000, tz=MSK).date().isoformat()
-            if day != date_str:
-                continue
-            qv = r.get("qty_variants") or []
-            if not qv:
-                continue
-            out.append({
-                "ticker": r.get("symbol"),
-                "side": r.get("side"),
-                "interval_ms": float(interval_ms),
-                "qty_min": min(qv),
-                "qty_max": max(qv),
-                "start_ms": int(start_ms),
-                "end_ms": int(end_ms),
-                "repeats": r.get("repeats"),
-            })
-    p.close()
-    if legacy:
-        print(f"[tw_compare] our: строк старого формата (без мс) пропущено: {legacy}")
+            if line:
+                try:
+                    out.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
     return out
 
+def build_tw_entities(events):
+    ents = []
+    for e in events:
+        try:
+            # TW отдаёт время в ISO формате с 'Z' на конце
+            start_str = e.get("start", "").replace("Z", "+00:00")
+            end_str = e.get("end", "").replace("Z", "+00:00")
+            ls = datetime.fromisoformat(start_str).timestamp()
+            le = datetime.fromisoformat(end_str).timestamp()
+        except (KeyError, ValueError):
+            continue
+        
+        ents.append({
+            "id": e.get("id"),
+            "ticker": e.get("ticker"),
+            "side": "BUY" if e.get("isBuy") else "SELL",
+            "period": float(e.get("interval", 0)) / 1000.0, # TW отдаёт интервал в мс, конвертируем в секунды
+            "lo": float(e.get("minLots", 0)),
+            "hi": float(e.get("maxLots", 0)),
+            "op": int(e.get("count", 0)),
+            "ls": ls,
+            "le": le,
+        })
+    return ents
 
-def match(r, w):
-    """Критерий совпадения нашего робота r и робота T-Widgets w (всё в мс)."""
-    if r["ticker"] != w["ticker"] or r["side"] != w["side"]:
-        return False
-    if r["start_ms"] > (w["end_ms"] or 0) + TIME_TOL_MS:
-        return False
-    if (w["start_ms"] or 0) > r["end_ms"] + TIME_TOL_MS:
-        return False
-    if r["interval_ms"] > 0 and w["interval_ms"] > 0:
-        ratio = r["interval_ms"] / w["interval_ms"]
-        if not (INT_LO <= ratio <= INT_HI):
-            return False
-    r_lo = r["qty_min"] * (1 - QTY_TOL)
-    r_hi = r["qty_max"] * (1 + QTY_TOL)
-    if not (r_lo <= w["qty_max"] and w["qty_min"] <= r_hi):
-        return False
-    return True
+def our_window(rec):
+    st = rec.get("start_ts") or (rec.get("start_ms") or 0) / 1000.0 or None
+    if st is None:
+        return None, None
+    en = rec.get("end_ts") or rec.get("last_ts")
+    if en is None:
+        en = st + float(rec.get("repeats") or 1) * float(rec.get("interval_avg") or 0)
+    return float(st), float(en)
 
-
-def fmt_ms(ms):
-    if ms is None:
-        return "--:--:--"
-    return datetime.fromtimestamp(ms / 1000, tz=MSK).strftime("%H:%M:%S")
-
+def window_overlap_score(our_st, our_en, ref_ls, ref_le):
+    os_ = max(our_st, ref_ls)
+    oe = min(our_en, ref_le)
+    if os_ < oe:
+        return oe - os_
+    if our_en < ref_ls:
+        return -(ref_ls - our_en)
+    return -(our_st - ref_le)
 
 def main():
-    args = sys.argv[1:]
-    date_arg = None
-    ours_path = DATA / "robots_history.jsonl"
-    i = 0
-    while i < len(args):
-        a = args[i]
-        if a == "--ours":
-            i += 1
-            ours_path = Path(args[i])
-            if not ours_path.is_absolute():
-                ours_path = BASE / ours_path
-        elif not a.startswith("--"):
-            date_arg = a
-        i += 1
+    date = sys.argv[1] if len(sys.argv) > 1 else "2026-11-13"
+    ws, we = "10:00", "16:16"
+    if "--ws" in sys.argv:
+        ws = sys.argv[sys.argv.index("--ws") + 1]
+    if "--we" in sys.argv:
+        we = sys.argv[sys.argv.index("--we") + 1]
+    
+    ours_path = BASE / "data" / "robots_history.jsonl"
+    tw_path = BASE / "data" / f"tw_robots_{date}.jsonl"
+    
+    if "--ours" in sys.argv:
+        idx = sys.argv.index("--ours")
+        ours_path = Path(sys.argv[idx + 1])
 
-    files = sorted(DATA.glob("tw_robots_*.jsonl"))
-    if date_arg:
-        files = [f for f in files if date_arg in f.name]
-    if not files:
-        print("[tw_compare] Нет файлов data/tw_robots_*.jsonl")
-        sys.exit(1)
-    tw_file = files[-1]
-    date_str = tw_file.name.replace("tw_robots_", "").replace(".jsonl", "")
-    print(f"[tw_compare] эталон T-Widgets: {tw_file.name} (дата {date_str})")
+    if not tw_path.exists():
+        print(f"[!] нет файла {tw_path.name}")
+        return
+    if not ours_path.exists():
+        print(f"[!] нет файла {ours_path.name}")
+        return
+
+    print(f"[tw_compare] эталон T-Widgets: {tw_path.name} (дата {date})")
     print(f"[tw_compare] наша история: {ours_path}")
 
-    tw = load_tw(tw_file)
-    real = [
-        w for w in tw
-        if (w["interval_ms"] or 0) >= MIN_INTERVAL_MS and (w["count"] or 0) >= MIN_COUNT
-    ]
-    print(f"[tw_compare] роботов T-Widgets (уник. ticker+side+id): {len(tw)}")
-    print(f"[tw_compare] из них bursts (int<2с или count<4, вне сравнения): {len(tw) - len(real)}")
-    print(f"[tw_compare] реальных TW-роботов для сравнения: {len(real)}")
+    tw_events = load_tw_robots(tw_path)
+    tw_ents = build_tw_entities(tw_events)
+    
+    # Фильтруем только те, что попадают в наш диапазон анализа (<= 60 сек)
+    bursts = [e for e in tw_ents if e["period"] < 2.0 or (e["le"] - e["ls"]) < 4.0 or e["period"] > 60.0]
+    real_tw = [e for e in tw_ents if e not in bursts]
+    
+    print(f"[tw_compare] роботов T-Widgets (уник. ticker+side+id): {len(tw_ents)}")
+    print(f"[tw_compare] из них bursts/long (вне сравнения): {len(bursts)}")
+    print(f"[tw_compare] реальных TW-роботов для сравнения: {len(real_tw)}")
 
-    if not ours_path.exists():
-        print(f"[tw_compare] Нет файла нашей истории: {ours_path}")
-        sys.exit(1)
-    ours = load_ours(ours_path, date_str)
-    print(f"[tw_compare] наших роботов (в мс) за {date_str}: {len(ours)}")
+    ours = load_tw_robots(ours_path) # Используем ту же функцию, она универсальна
+    d0 = datetime.strptime(date, "%Y-%m-%d").date()
+    w0 = datetime.combine(d0, datetime.strptime(ws, "%H:%M").time(), tzinfo=MSK).timestamp()
+    w1 = datetime.combine(d0, datetime.strptime(we, "%H:%M").time(), tzinfo=MSK).timestamp()
+    
+    ours_windowed = [o for o in ours 
+                     if 0 < float(o.get("interval_avg") or 0) <= 60.0
+                     and w0 <= (our_window(o)[0] or -1) <= w1]
+    print(f"[tw_compare] наших роботов (в мс) за {date}: {len(ours_windowed)}")
 
-    used = set()
-    tp, fp, fn = [], [], []
-    for r in sorted(ours, key=lambda x: x["start_ms"]):
-        hit = None
-        for i, w in enumerate(real):
-            if i in used:
+    by_key = defaultdict(list)
+    for e in real_tw:
+        by_key[(e["ticker"], e["side"])].append(e)
+
+    admissible = [False] * len(ours_windowed)
+    pairs = []
+    for oi, o in enumerate(ours_windowed):
+        our_st, our_en = our_window(o)
+        our_iv = float(o["interval_avg"])
+        our_qty = set(o.get("qty_variants", []))
+        if not our_qty:
+            continue
+        for e in by_key.get((o["symbol"], o["side"].upper()), []):
+            if abs(our_iv - e["period"]) > max(2.0, e["period"] * 0.2):
                 continue
-            if match(r, w):
-                hit = i
-                break
-        if hit is not None:
-            used.add(hit)
-            tp.append((r, real[hit]))
-        else:
-            fp.append(r)
-    for i, w in enumerate(real):
-        if i not in used:
-            fn.append(w)
+            if not any(e["lo"] <= q <= e["hi"] for q in our_qty):
+                continue
+            admissible[oi] = True
+            pairs.append((window_overlap_score(our_st, our_en, e["ls"], e["le"]), oi, e["id"]))
+    
+    pairs.sort(key=lambda x: -x[0])
+    matched = set()
+    matched_ours = set()
+    tp_list = []
+    
+    for score, oi, eid in pairs:
+        if eid in matched or oi in matched_ours:
+            continue
+        matched.add(eid)
+        matched_ours.add(oi)
+        tw_ent = next(e for e in real_tw if e["id"] == eid)
+        our_rec = ours_windowed[oi]
+        our_st_ms = our_rec.get("start_ms") or ((our_rec.get("start_ts") or 0) * 1000)
+        tw_st_ms = tw_ent["ls"] * 1000
+        delay_ms = our_st_ms - tw_st_ms
+        tp_list.append((our_rec, tw_ent, delay_ms))
 
-    prec = len(tp) / (len(tp) + len(fp)) if (tp or fp) else 0.0
-    rec = len(tp) / (len(tp) + len(fn)) if (tp or fn) else 0.0
+    fp_list = [o for i, o in enumerate(ours_windowed) if not admissible[i]]
+    fn_list = [e for e in real_tw if e["id"] not in matched]
+    
+    tp = len(tp_list)
+    fp = len(fp_list)
+    fn = len(fn_list)
 
-    print()
-    print("=" * 70)
+    print("\n" + "=" * 70)
     print("СРАВНЕНИЕ: наша приблуда против T-Widgets (все времена в мс)")
     print("=" * 70)
-    print(f"TP: {len(tp)}   FP: {len(fp)}   FN(реальные): {len(fn)}   bursts(вне): {len(tw) - len(real)}")
-    print(f"Precision: {prec:.1%}   Recall: {rec:.1%}")
-    print(f"METRICS: TP={len(tp)} FP={len(fp)} FN={len(fn)}")
+    print(f"TP: {tp}   FP: {fp}   FN(реальные): {fn}   bursts(вне): {len(bursts)}")
+    if tp + fp:
+        print(f"Precision: {100.0*tp/(tp+fp):.1f}%   ", end="")
+    if tp + fn:
+        print(f"Recall: {100.0*tp/(tp+fn):.1f}%")
+    print(f"METRICS: TP={tp} FP={fp} FN={fn}")
 
-    if tp:
-        print(f"\n--- TP (совпали, первые {DETAIL_LIMIT}) ---")
-        for r, w in tp[:DETAIL_LIMIT]:
-            print(
-                f"  {r['ticker']:6} {r['side']:4} "
-                f"наш int={r['interval_ms'] / 1000:.1f}s qty=[{r['qty_min']},{r['qty_max']}] "
-                f"| tw int={w['interval_ms'] / 1000:.1f}s qty=[{w['qty_min']},{w['qty_max']}] "
-                f"окно {fmt_ms(r['start_ms'])}-{fmt_ms(r['end_ms'])}"
-            )
+    print("\n--- TP (совпали, первые 30) ---")
+    for our_rec, tw_ent, delay in tp_list[:30]:
+        print(f"  {our_rec['symbol']:6s} {our_rec['side']:4s} наш int={our_rec['interval_avg']:.1f}s qty={our_rec['qty_variants']} | "
+              f"tw int={tw_ent['period']:.1f}s qty=[{tw_ent['lo']:.0f},{tw_ent['hi']:.0f}] | "
+              f"задержка: {delay:+.0f} мс")
 
-    if fp:
-        print(f"\n--- FP (наши, которых T-Widgets не видит, первые {DETAIL_LIMIT}) ---")
-        for r in fp[:DETAIL_LIMIT]:
-            print(
-                f"  {r['ticker']:6} {r['side']:4} "
-                f"int={r['interval_ms'] / 1000:.1f}s qty=[{r['qty_min']},{r['qty_max']}] "
-                f"повт={r['repeats']} окно {fmt_ms(r['start_ms'])}-{fmt_ms(r['end_ms'])}"
-            )
+    print("\n--- FP (наши, которых T-Widgets не видит, первые 30) ---")
+    for o in fp_list[:30]:
+        st, _ = our_window(o)
+        t0 = datetime.fromtimestamp(st, MSK).strftime("%H:%M:%S")
+        print(f"  {o['symbol']:6s} {o['side']:4s} int={float(o['interval_avg']):.1f}s "
+              f"qty={o['qty_variants']} повт={o['repeats']} окно {t0}-{datetime.fromtimestamp((our_window(o)[1] or st), MSK).strftime('%H:%M:%S')}")
 
-    if fn:
-        print(f"\n--- FN (T-Widgets видит, мы нет; сортировка по интервалу вниз, первые {DETAIL_LIMIT}) ---")
-        for w in sorted(fn, key=lambda x: -x["interval_ms"])[:DETAIL_LIMIT]:
-            print(
-                f"  {w['ticker']:6} {w['side']:4} "
-                f"int={w['interval_ms'] / 1000:.1f}s qty=[{w['qty_min']},{w['qty_max']}] "
-                f"count={w['count']} skips={w['end_skips']} "
-                f"окно {fmt_ms(w['start_ms'])}-{fmt_ms(w['end_ms'])}"
-            )
+    print("\n--- FN (T-Widgets видит, мы нет; сортировка по интервалу вниз, первые 30) ---")
+    fn_sorted = sorted(fn_list, key=lambda x: -x["period"])
+    for e in fn_sorted[:30]:
+        t0 = datetime.fromtimestamp(e["ls"], MSK).strftime("%H:%M:%S")
+        t1 = datetime.fromtimestamp(e["le"], MSK).strftime("%H:%M:%S")
+        print(f"  {e['ticker']:6s} {e['side']:4s} int={e['period']:.1f}s qty=[{e['lo']:.0f},{e['hi']:.0f}] "
+              f"count={e['op']} окно {t0}-{t1}")
 
     print("\n[tw_compare] Готово.")
-
 
 if __name__ == "__main__":
     main()
