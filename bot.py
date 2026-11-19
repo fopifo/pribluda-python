@@ -1,15 +1,12 @@
 """
-bot.py — ММВБ Агент (v3.33)
+bot.py — ММВБ Агент (v3.34)
 - Фикс MOEX SSL: отдельная сессия с ssl=False для публичных данных ISS.
 - Фоновые live-мигалки ОТКЛЮЧЕНЫ. Дневная статистика по кнопке работает.
 - Kill-switch, watchdog моста, торговля DRY/LIVE, баланс lite-стиль.
-- v3.28: фоновое авто-обновление фандинга (старт + после клиринга 18:50).
-- v3.29: в "Мой фандинг" добавлен фандинг/лот.
-- v3.30: таблицы фандинга в code block + TW Watchdog.
-- v3.31: "Мой фандинг" берёт позицию LIVE из bridge_state.json.
-- v3.32: /balance показывает PnL в пунктах и рублях от средней цены входа.
-- v3.33: /balance = ОДНА общая строка = сумма ИТОГО по площадкам; cur берётся из
-         ISS LAST (как ЛК), а не mid из моста; убрана ложная двойная строка.
+- v3.33: /balance = одна общая = сумма по площадкам, cur=ISS last (как ЛК).
+- v3.34: Исправлен расчёт PnL фьючерсов. ISS отдаёт LOTSIZ=None для RFUD,
+         поэтому добавлен фолбэк-словарь множителей (CNY=1000 и т.д.), 
+         чтобы цифры бились с ЛК.
 """
 import asyncio
 import aiohttp
@@ -26,7 +23,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.33"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.34"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -132,9 +129,6 @@ def human_sec(s):
     if s is None: return "?"
     return f"{int(s // 60)}м{int(s % 60)}с" if s >= 60 else f"{s:.0f}с"
 
-def point_mult(sym):
-    return 1000 if (sym == "CNYRUBF" or sym.startswith("CNY-")) else 1
-
 def platform_of(sym):
     if sym in ("CNYRUB_TOM", "CNY000000TOD") or sym.endswith("_TOM") or sym.endswith("TOD"): return "Валюта"
     if sym == "CNYRUBF" or sym.startswith("CNY-"): return "Фьючерсы"
@@ -202,13 +196,21 @@ def format_positions(state):
     return "\n".join(lines).rstrip()
 
 async def format_balance(session, state):
-    """v3.33: одна общая строка = сумма ИТОГО по площадкам; cur = ISS LAST (как ЛК)."""
+    """v3.34: одна общая строка = сумма ИТОГО по площадкам; cur = ISS LAST; 
+    добавлен фолбэк-множитель для фьючерсов, т.к. ISS отдаёт LOTSIZ=None."""
     if not state: return "⚠️ Мост не отдаёт состояние."
     age = (time.time() * 1000 - state.get("updated_ms", 0)) / 1000
     syms = state.get("symbols", {})
     fin = state.get("fin", {})
     lines = [f"💰 **Финрез по позициям (от средней, как в ЛК)** (мост {age:.0f}с)\n"]
     plats = {}
+    
+    # Фолбэк-множители для фьючерсов, если ISS отдаёт LOTSIZ=None
+    futures_mult = {
+        "CNYRUBF": 1000, "CNY-12.26": 1000, "CNY-03.25": 1000,
+        "Si": 1000, "BR": 10, "RTS": 15, "SBERF": 10
+    }
+
     for s, i in syms.items():
         pos = i.get("position", 0)
         realized = i.get("realized", 0.0) or 0.0
@@ -221,15 +223,23 @@ async def format_balance(session, state):
             cur = (bb + ba) / 2
         if cur is None or avg <= 0: continue
         if pos == 0 and abs(realized) < 0.005: continue
+        
         minstep = d.get("minstep")
-        lotsize = d.get("lotsize") or 1
+        lotsize = d.get("lotsize")
+        
+        # Если lotsize None (фьючерсы), берём из словаря, иначе 1
+        if lotsize is None:
+            lotsize = futures_mult.get(s, 1)
+            
         if not minstep:
             plats.setdefault(platform_of(s), []).append((s, pos, avg, cur, None, None, realized))
             continue
+            
         sign = 1 if pos > 0 else -1
         pts = (cur - avg) / minstep * sign
         rub = realized + (cur - avg) * pos * lotsize
         plats.setdefault(platform_of(s), []).append((s, pos, avg, cur, pts, rub, realized))
+        
     grand = 0.0
     for plat in ("Акции", "Фьючерсы", "Валюта"):
         rows = plats.get(plat)
@@ -245,6 +255,7 @@ async def format_balance(session, state):
             lines.append(f"   {e} {s}: поз {pos:+g} @ {avg:g}→{cur:g} | {pts:+.1f}п | **{rub:+,.2f} ₽**")
         lines.append(f"   ИТОГО {plat}: **{sub:+,.2f} ₽**\n")
         grand += sub
+        
     ge = "🟢" if grand >= 0 else "🔴"
     lines.append(f"💵 **ОБЩИЙ ИТОГ по всем площадкам: {ge} {grand:+,.2f} ₽**")
     if fin:
@@ -254,7 +265,7 @@ async def format_balance(session, state):
             c = d.get("Commission", 0.0); ct += c
             lines.append(f"   {slot}: комиссия {c:,.2f} ₽ | активов {d.get('TotalAssets', 0):,.0f} ₽ | свободно {d.get('FreeAssets', 0):,.0f} ₽")
         lines.append(f"   Комиссия всего: {ct:,.2f} ₽")
-    lines.append("\n_Финрез = реализованный + (последняя цена − средняя входа) × позиция × лот. Совпадает по методологии с «Фин.рез.» в ЛК._")
+    lines.append("\n_Финрез = реализованный + (последняя цена − средняя входа) × позиция × размер контракта. Совпадает по методологии с «Фин.рез.» в ЛК._")
     return "\n".join(lines)
 
 def format_spoof(data):
@@ -491,7 +502,7 @@ async def get_moex_data(session_moex, ticker: str, board: str = "TQBR"):
                 sq = dict(zip(sec.get("columns", []), sec_rows[0]))
                 prev = sq.get("PREVWAPRICE") or sq.get("PREVPRICE")
                 prev_settle = sq.get("PREVSETTLE")
-                lotsize = sq.get("LOTSIZE") or 1
+                lotsize = sq.get("LOTSIZE")
                 minstep = sq.get("MINSTEP")
             if last is not None:
                 change_abs = last - prev if prev else 0
@@ -562,7 +573,7 @@ async def get_cny_arbitrage(session_moex):
     if qd is None: return f"⚠️ Не удалось получить {qt}.\n{qt2}"
     p = perp["last"] or perp["settle"] or perp["prev"]
     q = qd["last"] or qd["settle"] or qd["prev"]
-    lot = perp.get("lotsize", 1000)
+    lot = perp.get("lotsize", 1000) # Фолбэк для фьючерсов
     spread = q - p if (q and p) else None
     spread_str = f"**{spread:.4f} ₽**" if spread is not None else "Н/Д"
     swap = perp.get("swap_curr") or perp.get("swap")
@@ -966,7 +977,7 @@ async def main():
             asyncio.create_task(funding_updater(session_max))
             asyncio.create_task(tw_watchdog(session_max))
             if SPOOF_ENABLED: asyncio.create_task(monitor_spoof(session_max))
-            print(f"✅ Бот запущен v3.33 (общий финрез = сумма по площадкам, cur=ISS last).")
+            print(f"✅ Бот запущен v3.34 (PnL фьючерсов исправлен через фолбэк-множитель).")
             marker = None
             while True:
                 params = {"timeout": 30}
