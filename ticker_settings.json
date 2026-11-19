@@ -463,7 +463,7 @@
     "min_double_hit_gap_sec": 0.0
   },
   "PIKK": {
-    "active": true,
+    "active": false,
     "min_qty": 25,
     "min_interval": 2.0,
     "max_interval": 600.0,

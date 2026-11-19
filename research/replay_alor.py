@@ -1,5 +1,5 @@
 """
-Приблуда на python — офлайн-реплей ИСТИННЫХ сторон (Алор) через боевые
+Приблуда на python — оффлайн-реплей СТННых сторон (Алор) через боевые
 детекторы. Читает data/live_trades_YYYY-MM-DD.jsonl (скачивается
 tools/alor_download_day.py), кормит детекторы в хронологическом порядке.
 История пишется изолированно в data/replay_alor_history.jsonl
@@ -29,40 +29,48 @@ HIST = BASE / "data" / "replay_alor_history.jsonl"
 
 
 class Progress:
-    """Прогресс-бар по числу сделок. ASCII, % / скорость / ETA."""
+    """Прогресс-бар: в живой консоли рисует \r (плавно), при чтении через pipe
+    молчит полностью (кроме финального DONE), чтобы не спамить morning_report."""
 
     def __init__(self, total, label):
         self.total = max(int(total), 1)
         self.label = label
         self.done = 0
         self.t0 = time.time()
-        self.last = 0.0
+        self.last_tick = 0.0
+        self.is_tty = sys.stderr.isatty()
 
     def update(self, n):
         self.done += n
+        if not self.is_tty:
+            return  # в pipe не пишем ничего
         now = time.time()
-        if now - self.last < 0.25 and self.done < self.total:
+        if now - self.last_tick < 0.25 and self.done < self.total:
             return
-        self.last = now
+        self.last_tick = now
         pct = min(self.done * 100 // self.total, 100)
         dt = max(now - self.t0, 1e-9)
         speed = self.done / dt
         eta = (self.total - self.done) / max(speed, 1.0)
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
-        print(f"\r[replay_alor] {self.label} [{bar}] {pct:3d}% | "
-              f"{self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с",
-              end="", flush=True, file=sys.stderr)
+        line = f"[replay_alor] {self.label} [{bar}] {pct:3d}% | {self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с"
+        sys.stderr.write("\r" + line)
+        sys.stderr.flush()
 
     def close(self):
-        print(file=sys.stderr)
+        if self.is_tty:
+            print(file=sys.stderr)
+        else:
+            # в pipe — одна финальная строка с переводом, чтобы readline() завершился
+            print(f"[replay_alor] feed [####################] 100% | {self.total}/{self.total} сделок | DONE", file=sys.stderr, flush=True)
 
 
 def deduplicate_history(hist_path):
-    """Читает историю, оставляет только одну запись на (symbol, side, start_ts) 
+    """Читает историю, оставляет только одну запись на (symbol, side, start_ts)
     с максимальным repeats (финальный снимок серии)."""
     if not hist_path.exists():
         return 0, 0
-    
+
     by_key = {}
     total_lines = 0
     with open(hist_path, "r", encoding="utf-8") as f:
@@ -75,25 +83,20 @@ def deduplicate_history(hist_path):
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            
             key = (rec.get("symbol"), rec.get("side"), rec.get("start_ts"))
             reps = rec.get("repeats", 0)
-            
-            # Оставляем запись с максимальным repeats (или первую, если равны)
             if key not in by_key or reps > by_key[key].get("repeats", 0):
                 by_key[key] = rec
-                
+
     deduped_lines = len(by_key)
     if deduped_lines == total_lines:
-        return total_lines, 0 # Нечего дедуплицировать
-        
-    # Перезаписываем файл чистыми данными
+        return total_lines, 0
+
     with open(hist_path, "w", encoding="utf-8") as f:
-        # Сортируем по start_ts для хронологического порядка
         sorted_recs = sorted(by_key.values(), key=lambda x: x.get("start_ts", 0))
         for rec in sorted_recs:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            
+
     return total_lines, deduped_lines
 
 
@@ -114,19 +117,18 @@ def main():
     if "--noisy-qty" in args:
         noisy_qty = True
 
-    # ИСПРАВЛЕНИЕ: ищем именно live_trades_*.jsonl, как сохраняет alor_download_day.py
     files = sorted(DATA.glob(f"live_trades_{date_str}.jsonl"))
     if not files:
         print(f"[replay_alor] Нет файлов data/live_trades_{date_str}.jsonl. "
-              f"Скачай: python tools/alor_download_day.py {date_str}")
+              f"Скачай: python tools/alor_download_day.py {date_str}", file=sys.stderr)
         sys.exit(1)
-    print(f"[replay_alor] файлов Алора: {len(files)}")
+    print(f"[replay_alor] файлов Алора: {len(files)}", file=sys.stderr)
     if double_hit is not None:
-        print(f"[replay_alor] РЕЖИМ A/B: min_double_hit_gap_sec={double_hit}")
+        print(f"[replay_alor] РЕЖИМ A/B: min_double_hit_gap_sec={double_hit}", file=sys.stderr)
     if no_min_qty:
-        print("[replay_alor] РЕЖИМ A/B: без порога min_qty")
+        print("[replay_alor] РЕЖИМ A/B: без порога min_qty", file=sys.stderr)
     if noisy_qty:
-        print("[replay_alor] РЕЖИМ A/B: фильтр noisy qty v12 C+B")
+        print("[replay_alor] РЕЖИМ A/B: фильтр noisy qty v12 C+B", file=sys.stderr)
 
     trades = []
     for f in files:
@@ -137,10 +139,10 @@ def main():
                     if line:
                         trades.append(json.loads(line))
         except Exception as e:
-            print(f"  ошибка чтения {f.name}: {e}")
-    
+            print(f"  ошибка чтения {f.name}: {e}", file=sys.stderr)
+
     trades.sort(key=lambda t: t.get("timestamp") or 0)
-    print(f"[replay_alor] сделок всего: {len(trades)}")
+    print(f"[replay_alor] сделок всего: {len(trades)}", file=sys.stderr)
 
     settings = load_settings()
     dets = {}
@@ -157,7 +159,7 @@ def main():
             dets[sym] = [IntervalRobotDetector(sym, c)
                          for c in get_detector_configs(sym, ov.get("min_qty", 1), ov)]
             for d in dets[sym]:
-                d._history_path = HIST  # изолированная история
+                d._history_path = HIST
         return dets[sym]
 
     if HIST.exists():
@@ -190,14 +192,13 @@ def main():
         fed += 1
     p.close()
 
-    print(f"[replay_alor] скормлено={fed}, пропущено: sym={skip_sym}, qty={skip_qty}")
-    
-    # === Дедупликация истории ===
+    print(f"[replay_alor] скормлено={fed}, пропущено: sym={skip_sym}, qty={skip_qty}", file=sys.stderr)
+
     total, deduped = deduplicate_history(HIST)
     if total > deduped:
-        print(f"[replay_alor] дедупликация: было {total} записей, стало {deduped} (удалено {total - deduped} дублей)")
-    
-    print(f"[replay_alor] история: {HIST}")
+        print(f"[replay_alor] дедупликация: было {total} записей, стало {deduped} (удалено {total - deduped} дублей)", file=sys.stderr)
+
+    print(f"[replay_alor] история: {HIST}", file=sys.stderr)
 
 
 if __name__ == "__main__":
