@@ -29,8 +29,8 @@ echo [4/7] Снапшоты позиций (каждые 5 мин + финал 1
 start "Snapshot Positions" cmd /k "cd /d C:\Users\Public\MI_CODES\Qwen_coder && python tools/snapshot_positions.py --loop"
 timeout /t 2 /nobreak >nul
 
-echo [5/7] Приблуда (Main)...
-start "Приблуда (Main)" cmd /k "cd /d C:\Users\Public\MI_CODES\Qwen_coder && python main.py"
+echo [5/7] Приблуда (Main) -- источник: мост (bridge)...
+start "Приблуда (Main)" cmd /k "cd /d C:\Users\Public\MI_CODES\Qwen_coder && python main.py --source bridge"
 timeout /t 2 /nobreak >nul
 
 echo [6/7] MAX Бот...

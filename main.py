@@ -23,14 +23,21 @@ from gui.main_window import MainWindow, QSS
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", choices=["quik", "alor", "tinvest"], default="quik")
+    # Исторически файл лежит в connectors/quik, но внутри УЖЕ реализован BridgeTapeReader 
+    # (чтение data/pbsdk_trades_*.jsonl). "bridge" и "quik" запускают один и тот же рабочий код.
+    parser.add_argument("--source", choices=["bridge", "quik", "alor", "tinvest"], default="bridge")
     args = parser.parse_args()
     
     shared = SharedState()
     
-    if args.source == "quik":
+    if args.source in ("bridge", "quik"):
         from connectors.quik.backend import start_backend
         start_backend(shared)
+    elif args.source == "alor":
+        from connectors.alor.stream_client import start_backend
+        start_backend(shared)
+    elif args.source == "tinvest":
+        pass # Заглушка, если понадобится
     
     app = QApplication(sys.argv)
     app.setStyleSheet(QSS)

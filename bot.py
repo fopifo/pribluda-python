@@ -1,13 +1,13 @@
 """
-bot.py — ММВБ Агент (v3.31)
+bot.py — ММВБ Агент (v3.32)
 - Фикс MOEX SSL: отдельная сессия с ssl=False для публичных данных ISS.
 - Фоновые live-мигалки ОТКЛЮЧЕНЫ. Дневная статистика по кнопке работает.
 - Kill-switch, watchdog моста, торговля DRY/LIVE, баланс lite-стиль.
 - v3.28: фоновое авто-обновление фандинга (старт + после клиринга 18:50).
 - v3.29: в "Мой фандинг" добавлен фандинг/лот.
 - v3.30: таблицы фандинга в code block + TW Watchdog.
-- v3.31: "Мой фандинг" берёт позицию LIVE из bridge_state.json (совпадает с
-         «Позиции» и «Баланс»); ставка/лот — из funding_*.json.
+- v3.31: "Мой фандинг" берёт позицию LIVE из bridge_state.json.
+- v3.32: /balance показывает PnL в пунктах и рублях от средней цены входа (avg_entry).
 """
 import asyncio
 import aiohttp
@@ -24,7 +24,7 @@ from zoneinfo import ZoneInfo
 BOT_TOKEN = "f9LHodD0cOK58ifY04m7_DqGlAn07KefMTGq0AJQPLp21PgmHPR7qIy9vhMHTAfnQsS4jthZRz_Lg-7sGXgZ"
 BASE_URL = "https://platform-api2.max.ru"
 HEADERS = {"Authorization": BOT_TOKEN}
-MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.31"}
+MOEX_HEADERS = {"User-Agent": "MMVB-Agent-Bot/3.32"}
 BASE = Path(__file__).resolve().parent
 DATA_DIR = BASE / "data"
 MSK = ZoneInfo("Europe/Moscow")
@@ -79,7 +79,7 @@ HELP_TEXT = (
     "/start — главное меню\n"
     "/quote — котировка\n"
     "/positions — открытые позиции\n"
-    "/balance — финрез (оценка моста)\n"
+    "/balance — финрез (оценка моста + PnL от средней)\n"
     "/arba — арбитраж + спреды + фандинг\n"
     "/funding — мой фандинг (топ-10 + позиции)\n"
     "/funding_full — все фандинги (63 инструмента)\n"
@@ -206,11 +206,14 @@ async def format_balance(session, state):
     fin = state.get("fin", {})
     lines = [f"💰 **Финрез за сегодня (оценка моста)** (обновлено {age:.0f}с)\n"]
     plats = {}
+    
     for s, i in syms.items():
         pos = i.get("position", 0)
         realized = i.get("realized", 0.0)
+        avg = i.get("avg_entry") or i.get("pos_price") or 0
         bb, ba = i.get("best_bid", 0), i.get("best_ask", 0)
         cur = (bb + ba) / 2 if bb > 0 and ba > 0 else None
+        
         d, _ = await get_moex_data(session, iss_ticker(s), board_of(s))
         if not d: continue
         if cur is None: cur = d.get("last")
@@ -218,22 +221,50 @@ async def format_balance(session, state):
         if prev is None: prev = d.get("prev")
         if cur is None or prev is None: continue
         if pos == 0 and abs(realized) < 0.005: continue
+        
+        lotsize = d.get("lotsize", 1)
+        minstep = d.get("minstep")
+        
+        # Финрез за сегодня (от вчерашнего закрытия)
         daily = realized + (cur - prev) * pos * point_mult(s)
-        plats.setdefault(platform_of(s), []).append((s, pos, daily))
-    grand = 0.0
+        
+        # Общий PnL от средней цены в пунктах и рублях
+        if minstep and avg > 0:
+            sign = 1 if pos > 0 else -1
+            pts = (cur - avg) / minstep * sign
+            cost_per_pt = minstep * lotsize
+            total_pnl = pts * abs(pos) * cost_per_pt + realized
+        else:
+            pts = 0
+            total_pnl = daily
+            
+        plats.setdefault(platform_of(s), []).append((s, pos, daily, total_pnl, pts, avg))
+        
+    grand_daily = 0.0
+    grand_total = 0.0
     for plat in ("Акции", "Фьючерсы", "Валюта"):
         rows = plats.get(plat)
         if not rows: continue
         lines.append(f"**{plat}**")
-        sub = 0.0
-        for s, pos, daily in sorted(rows):
-            sub += daily
-            e = "🟢" if daily >= 0 else "🔴"
-            lines.append(f"   {e} {s}: поз {pos:+g} → фин.рез **{daily:+,.2f} ₽**")
-        lines.append(f"   ИТОГО {plat}: **{sub:+,.2f} ₽**\n")
-        grand += sub
-    ge = "🟢" if grand >= 0 else "🔴"
-    lines.append(f"💵 **ОБЩИЙ финрез: {ge} {grand:+,.2f} ₽**")
+        sub_daily = 0.0
+        sub_total = 0.0
+        for s, pos, daily, total_pnl, pts, avg in sorted(rows):
+            sub_daily += daily
+            sub_total += total_pnl
+            e_daily = "🟢" if daily >= 0 else "🔴"
+            e_total = "🟢" if total_pnl >= 0 else "🔴"
+            avg_str = f"@{avg:g}" if avg > 0 else "N/A"
+            pts_str = f"{pts:+.1f}п"
+            lines.append(f"   {e_total} {s}: поз {pos:+g} {avg_str} | сегодня: {e_daily}{daily:+,.2f} ₽ | **всего: {pts_str} / {total_pnl:+,.2f} ₽**")
+        lines.append(f"   ИТОГО {plat}: сегодня {sub_daily:+,.2f} ₽ | **всего {sub_total:+,.2f} ₽**\n")
+        grand_daily += sub_daily
+        grand_total += sub_total
+        
+    ge_daily = "🟢" if grand_daily >= 0 else "🔴"
+    ge_total = "🟢" if grand_total >= 0 else "🔴"
+    lines.append(f"💵 **ОБЩИЙ финрез за сегодня: {ge_daily} {grand_daily:+,.2f} ₽**")
+    lines.append(f"💵 **ОБЩИЙ нереализованный PnL от средней: {ge_total} {grand_total:+,.2f} ₽**")
+    
     if fin:
         lines.append("\n_Данные привода (комиссии/активы):_")
         ct = 0.0
@@ -466,7 +497,7 @@ async def get_moex_data(session_moex, ticker: str, board: str = "TQBR"):
     params = {
         "iss.only": "marketdata,securities",
         "marketdata.columns": "SECID,LAST,LOW,HIGH,VALTODAY,SWAPRATE,SWAPRATE_CURR,SETTLEPRICE",
-        "securities.columns": "SECID,PREVWAPRICE,PREVPRICE,PREVSETTLE,LOTSIZE"
+        "securities.columns": "SECID,PREVWAPRICE,PREVPRICE,PREVSETTLE,LOTSIZE,MINSTEP"
     }
     try:
         async with session_moex.get(url, params=params, headers=MOEX_HEADERS) as resp:
@@ -480,12 +511,13 @@ async def get_moex_data(session_moex, ticker: str, board: str = "TQBR"):
                 val = q.get("VALTODAY"); swap = q.get("SWAPRATE"); swap_curr = q.get("SWAPRATE_CURR")
                 settle = q.get("SETTLEPRICE")
             sec = data.get("securities", {}); sec_rows = sec.get("data", [])
-            prev = prev_settle = lotsize = None
+            prev = prev_settle = lotsize = minstep = None
             if sec_rows:
                 sq = dict(zip(sec.get("columns", []), sec_rows[0]))
                 prev = sq.get("PREVWAPRICE") or sq.get("PREVPRICE")
                 prev_settle = sq.get("PREVSETTLE")
                 lotsize = sq.get("LOTSIZE") or 1
+                minstep = sq.get("MINSTEP")
             if last is not None:
                 change_abs = last - prev if prev else 0
                 change_pct = (change_abs / prev * 100) if prev else 0
@@ -503,7 +535,7 @@ async def get_moex_data(session_moex, ticker: str, board: str = "TQBR"):
                     f"📉 Мин: {low if low is not None else 'Н/Д'} ₽  |  📈 Макс: {high if high is not None else 'Н/Д'} ₽\n"
                     f"💵 Оборот: {fmt_val(val)}")
             return {"last": last, "prev": prev, "prev_settle": prev_settle, "swap": swap,
-                    "swap_curr": swap_curr, "settle": settle, "lotsize": lotsize}, text
+                    "swap_curr": swap_curr, "settle": settle, "lotsize": lotsize, "minstep": minstep}, text
     except Exception as e:
         print(f"[MOEX ERROR] {e}")
         return None, f"❌ Ошибка: {e}"
@@ -959,7 +991,7 @@ async def main():
             asyncio.create_task(funding_updater(session_max))
             asyncio.create_task(tw_watchdog(session_max))
             if SPOOF_ENABLED: asyncio.create_task(monitor_spoof(session_max))
-            print(f"✅ Бот запущен v3.31 (фандинг: позиция live из моста). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
+            print(f"✅ Бот запущен v3.32 (PnL в пунктах от средней). Торговля DRY/LIVE + kill-switch + watchdog. Live-мигалки: {'ON' if SPOOF_ENABLED else 'OFF'}. MOEX SSL: bypass включён.")
             marker = None
             while True:
                 params = {"timeout": 30}
