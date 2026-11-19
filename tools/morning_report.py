@@ -23,6 +23,7 @@ import json
 import re
 import time
 import subprocess
+import gc
 from collections import defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -199,7 +200,7 @@ def parse_day_audit_summary(audit_out):
     if m_metrics and int(m_metrics.group(5)) > 0:
         grid_line = re.search(r'GRID-IN-TAPE\s*:\s*(\d+)', audit_out)
         if grid_line and int(grid_line.group(1)) > 0:
-            summary.append(">>> ПРИОРИТЕТ: GRID-IN-TAPE > 0 = баг детектора (сетка в ленте есть, не поймали).")
+            summary.append(">>> ПРОРИТЕТ: GRID-IN-TAPE > 0 = баг детектора (сетка в ленте есть, не поймали).")
         else:
             summary.append(">>> FN > 0, но GRID-IN-TAPE = 0 — роботы не видны в ленте (шум/агрегация).")
 
@@ -266,7 +267,7 @@ def main():
     print(f"\n[входы] активных тикеров в settings: {len(active)}")
     print(f"[входы] лента моста   : {bridge_status}")
     print(f"[входы] лента Алор    : {'есть' if tape_alor.exists() else 'НЕТ'}")
-    print(f"[входы] эталон Aniscan: {'есть ('+str(aniscan.stat().st_size)+' байт)' if aniscan.exists() else 'НЕТ (ожидали '+str(waited)+'с)'}")
+    print(f"[входы] эталон Aniscan: {'есть ('+str(aniscan.stat().st_size)+' байт)' if aniscan.exists() else 'НЕТ (ждали '+str(waited)+'с)'}")
     print(f"[входы] эталон TW     : {'есть' if tw_file.exists() else 'НЕТ'}")
 
     missing = []
@@ -299,6 +300,8 @@ def main():
     if tape_alor.exists():
         print("\n[1/6] replay_alor.py (истинные стороны)...")
         rc, replay_out = run_phase("replay", [sys.executable, "research/replay_alor.py", date_str])
+        print("\n[Очистка памяти после replay]...", file=sys.stderr)
+        gc.collect()
         if rc != 0:
             print(f"[!] replay_alor rc={rc}")
     else:
@@ -309,6 +312,8 @@ def main():
     if aniscan.exists():
         print("\n[2/6] day_audit.py (матчинг v7 + классы FN + FP)...")
         rc, audit_out = run_phase("audit", [sys.executable, "research/day_audit.py", date_str])
+        print("\n[Очистка памяти после day_audit]...", file=sys.stderr)
+        gc.collect()
         if rc != 0:
             print(f"[!] day_audit rc={rc}")
     else:
@@ -319,6 +324,8 @@ def main():
     if tw_file.exists():
         print("\n[3/6] clean_tw_robots.py (дедуп эталона TW)...")
         rc, tw_clean_out = run_phase("tw_clean", [sys.executable, "tools/clean_tw_robots.py", date_str])
+        print("\n[Очистка памяти после clean_tw]...", file=sys.stderr)
+        gc.collect()
     else:
         print("\n[3/6] clean_tw_robots ПРОПУЩЕН (нет эталона TW)")
 
@@ -327,6 +334,8 @@ def main():
     if tw_file.exists():
         print("\n[4/6] tw_compare.py (сравнение с TW: метрики TP/FP/FN)...")
         rc, tw_compare_out = run_phase("tw_cmp", [sys.executable, "research/tw_compare.py", date_str])
+        print("\n[Очистка памяти после tw_compare]...", file=sys.stderr)
+        gc.collect()
     else:
         print("\n[4/6] tw_compare ПРОПУЩЕН (нет эталона TW)")
 
@@ -335,6 +344,8 @@ def main():
     if tw_file.exists():
         print("\n[5/6] tw_fn_summary.py (кого мы режем на входе по min_qty)...")
         rc, tw_fn_out = run_phase("tw_fn", [sys.executable, "research/tw_fn_summary.py", date_str])
+        print("\n[Очистка памяти после tw_fn_summary]...", file=sys.stderr)
+        gc.collect()
     else:
         print("\n[5/6] tw_fn_summary ПРОПУЩЕН (нет эталона TW)")
 

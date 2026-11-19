@@ -1,7 +1,7 @@
 """
 Приблуда на python — оффлайн-реплей СТННых сторон (Алор) через боевые
-детекторы. Читает data/live_trades_YYYY-MM-DD.jsonl (скачивается
-tools/alor_download_day.py), кормит детекторы в хронологическом порядке.
+детекторы. Читает data/live_trades_YYYY-MM-DD.jsonl ПОСТРОЧНО (без загрузки
+в память), кормит детекторы в хронологическом порядке.
 История пишется изолированно в data/replay_alor_history.jsonl
 (очищается в начале), боевые файлы НЕ трогает.
 
@@ -16,7 +16,6 @@ import json
 import sys
 import time
 from pathlib import Path
-from collections import defaultdict
 
 BASE = Path(__file__).resolve().parent.parent
 DATA = BASE / "data"
@@ -29,12 +28,11 @@ HIST = BASE / "data" / "replay_alor_history.jsonl"
 
 
 class Progress:
-    """ASCII прогресс-бар. В живой консоли — \r каждые 0.25с.
-    В pipe (morning_report) — полная строка с \\n каждые 10%, чтобы
-    readline() не вис и было видно работу (не молчать 18 минут)."""
+    """ASCII прогресс-бар по байтам файла. В живой консоли — \r каждые 0.25с.
+    В pipe (morning_report) — полная строка с \n каждые 10%."""
 
-    def __init__(self, total, label):
-        self.total = max(int(total), 1)
+    def __init__(self, total_bytes, label):
+        self.total = max(int(total_bytes), 1)
         self.label = label
         self.done = 0
         self.t0 = time.time()
@@ -50,7 +48,7 @@ class Progress:
         eta = (self.total - self.done) / max(speed, 1.0)
         bar = "#" * (pct // 5) + "." * (20 - pct // 5)
         return (f"[replay_alor] {self.label} [{bar}] {pct:3d}% | "
-                f"{self.done}/{self.total} сделок | {speed:.0f}/с | ETA {eta:.0f}с")
+                f"{self.done}/{self.total} байт | {speed/1024/1024:.1f} МБ/с | ETA {eta:.0f}с")
 
     def update(self, n):
         self.done += n
@@ -63,7 +61,6 @@ class Progress:
             sys.stderr.write("\r" + self._line())
             sys.stderr.flush()
         else:
-            # pipe: печатаем каждые 10% (10 строк на весь прогон)
             if pct // 10 != self.last_pct // 10:
                 self.last_pct = pct
                 print(self._line(), file=sys.stderr, flush=True)
@@ -119,12 +116,13 @@ def main():
     date_str = args[0]
     double_hit = None
     no_min_qty = False
+    noisy_qty = False
+    
     if "--double-hit" in args:
         i = args.index("--double-hit")
         double_hit = float(args[i + 1])
     if "--no-min-qty" in args:
         no_min_qty = True
-    noisy_qty = False
     if "--noisy-qty" in args:
         noisy_qty = True
 
@@ -141,19 +139,8 @@ def main():
     if noisy_qty:
         print("[replay_alor] РЕЖИМ A/B: фильтр noisy qty v12 C+B", file=sys.stderr)
 
-    trades = []
-    for f in files:
-        try:
-            with open(f, "r", encoding="utf-8") as fp:
-                for line in fp:
-                    line = line.strip()
-                    if line:
-                        trades.append(json.loads(line))
-        except Exception as e:
-            print(f"  ошибка чтения {f.name}: {e}", file=sys.stderr)
-
-    trades.sort(key=lambda t: t.get("timestamp") or 0)
-    print(f"[replay_alor] сделок всего: {len(trades)}", file=sys.stderr)
+    total_size = sum(f.stat().st_size for f in files)
+    print(f"[replay_alor] общий размер: {total_size / 1024 / 1024:.1f} МБ (потоковое чтение)", file=sys.stderr)
 
     settings = load_settings()
     dets = {}
@@ -179,28 +166,41 @@ def main():
     fed = 0
     skip_sym = 0
     skip_qty = 0
-    p = Progress(len(trades), "feed")
-    for t in trades:
-        p.update(1)
-        sym = t.get("symbol")
-        if sym not in settings:
-            skip_sym += 1
-            continue
-        try:
-            qty = int(float(t.get("qty")))
-            price = float(t.get("price"))
-            ts = int(t.get("timestamp"))
-            side = t.get("side")
-        except (TypeError, ValueError):
-            continue
-        ov = settings.get(sym, {})
-        if not no_min_qty and qty < ov.get("min_qty", 10):
-            skip_qty += 1
-            continue
-        for d in det_for(sym):
-            d.on_trade({"symbol": sym, "qty": qty, "price": price,
-                        "side": side, "timestamp": ts})
-        fed += 1
+    p = Progress(total_size, "feed")
+    
+    for f in files:
+        with open(f, "r", encoding="utf-8") as fp:
+            for line in fp:
+                p.update(len(line))
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    t = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                
+                sym = t.get("symbol")
+                if sym not in settings:
+                    skip_sym += 1
+                    continue
+                try:
+                    qty = int(float(t.get("qty")))
+                    price = float(t.get("price"))
+                    ts = int(t.get("timestamp"))
+                    side = t.get("side")
+                except (TypeError, ValueError):
+                    continue
+                
+                ov = settings.get(sym, {})
+                if not no_min_qty and qty < ov.get("min_qty", 10):
+                    skip_qty += 1
+                    continue
+                
+                for d in det_for(sym):
+                    d.on_trade({"symbol": sym, "qty": qty, "price": price,
+                                "side": side, "timestamp": ts})
+                fed += 1
     p.close()
 
     print(f"[replay_alor] скормлено={fed}, пропущено: sym={skip_sym}, qty={skip_qty}", file=sys.stderr)
