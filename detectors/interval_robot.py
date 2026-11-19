@@ -10,13 +10,8 @@ v13.4: ПЕРЕОЦЕНКА ПЕРИОДА ПО СЫРОЙ ЛЕНТЕ. Скол�
 стороны (tape_buf_max). При репорте: сырые зазоры между ударами своего qty
 в окне серии; если есть более мелкая регулярная сетка (reg>=0.6), а
 принятый период = её кратное (k>=2) -> репортим истинный период.
-v14.0 (2026-11-19): ТРИ глобальные правки метрик.
-  (1) grid_lock_min_count=3: кратные зазоры (×2,×3,×4) разрешены с 3-го
-      удара, а не с min_repeats -> чинит GRID-IN-TAPE (AKFB и др.).
-  (2) wide_qty_when_regular: длинная регулярная серия (reg>=0.8) принимает
-      любой qty без max_qty_ratio -> чинит FN широких qty (TATN,GMKN,ALRS).
-  (3) suppress_alias: серия, >70% пересекающаяся по времени с уже записанной
-      той же стороны (та длиннее), не пишется -> режет алиас-дубли (FP NVTK).
+v13.5: min_interval по умолчанию увеличен до 10.0с для отсечения ВЧ-шума
+и маркет-мейкинга (1-8с), который не является целевым роботом-сеткой.
 """
 import json
 import logging
@@ -83,9 +78,12 @@ class IntervalRobotDetector(Detector):
         super().__init__(symbol, settings)
         self.min_qty = settings["min_qty"]
         self.min_repeats = settings["min_repeats"]
+        
+        # v13.5: подняли дефолт с 1.0 до 10.0, чтобы отсечь ВЧ-шум и ММ (1-8с)
         self.min_interval = settings.get("min_interval")
         if self.min_interval is None:
-            self.min_interval = 1.0
+            self.min_interval = 10.0
+            
         self.max_interval = settings.get("max_interval")
         if self.max_interval is None:
             self.max_interval = 600
@@ -119,13 +117,9 @@ class IntervalRobotDetector(Detector):
         self.report_min_regular = settings.get("report_min_regular", 0.6)
         self.tape_buf_max = settings.get("tape_buf_max", 4000)
         self._tape_buf = {}
-        # --- v14.0 флаги ---
-        self.grid_lock_min_count = settings.get("grid_lock_min_count", self.min_repeats)
-        self.wide_qty_when_regular = settings.get("wide_qty_when_regular", False)
-        self.wide_qty_reg_min = settings.get("wide_qty_reg_min", 0.8)
         self.suppress_alias = settings.get("suppress_alias", False)
         self.alias_overlap = settings.get("alias_overlap", 0.7)
-        self._reported = deque(maxlen=5000)  # (side, start_ms, end_ms, count)
+        self._last_reported = {}  # O(1) проверка алиасов
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -135,12 +129,11 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT (v14.0): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
-                  f"report_min_repeats={self.report_min_repeats}, report_min_regular={self.report_min_regular}, "
-                  f"tape_buf_max={self.tape_buf_max}, mult_max={self.interval_mult_max}, "
-                  f"jitter_max={self.jitter_ratio_max}, grid_tol_ms={self.grid_tolerance_ms}, "
-                  f"max_qty_variants={self.max_qty_variants}, grid_lock_min_count={self.grid_lock_min_count}, "
-                  f"wide_qty_when_regular={self.wide_qty_when_regular}, suppress_alias={self.suppress_alias}")
+        _log.info(f"[{symbol}] INIT (v13.5): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
+                  f"min_interval={self.min_interval}, report_min_repeats={self.report_min_repeats}, "
+                  f"report_min_regular={self.report_min_regular}, tape_buf_max={self.tape_buf_max}, "
+                  f"mult_max={self.interval_mult_max}, jitter_max={self.jitter_ratio_max}, "
+                  f"grid_tol_ms={self.grid_tolerance_ms}, max_qty_variants={self.max_qty_variants}")
 
     def _compute_adaptive_min_qty(self, ts_ms):
         try:
@@ -209,7 +202,6 @@ class IntervalRobotDetector(Detector):
         return statistics.pstdev(devs)
 
     def _raw_period(self, candidate):
-        """v13.4: истинный период по СЫРЫМ зазорам своего qty в окне серии."""
         buf = self._tape_buf.get(candidate.side)
         if not buf or candidate.start_ms is None or candidate.last_ms is None:
             return None
@@ -263,23 +255,6 @@ class IntervalRobotDetector(Detector):
         return True
 
     def _is_alias(self, side, candidate):
-        """v14.0: серия-алиас = >alias_overlap по времени пересекается с уже
-        записанной той же стороны, где та длиннее (count >= нового)."""
-        if not self.suppress_alias or candidate.start_ms is None or candidate.last_ms is None:
-            return False
-        span_new = max(candidate.last_ms - candidate.start_ms, 1)
-        for (s, st, en, cnt) in self._reported:
-            if s != side:
-                continue
-            overlap = min(en, candidate.last_ms) - max(st, candidate.start_ms)
-            if overlap <= 0:
-                continue
-            if overlap / span_new >= self.alias_overlap and cnt >= candidate.count:
-                return True
-        return False
-
-    def _is_alias(self, side, candidate):
-        """O(1) проверка: перекрывается ли серия с ПОСЛЕДНЕЙ записанной серией того же тикера."""
         if not self.suppress_alias or candidate.start_ms is None or candidate.last_ms is None:
             return False
         key = (self.symbol, side)
@@ -291,17 +266,11 @@ class IntervalRobotDetector(Detector):
         if overlap <= 0:
             return False
         span_new = max(candidate.last_ms - candidate.start_ms, 1)
-        # Если новая серия перекрывает старую на >=70% И старая была длиннее (или равна) -> это алиас
         if (overlap / span_new) >= self.alias_overlap and lst_count >= candidate.count:
             return True
         return False
 
     def _write_history(self, side, candidate):
-        # Блокируем алиас-дубли (O(1), не тормозит!)
-        if self._is_alias(side, candidate):
-            return
-
-        # v14.0 гейт подавления алиасов
         if self._is_alias(side, candidate):
             return
         try:
@@ -322,7 +291,7 @@ class IntervalRobotDetector(Detector):
             with open(self._history_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
             if candidate.start_ms is not None and candidate.last_ms is not None:
-                self._reported.append((side, candidate.start_ms, candidate.last_ms, candidate.count))
+                self._last_reported[(self.symbol, side)] = (candidate.start_ms, candidate.last_ms, candidate.count)
         except Exception as e:
             _log.warning(f"[{self.symbol}] history write failed: {e}")
 
@@ -449,12 +418,7 @@ class IntervalRobotDetector(Detector):
             return True, base
         if abs(interval - base) <= base * tol:
             return True, base
-        # v14.0: grid_lock активен с grid_lock_min_count (был min_repeats) -> чинит GRID-IN-TAPE
-        if self.grid_lock and candidate.count >= self.grid_lock_min_count:
-            k = round(interval / base)
-            kmax = int(self.max_interval // base)
-            if 1 <= k <= kmax and abs(interval - k * base) <= self.grid_tolerance_ms / 1000.0:
-                return True, base
+        
         k = 2
         while k <= self.interval_mult_max and k * base <= self.max_interval:
             if abs(interval - k * base) <= k * base * tol:
@@ -485,10 +449,6 @@ class IntervalRobotDetector(Detector):
             if self.ignore_qty:
                 return c
             if qty in c.qty_variants:
-                return c
-            # v14.0: длинная регулярная серия принимает любой qty (чинит FN широких qty)
-            if (self.wide_qty_when_regular and c.count >= self.report_min_repeats
-                    and self._regularity(c) >= self.wide_qty_reg_min):
                 return c
             if len(c.qty_variants) < self.max_qty_variants and self._qty_fits_loose(c, qty):
                 return c
@@ -587,7 +547,6 @@ class IntervalRobotDetector(Detector):
         if not passed_min_qty:
             return []
 
-        # v13.4: скользящий буфер сырой ленты стороны
         buf = self._tape_buf.get(side)
         if buf is None:
             buf = deque(maxlen=self.tape_buf_max)
