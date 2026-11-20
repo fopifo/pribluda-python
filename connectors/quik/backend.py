@@ -4,6 +4,7 @@ v8 (2026-11-17): основной источник ленты — мост CScal
 Алор — только для вечерних прогонов (replay_alor.py) и сверки.
 QUIK-CSV ветка удалена (QUIK не используется с 2026-11-08).
 Архитектура: мост пишет JSONL → backend читает в режиме tail → кормит детекторы.
+v9 (2026-11-19): добавлен онлайн-агрегатор роботов с confidence scoring.
 """
 import sys
 import time
@@ -22,6 +23,7 @@ from core.state import SharedState
 from core.config import get_detector_configs
 from core.config import USE_STREAM_GRID, STREAM_MIN_REPEATS, STREAM_TOL
 from core.ticker_settings import load_settings
+from core.robot_aggregator import RobotAggregator
 from detectors.interval_robot import IntervalRobotDetector
 from modules.stream_grid import StreamGrid
 from modules.arbitrage.spring_monitor import SpringMonitor, load_spring_settings, fetch_imoex_price
@@ -156,6 +158,10 @@ class QuikBackend:
         self._reader_t0 = None
         self._reader_count = 0
 
+        # Онлайн-агрегатор роботов с confidence scoring
+        self.aggregator = RobotAggregator()
+        _log.info("[aggregator] online robot aggregator initialized")
+
         # SpringMonitor
         self.spring_settings = load_spring_settings()
         self.spring_monitors = {}
@@ -261,12 +267,22 @@ class QuikBackend:
         while True:
             now = datetime.now().timestamp()
             self._update_batch_flash(now)
-            rows = []
+            
+            # Собираем snapshot от всех детекторов
+            detector_snapshots = []
             for dets in self.dets.values():
                 for d in dets:
                     d.check_overdue(now)
-                    rows.extend(d.get_active_snapshot(now))
-            self.shared.rows = rows
+                    rows = d.get_active_snapshot(now)
+                    detector_snapshots.extend(rows)
+            
+            # Передаём snapshot'ы в агрегатор для обновления confidence
+            for snap in detector_snapshots:
+                self.aggregator.update_from_snapshot(snap, now)
+            
+            # Получаем отсортированный список роботов с confidence
+            self.shared.rows = self.aggregator.get_all(min_confidence=0.5)
+            
             if self.use_stream_grid:
                 now_ms = now * 1000
                 with self._grid_lock:
