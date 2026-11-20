@@ -12,6 +12,8 @@ v13.4: ПЕРЕОЦЕНКА ПЕРИОДА ПО СЫРОЙ ЛЕНТЕ. Скол�
 принятый период = её кратное (k>=2) -> репортим истинный период.
 v13.5: min_interval по умолчанию увеличен до 10.0с для отсечения ВЧ-шума
 и маркет-мейкинга (1-8с), который не является целевым роботом-сеткой.
+v13.6 (2026-11-19): добавлены поля regularity/end_ts/end_ms в snapshot
+для онлайн-агрегатора confidence.
 """
 import json
 import logging
@@ -129,7 +131,7 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT (v13.5): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
+        _log.info(f"[{symbol}] INIT (v13.6): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
                   f"min_interval={self.min_interval}, report_min_repeats={self.report_min_repeats}, "
                   f"report_min_regular={self.report_min_regular}, tape_buf_max={self.tape_buf_max}, "
                   f"mult_max={self.interval_mult_max}, jitter_max={self.jitter_ratio_max}, "
@@ -643,10 +645,14 @@ class IntervalRobotDetector(Detector):
                 price_shift = None
                 if c.first_price is not None and c.last_price is not None:
                     price_shift = c.last_price - c.first_price
+                # v13.6: поля для агрегатора (regularity, end_ts, end_ms)
+                regularity = self._regularity(c)
                 rows.append({"symbol": self.symbol, "preset": self.preset_name, "side": side,
                              "qty_variants": sorted(c.qty_variants), "interval": base,
                              "repeats": c.count, "seconds_to_next": seconds_to_next,
-                             "start_ts": c.start_ts, "jitter_ms": jitter_ms,
+                             "start_ts": c.start_ts, "end_ts": c.last_ts,
+                             "end_ms": c.last_ms, "regularity": regularity,
+                             "jitter_ms": jitter_ms,
                              "price_first": c.first_price, "price_last": c.last_price,
                              "price_shift": price_shift, "same_price_ratio": same_price_ratio,
                              "sum_qty": c.sum_qty, "metro": self._metro(c)})
