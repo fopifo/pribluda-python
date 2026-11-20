@@ -186,7 +186,7 @@
   },
   "FLOT": {
     "active": true,
-    "min_qty": 14,
+    "min_qty": 12,
     "min_interval": 10.0,
     "max_interval": 600.0,
     "interval_tolerance": 0.05,
@@ -600,7 +600,7 @@
   },
   "SIBN": {
     "active": true,
-    "min_qty": 50,
+    "min_qty": 28,
     "min_interval": 10.0,
     "max_interval": 600.0,
     "interval_tolerance": 0.05,
@@ -681,7 +681,7 @@
   },
   "TRMK": {
     "active": true,
-    "min_qty": 15,
+    "min_qty": 13,
     "min_interval": 10.0,
     "max_interval": 600.0,
     "interval_tolerance": 0.05,
