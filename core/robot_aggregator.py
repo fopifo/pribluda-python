@@ -17,18 +17,19 @@ class RobotAggregator:
     def update_from_snapshot(self, snapshot: dict, now_ts: float):
         """
         Обновляет агрегатор из snapshot детектора.
-        snapshot содержит: symbol, side, interval, qty_variants, repeats, start_ts, end_ts, regularity
+        snapshot содержит: symbol, side, interval или interval_avg, qty_variants, repeats, start_ts, end_ts, regularity
         """
         symbol = snapshot.get("symbol")
         side = snapshot.get("side")
-        interval = snapshot.get("interval", 0.0)
+        # Поддержка как interval (из get_active_snapshot), так и interval_avg (из истории)
+        interval = snapshot.get("interval_avg", snapshot.get("interval", 0.0))
         qty_variants = snapshot.get("qty_variants", [])
         repeats = snapshot.get("repeats", 0)
         start_ts = snapshot.get("start_ts", now_ts)
         end_ts = snapshot.get("end_ts", now_ts)
         regularity = snapshot.get("regularity", 0.5)
 
-        if not symbol or not side or interval <= 0:
+        if not symbol or not side or not interval or interval <= 0:
             return
 
         # Округляем интервал до 5 секунд для группировки
@@ -40,7 +41,7 @@ class RobotAggregator:
                 "symbol": symbol,
                 "side": side,
                 "interval": interval,
-                "qty_variants": qty_variants,
+                "qty_variants": list(qty_variants),
                 "start_ts": start_ts,
                 "end_ts": end_ts,
                 "hits": repeats,
@@ -50,22 +51,17 @@ class RobotAggregator:
             }
         else:
             state = self.entities[key]
-            # Обновляем существующую сущность
             state["end_ts"] = max(state["end_ts"], end_ts)
-            state["hits"] = max(state["hits"], repeats)  # берём максимум, т.к. snapshot может быть накопительным
+            state["hits"] = max(state["hits"], repeats)
             state["regularity"] = max(state["regularity"], regularity)
             state["last_seen"] = max(state["last_seen"], end_ts)
             
-            # Добавляем новые qty_variants
             for q in qty_variants:
                 if q not in state["qty_variants"]:
                     state["qty_variants"].append(q)
             state["qty_stability"] = self._calc_qty_stability(state["qty_variants"])
 
     def _calc_qty_stability(self, qty_variants: list) -> float:
-        """
-        Стабильность qty: 1.0 = все одинаковые, 0.0 = огромный разброс.
-        """
         if not qty_variants:
             return 0.0
         if len(qty_variants) == 1:
@@ -84,22 +80,12 @@ class RobotAggregator:
             return 0.3
 
     def _calc_confidence(self, state: dict) -> float:
-        """
-        Формула уверенности:
-        - regularity (0.3) — строгость интервала
-        - qty_stability (0.3) — стабильность объёмов
-        - hits (0.2) — количество ударов (логарифмически)
-        - duration (0.2) — время жизни
-        """
         regularity = state.get("regularity", 0.0)
         qty_stability = state.get("qty_stability", 0.0)
         hits = state.get("hits", 0)
         duration = state.get("end_ts", 0) - state.get("start_ts", 0)
 
-        # Логарифмическая шкала для hits (8 ударов = 0.5, 30 = 1.0)
         hits_score = min(1.0, math.log(max(hits, 1)) / math.log(30))
-
-        # Логарифмическая шкала для duration (60 сек = 0.3, 600 сек = 1.0)
         duration_score = min(1.0, math.log(max(duration, 1)) / math.log(600))
 
         confidence = (
@@ -112,13 +98,12 @@ class RobotAggregator:
         return confidence
 
     def _serialize(self, state: dict) -> dict:
-        """Сериализует состояние для GUI."""
         duration_min = (state["end_ts"] - state["start_ts"]) / 60.0
         return {
             "symbol": state["symbol"],
             "side": state["side"],
             "interval": round(state["interval"], 1),
-            "qty_variants": state["qty_variants"][:5],  # топ-5
+            "qty_variants": state["qty_variants"][:5],
             "hits": state["hits"],
             "duration_min": round(duration_min, 1),
             "regularity": round(state["regularity"], 2),
@@ -128,7 +113,6 @@ class RobotAggregator:
         }
 
     def get_all(self, min_confidence: float = 0.5) -> list:
-        """Возвращает все сущности с confidence >= min_confidence, отсортированные по confidence."""
         results = []
         for state in self.entities.values():
             confidence = self._calc_confidence(state)

@@ -20,3 +20,4 @@ output/morning_report_*.txt
 tools/apply_*.py
 tools/disable_*.py
 tools/rollback_*.py
+dump_output.md

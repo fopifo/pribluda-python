@@ -14,6 +14,7 @@ v13.5: min_interval по умолчанию увеличен до 10.0с для 
 и маркет-мейкинга (1-8с), который не является целевым роботом-сеткой.
 v13.6 (2026-11-19): добавлены поля regularity/end_ts/end_ms в snapshot
 для онлайн-агрегатора confidence.
+v13.7: добавлен regularity в _write_history для оффлайн-валидации.
 """
 import json
 import logging
@@ -81,7 +82,6 @@ class IntervalRobotDetector(Detector):
         self.min_qty = settings["min_qty"]
         self.min_repeats = settings["min_repeats"]
         
-        # v13.5: подняли дефолт с 1.0 до 10.0, чтобы отсечь ВЧ-шум и ММ (1-8с)
         self.min_interval = settings.get("min_interval")
         if self.min_interval is None:
             self.min_interval = 10.0
@@ -121,7 +121,7 @@ class IntervalRobotDetector(Detector):
         self._tape_buf = {}
         self.suppress_alias = settings.get("suppress_alias", False)
         self.alias_overlap = settings.get("alias_overlap", 0.7)
-        self._last_reported = {}  # O(1) проверка алиасов
+        self._last_reported = {}
         preset_name = settings.get("preset_name")
         self.preset_name = preset_name or ""
         if preset_name:
@@ -131,7 +131,7 @@ class IntervalRobotDetector(Detector):
         self._confirms = []
         self._history_path = Path(__file__).resolve().parent.parent / "data" / "robots_history.jsonl"
         self._history_path.parent.mkdir(exist_ok=True)
-        _log.info(f"[{symbol}] INIT (v13.6): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
+        _log.info(f"[{symbol}] INIT (v13.7): min_qty={self.min_qty}, min_repeats={self.min_repeats}, "
                   f"min_interval={self.min_interval}, report_min_repeats={self.report_min_repeats}, "
                   f"report_min_regular={self.report_min_regular}, tape_buf_max={self.tape_buf_max}, "
                   f"mult_max={self.interval_mult_max}, jitter_max={self.jitter_ratio_max}, "
@@ -286,6 +286,7 @@ class IntervalRobotDetector(Detector):
                 "start_ts": candidate.start_ts, "end_ts": candidate.last_ts,
                 "interval_ms": round((candidate.last_ms - candidate.start_ms) / max(candidate.count - 1, 1), 1),
                 "start_ms": candidate.start_ms, "end_ms": candidate.last_ms,
+                "regularity": self._regularity(candidate),
                 "jitter_ms": round(jitter, 1) if jitter is not None else None,
                 "price_first": candidate.first_price, "price_last": candidate.last_price,
                 "preset": self.preset_name,
@@ -645,7 +646,6 @@ class IntervalRobotDetector(Detector):
                 price_shift = None
                 if c.first_price is not None and c.last_price is not None:
                     price_shift = c.last_price - c.first_price
-                # v13.6: поля для агрегатора (regularity, end_ts, end_ms)
                 regularity = self._regularity(c)
                 rows.append({"symbol": self.symbol, "preset": self.preset_name, "side": side,
                              "qty_variants": sorted(c.qty_variants), "interval": base,
