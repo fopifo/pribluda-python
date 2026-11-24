@@ -5,15 +5,16 @@ dumps/
 logs/
 __pycache__/
 *.pyc
-data/
-output/
-
+*.bak
 .vscode/
+runner_log.txt
+runner_out.txt
+result.txt
 
 # вложенный клон cscalp-sdk — в родительском git не нужен
 PbSdkConsole_Project/
 
-# рхив мёртвого кода (не коммитим)
+# архив мёртвого кода (не коммитим)
 _archive/
 output/morning_report_*.txt
 
