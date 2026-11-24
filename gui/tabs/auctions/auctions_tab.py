@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from connectors.quik.quotes_reader import QuotesReader
+from connectors.bridge.quotes_reader import QuotesReader
 from core import auction_settings as cfg_mod
 from gui import theme
 from gui.tabs.auctions.auction_manager import AuctionManagerDialog

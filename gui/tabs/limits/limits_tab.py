@@ -23,8 +23,8 @@ from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout,
                                QLabel, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
-from connectors.quik.limits_reader import LimitsReader
-from connectors.quik.quotes_reader import QuotesReader
+from connectors.bridge.limits_reader import LimitsReader
+from connectors.bridge.quotes_reader import QuotesReader
 from core.sound_manager import SoundManager
 from gui import theme
 

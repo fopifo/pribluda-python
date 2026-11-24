@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox,
                                QTableWidget, QTableWidgetItem, QVBoxLayout,
                                QWidget)
 
-from connectors.quik.quotes_reader import QuotesReader
+from connectors.bridge.quotes_reader import QuotesReader
 from gui import theme
 from modules.arbitrage import pairs_config
 from modules.arbitrage.live_spread import PairTracker, compute_spread

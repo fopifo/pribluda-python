@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QComboBox, QHBoxLayout, QLabel, QLineEdit,
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 from matplotlib.figure import Figure
 
-from connectors.quik.quotes_reader import QuotesReader
+from connectors.bridge.quotes_reader import QuotesReader
 from gui import theme
 from modules.arbitrage import pairs_config
 from modules.arbitrage.live_spread import compute_spread
