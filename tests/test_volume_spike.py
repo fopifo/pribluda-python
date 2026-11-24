@@ -1,4 +1,4 @@
-"""
+﻿"""
 Модульные тесты для детектора VolumeSpikeDetector.
 """
 import pytest

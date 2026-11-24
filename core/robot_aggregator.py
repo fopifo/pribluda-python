@@ -1,4 +1,4 @@
-"""
+﻿"""
 core/robot_aggregator.py — онлайн-агрегатор роботов (real-time confidence).
 Считает confidence на основе regularity/qty_stability/hits в реальном времени.
 Цель: увидеть робота через 2-3 минуты (8-15 ударов), а не ждать 30 минут.

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — читалка планок из data/quik_limits.csv (lua v3).
 Планки ставит биржа: PRICEMIN/PRICEMAX из Quik. Ничего не меняет, только чтение.
 Архитектура: connectors/quik/.

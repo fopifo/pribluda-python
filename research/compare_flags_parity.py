@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — прямая сверка гипотезы flags%2 с истинной стороной Алора.
 Использует данные зонда probe_datasource_ticks.lua (data/probe_datasource.csv)
 и сравнивает flags_parity с эталоном Алора за тот же период.

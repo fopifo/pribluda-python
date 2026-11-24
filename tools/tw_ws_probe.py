@@ -1,4 +1,4 @@
-"""
+﻿"""
 tools/tw_ws_probe.py — зонд WebSocket T-Widgets (mindstocks).
 Формат исходящих подтверждён из браузера (F12->WS->Messages, стрелки вверх):
     ["5","info"], ["5","futoi"], ["5","imoex"], ["5","info:<uid>"]

@@ -1,4 +1,4 @@
-"""
+﻿"""
 day_audit.py — вечерний аудит дня.
 Метрики v7: глобальный жадный матчинг (qty+interval+time-tiebreak),
 primary-qty эвристика (any вместо all для qty_variants) чинит GRID-IN-TAPE.

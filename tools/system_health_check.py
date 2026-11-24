@@ -1,4 +1,4 @@
-"""
+﻿"""
 tools/system_health_check.py — проверка работоспособности компонентов start_all.bat.
 """
 import json

@@ -1,4 +1,4 @@
-"""
+﻿"""
 ai_solution_v1/combined.py
 ==========================
 Связыватель: берёт сигналы из ленты (IntervalDetector) и события из стакана (OrderbookDetector)

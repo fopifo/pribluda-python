@@ -1,4 +1,4 @@
-"""
+﻿"""
 research/validate_aggregator.py — быстрая оффлайн-валидация агрегатора.
 Читает готовые эпизоды из replay_alor_history.jsonl, прогоняет через 
 RobotAggregator и сравнивает с TW-эталоном. Время выполнения: ~2-5 сек.

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — метрики StreamGrid против aniscan за дату.
 Гонит сырую ленту data/<T>_<дата>.json хронологически через StreamGrid и
 считает ОБЕ цифры: Recall_strict (совпало/aniscan) и Precision_strict

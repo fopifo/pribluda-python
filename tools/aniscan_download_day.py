@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — загрузка истории роботов aniscan.ru (второй эталон).
 Листает API robot-histories (сортировка createDttm desc) и собирает все
 события с createDttm >= ГРАНИЦА в data/aniscan_history.jsonl

@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — загрузка/сохранение арбитражных связок (arb_pairs.json).
 Схема связки: symbol_a, symbol_b, mode (absolute_rub|ratio_pct),
 threshold, half_life_sec; symbol_c — опционально (трёхногие, v2).

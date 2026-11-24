@@ -1,4 +1,4 @@
-"""
+﻿"""
 Проверка WebSocket-ленты Алора:
   1. Получает access-токен из ALOR_REFRESH_TOKEN (refresh flow)
   2. Подписывается на N тикеров

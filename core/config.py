@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — конфигурация детекторов.
 Дефолты: interval_tolerance=0.05, max_qty_ratio=1.10, min_display_repeats=3.
 Н-013: short_interval_threshold=20.0 (адаптивный допуск 12% для 1-19с).

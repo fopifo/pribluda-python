@@ -1,4 +1,4 @@
-"""
+﻿"""
 research/replay_periodicity.py — аддитивный прогон НОВОГО PeriodicityDetector.
 Читает ту же ленту Алора потоково, пишет в data/replay_periodicity_history.jsonl.
 НЕ трогает replay_alor / interval_robot / боевые файлы.

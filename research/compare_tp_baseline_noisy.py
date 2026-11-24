@@ -1,4 +1,4 @@
-"""
+﻿"""
 Сравнение TP baseline vs noisy за одну дату.
 Прогоняет replay_alor дважды (baseline/noisy), сохраняет TP в jsonl,
 находит потерянные TP, выводит детали.

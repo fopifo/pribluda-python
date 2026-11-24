@@ -1,4 +1,4 @@
-"""
+﻿"""
 WebSocket-клиент Алор OpenAPI для стриминга ленты обезличенных сделок.
 Заменяет связку QUIK + export_trades.lua + CSV reader.
 

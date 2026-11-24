@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — live polling aniscan.ru (роботы в реальном времени).
 Polls API каждые POLL_SEC секунд, пишет НОВЫЕ INSERT/DELETE события
 в data/aniscan_live.jsonl (APPEND, дедуп по (robot.id, createDttm))

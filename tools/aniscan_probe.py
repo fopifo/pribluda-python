@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — зонд API aniscan.ru: качает образец robot-histories
 в data/aniscan_sample.json и печатает структуру JSON.
 Секреты — из .env (ANISCAN_COOKIES, ANISCAN_XSRF). Только читает/качает.

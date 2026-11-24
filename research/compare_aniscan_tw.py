@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — перекрёстная сверка двух эталонов за дату:
 aniscan.ru (data/aniscan_history.jsonl) против T-Widgets
 (data/tw_robots_YYYY-MM-DD.jsonl).

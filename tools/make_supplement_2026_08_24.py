@@ -1,4 +1,4 @@
-"""Разовая генерация research/competitor_supplement_2026-08-24.jsonl
+﻿"""Разовая генерация research/competitor_supplement_2026-08-24.jsonl
 из ручного разбора скринов конкурента (180 шт, 09:52-16:00)."""
 import json
 from pathlib import Path

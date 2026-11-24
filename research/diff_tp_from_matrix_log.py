@@ -1,4 +1,4 @@
-"""
+﻿"""
 Diff TP baseline vs noisy по готовому логу матрицы.
 е требует новых прогонов — читает output/ab_matrix_*.log.
 """

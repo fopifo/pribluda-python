@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — вкладка "Арбитраж".
 Связки из arb_pairs.json (modules/arbitrage/pairs_config), живые цены из
 data/quik_quotes.csv (lua v3). Спред и EMA-база — live_spread.

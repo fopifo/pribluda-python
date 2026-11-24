@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — планки (min/max возможная цена) по АКЦИЯМ TQBR.
 Планки отдаёт АЛОР — MOEX ISS для акций TQBR их не отдаёт (подтверждено
 зондом tools/probe_price_limits2.py). В Алоре это поля priceMax / priceMin

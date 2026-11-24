@@ -1,4 +1,4 @@
-"""
+﻿"""
 tools/positions_pnl.py — сверка PnL по позициям с терминалом/ЛК.
 Читает data/bridge_state.json (avg_entry/pos_price, position, realized, best_bid/ask),
 берёт MINSTEP и LOTSIZE из ISS MOEX, считает:

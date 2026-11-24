@@ -1,4 +1,4 @@
-"""
+﻿"""
 Закрытие торгового дня: конвертация накопителя стрима
 data/live_trades_YYYY-MM-DD.jsonl в data/{SYMBOL}_YYYY-MM-DD.json
 (формат Алора, совместим с alor_download_day и v11 adaptive_qty).

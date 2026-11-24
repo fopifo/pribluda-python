@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — массовая замена interval_tolerance в ticker_settings.json.
 Использование:
     python tools/set_tolerance.py 0.05 0.08   # смягчить (шаг 5 плана)

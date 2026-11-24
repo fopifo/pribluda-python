@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — сверка min_qty в ticker_settings.json с реальными
 объёмами роботов конкурента (data/competitor_history.jsonl).
 

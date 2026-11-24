@@ -1,4 +1,4 @@
-"""
+﻿"""
 Приблуда на python — анализ результатов зонда probe_datasource_ticks.lua.
 Считает процент расхождений сторон между OnAllTrade и CreateDataSource,
 проверяет гипотезу flags % 2.
