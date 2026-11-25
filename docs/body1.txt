@@ -1,0 +1,12 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="UTF-8" />
+        <meta http-equiv="refresh" content="0;url='https://github.com/cscalp-sdk/cscalp-sdk/blob/main/AGENTS.md'" />
+
+        <title>Redirecting to https://github.com/cscalp-sdk/cscalp-sdk/blob/main/AGENTS.md</title>
+    </head>
+    <body>
+        Redirecting to <a href="https://github.com/cscalp-sdk/cscalp-sdk/blob/main/AGENTS.md">https://github.com/cscalp-sdk/cscalp-sdk/blob/main/AGENTS.md</a>.
+    </body>
+</html>
