@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # Реплей агрегатора: прогон сохранённой ленты pbsdk_trades_YYYY-MM-DD.jsonl
 # через ту же логику серий, что и в entities_aggregator, офлайн.
-# Старт-фильтр отключён (лента историческая), _recv_ms заменён меткой сделки.
+# Старт-фильтр отключсн (лента историческая), _recv_ms заменён меткой сделки.
 # Пишет: data/replay_entities_YYYY-MM-DD.jsonl и печатает сводку.
 # Запуск: py entities_replay.py [YYYY-MM-DD]
 import sys, os, json, time, collections
@@ -22,7 +22,7 @@ class ReplayAgg(EA.Aggregator):
             rec["_recv_ms"] = ts    # локальные часы заменяем меткой сделки
         super().process(rec)
     def finalize(self, s):
-        if len(s.lots) >= EA.MIN_N:
+        if len(s.lots) >= EA.MIN_N and not self.blocked(s):
             self.closed.append(s.snapshot(s.ll))
 
 def run(date):
