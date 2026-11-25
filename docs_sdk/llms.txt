@@ -1,0 +1,24 @@
+# Привод Бондаря .NET SDK (CScalp SDK)
+> Официальный .NET 7 SDK для разработки алгоритмических торговых роботов через инфраструктуру Привода Бондаря (версия 1.0).
+
+## Основные сведения
+- Платформа: C# 11, .NET 7.0 (`net7.0-windows`, `x64`)
+- Пакет ядра: `PbSdk.nupkg` (подключается из локальной папки `nupkg/` через `nuget.config`)
+- Пространства имен: `PbSdk`, `ICore`
+- Лицензия рантайма: `%APPDATA%\PbSdk\cs.license`
+
+## Эталонный пример кода (PbSdkConsole)
+- [PbSdkConsole/Program.cs](PbSdkConsole/Program.cs): Инициализация SDK, подключение слота ПБ 1.0, поиск тикера `TQBR.GAZP`, создание слоя `ILayer` и боевой пример `RunLayerTradingSample_1` (выставление лимитной заявки, стоп-лосса и отмена ордеров)
+- [PbSdkConsole/DispatcherSlotEventsReceiver.cs](PbSdkConsole/DispatcherSlotEventsReceiver.cs): Обработка событий слота (`IDispatcherSlotEventsReceiver`), загрузка справочника контрактов и сборка финансовой информации (`OnFinDataUpdate` по схеме `FinDataUpdateSchema`)
+- [PbSdkConsole/LayerEventsReceiver.cs](PbSdkConsole/LayerEventsReceiver.cs): Обработка событий инструмента (`ILayerEventsReceiver`), потокобезопасное чтение стакана (`OnStockUpdate`), тиков (`OnTick`), позиций (`OnPositionUpdate`) и заявок
+
+## Документация для разработчиков и ИИ
+- [README.md](README.md): Быстрый старт и запуск примера за 5 минут
+- [AGENTS.md](AGENTS.md): Строгие архитектурные инварианты и сигнатуры методов для ИИ-ассистентов
+- [docs/01_getting_started.md](docs/01_getting_started.md): Установка, настройка `cs.license`, `nuget.config` и первое подключение к проп-серверу ПБ 1.0
+- [docs/02_lifecycle.md](docs/02_lifecycle.md): Жизненный цикл `IPbSdkManager`, `IDispatcherSlot`, создание слоев `ILayer` и проверка готовности к торгам
+- [docs/03_event_handling.md](docs/03_event_handling.md): Подписка на события счета, стакана котировок, ленты сделок, позиций и ордеров
+- [docs/04_api_reference.md](docs/04_api_reference.md): Справочник публичных интерфейсов, свойств портфеля и методов торговли (`SendOrder`, `SendStopOrder`, `CancelOrder`)
+- [docs/05_troubleshooting.md](docs/05_troubleshooting.md): Диагностика ошибок авторизации, репликаций, стакана и отклоненных заявок
+- [LICENSE](LICENSE): Лицензии (бинарные файлы SDK: использование без изменения кода; документация и примеры: MIT)
+- [PRIVACY.md](PRIVACY.md): Какие данные передает SDK

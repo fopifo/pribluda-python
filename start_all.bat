@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 chcp 65001 >nul
 set "PROJECT_DIR=C:\Users\Public\MI_CODES\dpNEW"
 
@@ -14,7 +14,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo [3/6] PbSdk Bridge
-start "PbSdk Bridge" cmd /k "cd /d C:\Users\Public\MI_CODES\Qwen_coder\PbSdkConsole_Project && dotnet run --project PbSdkConsole"
+start "PbSdk Bridge" cmd /k "cd /d %PROJECT_DIR%\PbSdkConsole_Project && dotnet run --project PbSdkConsole"
 timeout /t 8 /nobreak >nul
 
 echo [4/6] Snapshot Positions
@@ -30,3 +30,6 @@ start "MAX bot" cmd /k "cd /d %PROJECT_DIR% && python bot.py"
 
 echo.
 echo All 6 started. Data: %PROJECT_DIR%\data\
+cd /d C:\Users\Public\MI_CODES\dpNEW
+start "" /min pyw tools\entities_aggregator.py
+start "" /min pyw tools\overlay.py
